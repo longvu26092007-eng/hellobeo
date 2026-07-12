@@ -33,21 +33,21 @@ getgenv().Settings = getgenv().Settings or {
     };
     ["Focus Melee"] = "Sharkman Karate";
     -- FOCUS WHEN DO SHARK V3
-    ["Races"] = { -- bật race nào thì script sẽ check V3 race đó, đủ hết sẽ ghi Completed-RACES
-        ["Human"] = true;
+    ["Races"] = { -- bật race nào thì script sẽ check V3 race đó, đủ hết sẽ đổi folder
+        ["Human"] = false;
         ["Mink"] = false;      
-        ["Fishman"] = false;   
+        ["Fishman"] = true;   
         ["Skypiea"] = false;   
         ["Cyborg"] = false;
         ["Ghoul"] = false;
     };
     ["Max Chests"] = 50;
-    -- if you collected 50 chests, hop server
+    -- only for normal chest/beli farming, NOT for Mink V3
+    ["Mink V3 Chests"] = 30;
+    -- Mink/Rabbit V3 quest needs 30 chests
     ["Skip Chest Delay"] = 1;
     -- (0.4 - 2)
     ["Black Screen"] = false;
-    ["Reset After Collect Chests"] = 10;
-    -- if you collected 10 chests, it will reset for safe (anti kick)
     ["Katakuri Progress"] = 300;
     -- 300 monster left
     ["Fragments"] = 5000;
@@ -57,12 +57,6 @@ getgenv().Settings = getgenv().Settings or {
     ["Flower Tween Speed"] = 325;
     ["Flower Touch Radius"] = 8;
 }
--- Đổi folder sau khi Completed-RACES.
-getgenv().ChangeFolderOnCompleted = getgenv().ChangeFolderOnCompleted ~= false
-getgenv().id1 = getgenv().id1 or "........."
-getgenv().id2 = getgenv().id2 or "........."
--- id3 optional, không set default.
--- Nếu không dùng thì để getgenv().id3 = nil ở config ngoài.
 local SeaMelee = {
     [2] = {"Dragon Claw", "Superhuman", "Death Step", "Sharkman Karate"};
     [3] = {"Electric Claw", "Dragon Talon", "Godhuman", "Sanguine Art"};
@@ -460,16 +454,44 @@ do
     local raceLabels = {}
 
     local function GetUnlockedRaces()
-        local unlockedMap = GetUnlockedV3Map()
-        local unlockedList = {}
+        local unlockedV3 = {}
+        local added = {}
 
-        for raceV3, has in pairs(unlockedMap) do
-            if has then
-                table.insert(unlockedList, raceV3)
+        local function addRace(raceVer)
+            if not raceVer or added[raceVer] or not string.find(raceVer, "V3") then
+                return
+            end
+            added[raceVer] = true
+            table.insert(unlockedV3, raceVer)
+        end
+
+        local ok, titles = pcall(function()
+            return ReplicatedStorage.Remotes.CommF_:InvokeServer("getTitles")
+        end)
+
+        if ok and type(titles) == "table" then
+            for _, t in pairs(titles) do
+                local name = t.Name or t[1]
+                local unlockedValue = tostring(t.Unlocked or t[2] or ""):lower()
+                if name and raceTitles[name] and (unlockedValue == "true" or unlockedValue == "1" or string.find(unlockedValue, "unlock")) then
+                    addRace(raceTitles[name])
+                end
             end
         end
 
-        return unlockedList
+        local titlesFolder = plr:FindFirstChild("Titles")
+        if titlesFolder then
+            for _, inst in ipairs(titlesFolder:GetChildren()) do
+                if raceTitles[inst.Name] then
+                    local valueText = tostring(inst.Value):lower()
+                    if valueText == "true" or valueText == "1" or string.find(valueText, "unlock") then
+                        addRace(raceTitles[inst.Name])
+                    end
+                end
+            end
+        end
+
+        return unlockedV3
     end
 
     local function createRaceLabel(raceName, order)
@@ -625,6 +647,7 @@ local function SetText(newText)
     SetStatus(text)
 end
 -- Đã bỏ lưu tiến độ race bằng file.
+-- Đủ các race V3 đã bật trong config sẽ gọi ChangeToFolder.
 -- Tiến độ V3 sẽ check trực tiếp bằng title/getTitles.
 function CheckSea(v: number) return v == tonumber(workspace:GetAttribute("MAP"):match("%d+")) end
 local remoteAttack, idremote
@@ -1264,14 +1287,6 @@ FarmBeli = (function(stopConditionFunc, ignoreY, ignoreFistStop)
                             c += 1
                             all += 1
 
-                            if c >= getgenv().Settings["Reset After Collect Chests"] and (ignoreFistStop or not CheckTool("Fist of Darkness")) then
-                                if Character and Character:FindFirstChildWhichIsA("Humanoid") then
-                                    Character:FindFirstChildWhichIsA("Humanoid"):ChangeState(Enum.HumanoidStateType.Dead)
-                                    SetText("Collect Chests | Reset: Collected: " .. tostring(getgenv().Settings["Reset After Collect Chests"]) .. " Chests")
-                                end
-                                c = 0
-                                task.wait(1)
-                            end
                         else
                             break
                         end
@@ -1298,22 +1313,6 @@ local raceTitlesV3 = {
     ["Hell Hound"] = "Ghoul V3",
     ["War Machine"] = "Cyborg V3",
     ["Ancient Flame"] = "Draco V3",
-}
-
-local raceUnlockTextV3 = {
-    Human = {"Unlock Human V3."},
-    Mink = {"Unlock Mink V3.", "Unlock Rabbit V3."},
-    Rabbit = {"Unlock Mink V3.", "Unlock Rabbit V3."},
-
-    Fishman = {"Unlock Fishman V3.", "Unlock Shark V3."},
-    Shark = {"Unlock Fishman V3.", "Unlock Shark V3."},
-
-    Skypiea = {"Unlock Skypiea V3.", "Unlock Angel V3."},
-    Angel = {"Unlock Skypiea V3.", "Unlock Angel V3."},
-
-    Ghoul = {"Unlock Ghoul V3."},
-    Cyborg = {"Unlock Cyborg V3."},
-    Draco = {"Unlock Draco V3."},
 }
 
 local raceNameToV3 = {
@@ -1347,109 +1346,39 @@ local function NormalizeRaceName(name)
     return raceAlias[s] or tostring(name or "")
 end
 
-local lastTitleScanAt = 0
-local cachedUnlockedV3Map = {}
-
-local function ScanTitlesGuiTexts()
-    local foundTexts = {}
-
-    pcall(function()
-        COMMF_:InvokeServer("getTitles")
-    end)
-
-    pcall(function()
-        local m = LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("Main")
-        if m and m:FindFirstChild("Titles") then
-            m.Titles.Visible = true
-        end
-    end)
-
-    task.wait(1)
-
-    pcall(function()
-        local m = LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("Main")
-        if m and m:FindFirstChild("Titles") then
-            local tf = m.Titles
-            for _, d in pairs(tf:GetDescendants()) do
-                if (d:IsA("TextLabel") or d:IsA("TextButton")) and d.Text and d.Text ~= "" then
-                    local text = tostring(d.Text)
-                    foundTexts[text] = true
-                end
-            end
-        end
-    end)
-
-    pcall(function()
-        local m = LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("Main")
-        if m and m:FindFirstChild("Titles") then
-            m.Titles.Visible = false
-        end
-    end)
-
-    return foundTexts
-end
-
-local function HasAnyTitleText(foundTexts, wantedList)
-    if type(wantedList) ~= "table" then
-        return false
-    end
-
-    for _, wanted in ipairs(wantedList) do
-        if foundTexts[wanted] then
-            return true
-        end
-        local stripped = wanted
-        if stripped:sub(-1) == "." then
-            stripped = stripped:sub(1, -2)
-        end
-        if foundTexts[stripped] then
-            return true
-        end
-    end
-
-    for text, _ in pairs(foundTexts) do
-        for _, wanted in ipairs(wantedList) do
-            local stripped = wanted
-            if stripped:sub(-1) == "." then
-                stripped = stripped:sub(1, -2)
-            end
-            if text == wanted or text == stripped
-                or text:find(wanted, 1, true)
-                or text:find(stripped, 1, true) then
-                return true
-            end
-        end
-    end
-
-    return false
-end
-
 local function GetUnlockedV3Map()
-    if tick() - lastTitleScanAt <= 8 then
-        return cachedUnlockedV3Map
-    end
-
-    lastTitleScanAt = tick()
-
     local unlocked = {}
-    local foundTexts = ScanTitlesGuiTexts()
 
-    local function markRace(raceName, raceV3Name)
-        local texts = raceUnlockTextV3[raceName]
-        if texts and HasAnyTitleText(foundTexts, texts) then
-            unlocked[raceV3Name] = true
+    local function mark(titleName, unlockedValue)
+        local raceV3 = titleName and raceTitlesV3[titleName]
+        local value = tostring(unlockedValue or ""):lower()
+        if raceV3 and (value == "true" or value == "1" or value:find("unlock")) then
+            unlocked[raceV3] = true
         end
     end
 
-    markRace("Human", "Human V3")
-    markRace("Mink", "Rabbit V3")
-    markRace("Fishman", "Shark V3")
-    markRace("Skypiea", "Angel V3")
-    markRace("Ghoul", "Ghoul V3")
-    markRace("Cyborg", "Cyborg V3")
-    markRace("Draco", "Draco V3")
+    local ok, titles = pcall(function()
+        return COMMF_:InvokeServer("getTitles")
+    end)
 
-    cachedUnlockedV3Map = unlocked
+    if ok and type(titles) == "table" then
+        for _, t in pairs(titles) do
+            mark(t.Name or t[1], t.Unlocked or t[2])
+        end
+    end
+
+    local titlesFolder = LocalPlayer:FindFirstChild("Titles")
+    if titlesFolder then
+        for _, inst in ipairs(titlesFolder:GetChildren()) do
+            local okValue, valueText = pcall(function()
+                return tostring(inst.Value):lower()
+            end)
+            if okValue then
+                mark(inst.Name, valueText)
+            end
+        end
+    end
+
     return unlocked
 end
 
@@ -1472,108 +1401,127 @@ local function HasCurrentRaceV3()
     return HasRaceV3(current, GetUnlockedV3Map())
 end
 
-local CompletedFolderLock = false
+local minkV3ChestCount = 0
 
-local function NormalizeFolderId(value, allowNil)
-    if value == nil then
-        return nil, allowNil
+local function SetMinkChestStatus(extra)
+    local targetChests = tonumber(getgenv().Settings["Mink V3 Chests"]) or 30
+    local shownCount = math.min(minkV3ChestCount, targetChests)
+    local text = "Mink V3 | Đã nhặt: " .. tostring(shownCount) .. "/" .. tostring(targetChests) .. " Chests"
+    if extra and tostring(extra) ~= "" then
+        text = text .. " | " .. tostring(extra)
     end
-
-    local s = tostring(value)
-    s = s:gsub("^%s+", ""):gsub("%s+$", "")
-
-    if s == "" or s == "........." or s:match("^%.+$") or s:lower() == "nil" then
-        return nil, allowNil
-    end
-
-    return s, true
+    SetText(text)
 end
 
-local function ChangeFolderAfterCompleted(reason)
-    if CompletedFolderLock then
-        return false
-    end
+local function FarmMinkV3Chests()
+    local targetChests = tonumber(getgenv().Settings["Mink V3 Chests"]) or 30
 
-    if getgenv().ChangeFolderOnCompleted == false then
-        warn("[Completed-RACES] ChangeFolderOnCompleted = false - bỏ qua đổi folder")
-        return false
-    end
-
-    if not getgenv().client then
-        warn("[Completed-RACES] getgenv().client chưa được set - bỏ qua đổi folder")
-        return false
-    end
-
-    if typeof(getgenv().client.ChangeToFolder) ~= "function" then
-        warn("[Completed-RACES] getgenv().client.ChangeToFolder không tồn tại - bỏ qua đổi folder")
-        return false
-    end
-
-    local id1, ok1 = NormalizeFolderId(getgenv().id1, false)
-    local id2, ok2 = NormalizeFolderId(getgenv().id2, false)
-    local id3, ok3 = NormalizeFolderId(getgenv().id3, true)
-
-    if not ok1 or not ok2 then
-        warn("[Completed-RACES] id1/id2 bắt buộc nhưng đang rỗng - bỏ qua đổi folder")
-        return false
-    end
-
-    CompletedFolderLock = true
-
-    warn(("[Completed-RACES] %s -> ChangeToFolder args: id1=%s id2=%s id3=%s"):format(
-        tostring(reason or "Completed-RACES"),
-        tostring(id1),
-        tostring(id2),
-        id3 == nil and "nil" or tostring(id3)
-    ))
-
-    local ok, changed = pcall(function()
-        return getgenv().client:ChangeToFolder(id1, id2, true, id3)
-    end)
-
-    if not ok then
-        warn("[Completed-RACES] Lỗi khi gọi ChangeToFolder: " .. tostring(changed))
-        CompletedFolderLock = false
-        return false
-    end
-
-    if changed then
-        warn("[Client] Successfully changed folder after Completed-RACES, disconnecting to apply changes...")
-        pcall(function()
-            getgenv().client:Disconnect()
-        end)
-        task.wait(5)
-        pcall(function()
-            game:Shutdown()
-        end)
-        return true
-    else
-        warn("[Client] Failed to change folder after Completed-RACES")
-        task.wait(10)
-        CompletedFolderLock = false
-        return false
-    end
-end
-
-local didWriteCompletedRaces = false
-local function WriteCompletedRaces(reason)
-    if didWriteCompletedRaces then return end
-
-    SetText(reason or "Completed configured races")
-
-    local okWrite, errWrite = pcall(function()
-        writefile(LocalPlayer.Name .. ".txt", "Completed-RACES")
-    end)
-
-    if not okWrite then
-        warn("[Completed-RACES] Lỗi ghi file: " .. tostring(errWrite))
+    if HasCurrentRaceV3() then
+        minkV3ChestCount = 0
+        SetText("Mink V3 | Completed | Đã đủ V3")
         return
     end
 
-    didWriteCompletedRaces = true
-    warn("[Completed-RACES] Đã ghi: " .. LocalPlayer.Name .. ".txt -> Completed-RACES")
+    if minkV3ChestCount >= targetChests then
+        SetMinkChestStatus("Đủ chest, nói chuyện Wenlocktoad")
+        pcall(function()
+            COMMF_:InvokeServer("Wenlocktoad", "3")
+        end)
+        task.wait(1)
+        return
+    end
 
-    ChangeFolderAfterCompleted("Completed-RACES")
+    if not Character or IsDied(Character) or not HumanoidRootPart then return end
+    Tween(false)
+
+    local chests = {}
+    for _, v in next, CollectionService:GetTagged("_ChestTagged") do
+        if v and v:IsA("BasePart") and v.Name:find("Chest") and v.CanTouch then
+            local dist = (v.Position - HumanoidRootPart.Position).Magnitude
+            table.insert(chests, {obj = v, dist = dist})
+        end
+    end
+
+    table.sort(chests, function(a, b) return a.dist < b.dist end)
+
+    if #chests == 0 then
+        SetMinkChestStatus("Không thấy chest | Hop server")
+        HopServer(8)
+        return
+    end
+
+    for i, t in next, chests do
+        if HasCurrentRaceV3() or minkV3ChestCount >= targetChests or IsDied(Character) then
+            break
+        end
+
+        local v = t.obj
+        if v and v:IsA("BasePart") and v.Parent and v.CanTouch then
+            SetMinkChestStatus("Đang đi nhặt")
+
+            local touched = TweenChest(v, function()
+                return HasCurrentRaceV3() or minkV3ChestCount >= targetChests or IsDied(Character)
+            end)
+
+            if touched and v and v.Parent and v.CanTouch then
+                task.wait(tonumber(getgenv().Settings["Skip Chest Delay"]) or 1)
+                if v and v.Parent and v.CanTouch then
+                    v.CanTouch = false
+                end
+            end
+
+            if touched and not IsDied(Character) and not HasCurrentRaceV3() then
+                minkV3ChestCount += 1
+                SetMinkChestStatus("Vừa nhặt xong")
+            end
+        end
+
+        if i % 250 == 0 then task.wait(0.1) end
+    end
+
+    if HasCurrentRaceV3() then
+        minkV3ChestCount = 0
+        SetText("Mink V3 | Completed | Đã đủ V3")
+    elseif minkV3ChestCount >= targetChests then
+        SetMinkChestStatus("Đủ chest, nói chuyện Wenlocktoad")
+        pcall(function()
+            COMMF_:InvokeServer("Wenlocktoad", "3")
+        end)
+        task.wait(1)
+    else
+        SetMinkChestStatus("Chưa đủ chest | Hop server")
+        HopServer(8)
+    end
+end
+
+local didChangeCompletedRaces = false
+local function ChangeCompletedRacesFolder(reason)
+    if didChangeCompletedRaces then return end
+    didChangeCompletedRaces = true
+
+    SetText(reason or "Completed configured races | Changing folder")
+
+    local ok, changed = pcall(function()
+        return getgenv().client:ChangeToFolder(
+            "0d5438bde28d8d97b52549304b9dc1bf3e07ae7930d2f0bcd0e67cfb2103b82",
+            "2fb101db7ddcfbec7a17d25724a30e173f515eed4b9d3a99d55876ff7a124",
+            false,
+            "0294486118097fa0681d22818dde35073c02374369dc2f076095c3620817c35f"
+        )
+    end)
+
+    if ok and changed then
+        warn("[Client] Successfully changed folder, disconnecting to apply changes...")
+        pcall(function()
+            getgenv().client:Disconnect()
+        end)
+        wait(5)
+        game:Shutdown() -- Force rejoin to apply new config
+    else
+        warn("[Client] Failed to change folder")
+        didChangeCompletedRaces = false
+        task.wait(10)
+    end
 end
 
 local function GetWantedRaces()
@@ -1629,7 +1577,7 @@ task.spawn(function() wait(1)
             local CurrentRaceEnabled = IsRaceEnabled(CurrentRace)
 
             if AllWantedDone then
-                WriteCompletedRaces("Upgrade Race V3 | Completed configured races")
+                ChangeCompletedRacesFolder("Upgrade Race V3 | Completed configured races")
                 return
             end
 
@@ -1684,7 +1632,7 @@ task.spawn(function() wait(1)
                     end
                 end
             else
-                if CheckSea(2) or (not CheckTool(getgenv().Settings["Focus Melee"]) and CurrentRace == "Fishman") then
+                if CheckSea(2) then
                     local SetRaceStatus = function(x) SetText(string.format("Upgrade Race V%s | Current: %s", x, CurrentRace)) end
                     if not LocalPlayer.Data.Race:FindFirstChild("Evolved") then
                         SetRaceStatus(2)
@@ -1749,83 +1697,137 @@ task.spawn(function() wait(1)
                                         end
                                     end
                                 elseif CurrentRace == "Mink" then
-                                    FarmBeli(function() return not HasCurrentRaceV3() end, nil, true)
+                                    FarmMinkV3Chests()
                                 elseif CurrentRace == "Fishman" then
-                                    local TargetMelee = getgenv().Settings["Focus Melee"]
-                                    if CheckTool(TargetMelee) then
-                                        local function CE(x) return workspace.Enemies:FindFirstChild(x) or workspace.SeaBeasts:FindFirstChild(x) end
-                                        local e = CE("Piranha") or CE("Shark") or CE("Fish Crew Member")
-                                        local v = CE("SeaBeast1")
-                                        if e then Character.Humanoid.Sit = false
-                                            repeat task.wait() KillMonster(e.Name)
-                                            until not e or e.Humanoid.Health <= 0 or not Character:FindFirstChild("Humanoid") or Character.Humanoid.Health <= 0
-                                        elseif v then Character.Humanoid.Sit = false
-                                            repeat task.wait()
+                                    -- Shark V3 logic replaced from sida script, adapted to this script
+                                    local function SharkV3GetPlayerBoat()
+                                        for _, boat in next, workspace.Boats:GetChildren() do
+                                            if boat:IsA("Model") then
+                                                local owner = boat:FindFirstChild("Owner")
+                                                local hd = boat:FindFirstChild("Humanoid")
+                                                local hp = hd and tonumber(hd.Value) or 0
+                                                if owner and tostring(owner.Value) == LocalPlayer.Name and hp > 0 then
+                                                    return boat
+                                                end
+                                            end
+                                        end
+                                        return CheckOwnerBoat()
+                                    end
+
+                                    local function SharkV3GetSeaBeast()
+                                        if not workspace:FindFirstChild("SeaBeasts") then return nil end
+                                        for _, seaBeast in next, workspace.SeaBeasts:GetChildren() do
+                                            local health = seaBeast:FindFirstChild("Health")
+                                            local hp = health and tonumber(health.Value) or 0
+                                            if hp > 30000 then
+                                                return seaBeast
+                                            end
+                                        end
+                                        return nil
+                                    end
+
+                                    local function SharkV3GetSeaMob()
+                                        return workspace.Enemies:FindFirstChild("Shark")
+                                            or workspace.Enemies:FindFirstChild("Piranha")
+                                            or ReplicatedStorage:FindFirstChild("Shark")
+                                            or ReplicatedStorage:FindFirstChild("Piranha")
+                                    end
+
+                                    local function SharkV3SendKey(key, hold)
+                                        local keyCode = Enum.KeyCode[tostring(key)] or key
+                                        VirtualInputManager:SendKeyEvent(true, keyCode, false, game)
+                                        task.wait(hold or 0.05)
+                                        VirtualInputManager:SendKeyEvent(false, keyCode, false, game)
+                                    end
+
+                                    local function SharkV3GetPivot(model)
+                                        if not model then return nil end
+                                        local ok, pivot = pcall(function()
+                                            return model.WorldPivot
+                                        end)
+                                        if ok and typeof(pivot) == "CFrame" then
+                                            return pivot
+                                        end
+                                        ok, pivot = pcall(function()
+                                            return model:GetPivot()
+                                        end)
+                                        if ok and typeof(pivot) == "CFrame" then
+                                            return pivot
+                                        end
+                                        local hrp = model:FindFirstChild("HumanoidRootPart") or model:FindFirstChildWhichIsA("BasePart")
+                                        return hrp and hrp.CFrame or nil
+                                    end
+
+                                    local seaBeast = SharkV3GetSeaBeast()
+                                    if not seaBeast then
+                                        local boat = SharkV3GetPlayerBoat()
+                                        local sharkMob = SharkV3GetSeaMob()
+
+                                        if sharkMob then
+                                            SetText("Shark V3 | Killing " .. tostring(sharkMob.Name))
+                                            if sharkMob:IsDescendantOf(workspace.Enemies) then
+                                                KillMonster(tostring(sharkMob.Name))
+                                            else
+                                                local hrp = sharkMob:FindFirstChild("HumanoidRootPart") or sharkMob:FindFirstChildWhichIsA("BasePart")
+                                                if hrp then Tween(hrp.CFrame) end
+                                            end
+                                            return
+                                        end
+
+                                        if not boat then
+                                            local buyBoatPos = CFrame.new(-14, 10, 2955)
+                                            SetText("Shark V3 | Buying PirateBrigade boat")
+                                            Tween(buyBoatPos)
+                                            if CheckDistance(buyBoatPos) < 10 then
+                                                COMMF_:InvokeServer("BuyBoat", "PirateBrigade")
+                                            end
+                                        elseif boat:FindFirstChild("VehicleSeat") then
+                                            local targetBoatCFrame = CFrame.new(-67, 5.5647872686386108, 4205 + math.random(1, 400))
+                                            if CheckDistance(boat.VehicleSeat.CFrame, targetBoatCFrame) > 800 then
+                                                SetText("Shark V3 | Move boat to sea")
+                                                boat.VehicleSeat.CFrame = targetBoatCFrame
+                                            elseif CheckDistance(boat.VehicleSeat.CFrame) > 5 then
+                                                SetText("Shark V3 | Tween to boat seat")
+                                                Tween(boat.VehicleSeat.CFrame + Vector3.new(0, math.random(-1, 2), 0))
+                                            else
+                                                SetText("Shark V3 | Waiting for Sea Beast")
+                                            end
+                                        else
+                                            SetText("Shark V3 | Boat missing VehicleSeat")
+                                        end
+                                    else
+                                        if not CheckTool("Sharkman Karate") and not CheckInventory("Sharkman Karate") then
+                                            SetText("Shark V3 | Buy Sharkman Karate")
+                                            COMMF_:InvokeServer("BuySharkmanKarate")
+                                        end
+
+                                        repeat
+                                            task.wait()
+                                            local pivot = SharkV3GetPivot(seaBeast)
+                                            if not pivot then break end
+                                            local health = seaBeast:FindFirstChild("Health")
+                                            local hpText = health and tostring(math.floor(tonumber(health.Value) or 0)) or "nil"
+                                            SetText("Shark V3 | Killing Sea Beast | HP: " .. hpText)
+
+                                            if pivot.Position.Y >= -179 then
+                                                local lockCFrame = pivot * CFrame.new(0, 300, 0)
+                                                Tween(lockCFrame)
+                                                SetAimbotTarget(lockCFrame)
+                                                for _, key in ipairs({"Z", "X", "C"}) do
+                                                    EquipWeapon((math.random(1, 2) == 1) and "Melee" or "Sword")
+                                                    SharkV3SendKey(key, 0.05)
+                                                end
                                                 FastAttack()
-                                                SetAimbotTarget(v.HumanoidRootPart)
-                                                Tween(v.HumanoidRootPart.CFrame * CFrame.new(0, (v.HumanoidRootPart.Position.Y > -300 and 500 or 1000), 0))
-                                                EquipWeapon(({"Melee", "Sword", "Gun", "Blox Fruit"})[math.random(4)])
-                                                local k = ({"Z", "X", "C", "V", "F"})[math.random(5)]
-                                                if not Character:FindFirstChild("Portal-Portal") then
-                                                    if CheckCooldownSkill(k) then
-                                                        PressKeyEvent(k, 0.5)
-                                                    end
-                                                end
-                                            until not v or not v:FindFirstChild("Health") or v.Health.Value <= 0 or not Character:FindFirstChild("Humanoid") or Character.Humanoid.Health <= 0
-                                        else
-                                            local BOAT = CheckOwnerBoat()
-                                            if BOAT then
-                                                if not Character.Humanoid.Sit then Tween(BOAT.VehicleSeat.CFrame)
-                                                    NeedSit = true
-                                                else Tween(CFrame.new(-1000000, 49, 1000000), BOAT:FindFirstChild("Engine"))
-                                                task.delay(5, function() Tween(false) end)
-                                                end
                                             else
-                                                local PlaceNPC = Vector3.new(-1, 10, 2960)
-                                                if (HumanoidRootPart.Position - PlaceNPC).Magnitude < 50 then
-                                                    COMMF_:InvokeServer("BuyBoat", LocalPlayer.Team.Name == "Marine" and "PirateSloop" or "PirateBrigade")
-                                                else
-                                                    Character.Humanoid.Sit = false
-                                                    Tween(CFrame.new(PlaceNPC))
-                                                end
+                                                Tween(pivot * CFrame.new(0, 900, 0))
                                             end
-                                        end
-                                    else Character.Humanoid.Sit = false
-                                        local npcName = MeleeData[TargetMelee] or TargetMelee
-                                        local x, d = GetCFrameByNPC(npcName)
-                                        if x then
-                                            if d < 50 then
-                                                if TargetMelee == "Dragon Claw" then
-                                                    COMMF_:InvokeServer("BlackbeardReward", "DragonClaw", "2")
-                                                elseif TargetMelee == "Sharkman Karate" then
-                                                    local hasSharkman = CheckTool("Sharkman Karate") or CheckInventory("Sharkman Karate")
-                                                    if not hasSharkman and COMMF_:InvokeServer("BuySharkmanKarate", true) == 1 then
-                                                        local pos = CFrame.new(-2599.621826171875, 238.19833374023438, -10315.998046875)
-                                                        repeat
-                                                            task.wait()
-                                                            Tween(pos)
-                                                        until CheckDistance(pos) <= 30
-                                                        COMMF_:InvokeServer("BuySharkmanKarate")
-                                                    end
-                                                else
-                                                    COMMF_:InvokeServer("Buy"..TargetMelee:gsub("%s+", ""))
-                                                end
-                                            else
-                                                SetText("Travel To ".. npcName.. " NPC")
-                                                Tween(x)
-                                            end
-                                        else
-                                            SetText("Can't find ".. npcName.. " NPC")
-                                            Character.Humanoid:ChangeState(Enum.HumanoidStateType.Dead)
-                                            LocalPlayer.CharacterAdded:Wait()
-                                            local needSea = GetMeleeTargetSea(TargetMelee)
-                                            if needSea == 2 then
-                                                COMMF_:InvokeServer("TravelDressrosa")
-                                            elseif needSea == 3 then
-                                                COMMF_:InvokeServer("TravelZou")
-                                            end
-                                        end
-                                     end
+                                        until not seaBeast or not seaBeast.Parent or not seaBeast:FindFirstChild("Health") or seaBeast.Health.Value <= 0 or IsDied(Character)
+
+                                        SetAimbotTarget(false)
+                                        COMMF_:InvokeServer("Wenlocktoad", "3")
+                                        SetText("Shark V3 | Done Sea Beast | Talked Wenlocktoad")
+                                        task.wait(1)
+                                    end
                                 elseif CurrentRace == "Skypiea" then
                                     local x = nil
                                     for _, v in next, Players:GetPlayers() do
