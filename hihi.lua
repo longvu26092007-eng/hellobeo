@@ -2328,17 +2328,24 @@ do
     -- Trả record { player, character }, nhờ vậy Character đầu cycle được giữ ổn định khi target chết/respawn.
     -- eliminated[userId]=true: người đã chết trong lượt này, respawn cũng KHÔNG đánh lại.
     -- seen[userId]=true: từng quan sát thấy trong FFA; Character nil tạm thời được tính unknown để chặn thắng giả.
-    function CombatActions.getplayers(eliminated, seen, participantCharacters)
+    function CombatActions.getplayers(eliminated, seen, participantCharacters, opts)
         eliminated = eliminated or {}
         seen = seen or {}
         participantCharacters = participantCharacters or {}
+        opts = opts or {}
+        -- Post-trial fallback: Ally bình thường tự reset, nhưng nếu sau grace vẫn còn sống trong FFA
+        -- thì Main phải được phép đánh họ để không đứng im/kẹt lượt. Các Main khác vẫn luôn bị loại.
+        local includeAllies = opts.includeAllies == true
         local targets = {}
         local unknown = 0
         local myRoot = Movement.getHRP()
 
         for _, player in ipairs(Players:GetPlayers()) do
             local userId = player.UserId
-            if player ~= LP and not State.isMain[player.Name] and noideaforname(player)
+            local includeAllPlayers = opts.includeAllPlayers == true
+            if player ~= LP
+                and (includeAllPlayers or not State.isMain[player.Name])
+                and (includeAllies or noideaforname(player))
                 and not eliminated[userId] then
                 local character = player.Character
                 local knownCharacter = participantCharacters[userId]
@@ -2353,9 +2360,16 @@ do
                     if hum and root then
                         if hum.Health > 0 then
                             local observed = CombatActions.observeCharacterInFFA(player)
-                            -- true = trong inner box; nil với Character sống + ffup = vùng đệm của FFA.
-                            -- Cả hai đều là mục tiêu hợp lệ; false mới là chắc chắn ngoài FFA.
-                            if observed ~= false then
+                            -- Fallback kiểu kkv4: nếu geometry báo false nhưng Player vẫn ở gần khu Trial,
+                            -- vẫn nhận target. Điều này xử lý Character bị lệch Y/ở dưới nền sau FFA.
+                            local nearLegacyTrial = false
+                            for _, trialPos in ipairs(CombatActions.pos_plr_trial) do
+                                if Movement.getdis(root.CFrame, trialPos) < 350 then
+                                    nearLegacyTrial = true
+                                    break
+                                end
+                            end
+                            if observed ~= false or nearLegacyTrial then
                                 seen[userId] = true
                                 participantCharacters[userId] = participantCharacters[userId] or character
                                 targets[#targets + 1] = { player = player, character = participantCharacters[userId] }
@@ -2383,8 +2397,8 @@ do
 
         return targets, unknown
     end
-    function CombatActions.countplayers(eliminated, seen, participantCharacters)
-        local targets, unknown = CombatActions.getplayers(eliminated, seen, participantCharacters)
+    function CombatActions.countplayers(eliminated, seen, participantCharacters, opts)
+        local targets, unknown = CombatActions.getplayers(eliminated, seen, participantCharacters, opts)
         return #targets, unknown
     end
 
@@ -2392,6 +2406,7 @@ do
     --   M1 (Tool:Activate + LeftClickRemote) CHỈ chạy khi caller truyền opts.m1=true (post-trial PVP / boss fallback)
     --   VÀ khoảng cách thật <= M1_RANGE studs. Throttle chung 0.14s (§J4).
     local _atkOff, _atkT, _atkEqT = CFrame.new(0, 3, 0), 0, 0
+    local _atkMoveT = 0
     local _lastM1Tick = 0
     local M1_RANGE = 11        -- §J4: chỉ M1 khi <= 9–12 studs
     local M1_THROTTLE = 0.14   -- §J4: 0.10–0.18s throttle chung
@@ -2434,9 +2449,81 @@ do
             pcall(function() Movement.haki() end)
         end
         local hrp = target and target:FindFirstChild("HumanoidRootPart")
-        if hrp then pcall(function() topos(hrp.CFrame * _atkOff) end) end
+        local myHrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+        if hrp and myHrp then
+            -- Không gọi topos mỗi frame: Movement.topos() luôn cancel tween cũ, gọi quá dày sẽ
+            -- khiến tween bị restart liên tục và nhìn như Main đứng im. Ở gần thì đặt sát target;
+            -- ở xa chỉ cập nhật tween theo nhịp 0.18s.
+            local targetCFrame = hrp.CFrame * _atkOff
+            local dist = (targetCFrame.Position - myHrp.Position).Magnitude
+            if dist <= 10 then
+                Movement.cancel()
+                myHrp.CFrame = CFrame.lookAt(targetCFrame.Position, hrp.Position)
+                myHrp.AssemblyLinearVelocity = Vector3.zero
+                myHrp.AssemblyAngularVelocity = Vector3.zero
+            elseif (tick() - _atkMoveT) >= 0.18 then
+                _atkMoveT = tick()
+                pcall(function() topos(CFrame.lookAt(targetCFrame.Position, hrp.Position)) end)
+            end
+
+            if opts and opts.skillAim then
+                CombatActions.setSkillAimTarget(hrp.Position + Vector3.new(0, 2, 0))
+            end
+        end
         -- [FINAL §J1] M1 CHỈ khi được yêu cầu rõ (opts.m1) — KHÔNG mặc định spam cho mọi target mỗi 0.1s.
         if opts and opts.m1 then CombatActions.doM1(target) end
+    end
+
+    -- Kill Player After Trial: cách đánh lấy từ kkv4.lua.txt, nhưng thêm throttle để
+    -- Movement.topos() không cancel/restart tween ở mọi frame. Mỗi tick: equip + haki,
+    -- bay sát Player với offset ngẫu nhiên, bật spam skill, aim vào target và M1 khi đủ gần.
+    local _kkv4PvpOffset = CFrame.new(0, 3, 0)
+    local _kkv4PvpOffsetAt = 0
+    local _kkv4PvpMoveAt = 0
+    local _kkv4PvpEquipAt = 0
+    function CombatActions.attackPlayerKKV4Tick(target)
+        local targetRoot = target and target:FindFirstChild("HumanoidRootPart")
+        local targetHumanoid = target and target:FindFirstChildOfClass("Humanoid")
+        local myChar = LP.Character
+        local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+        if not (targetRoot and targetHumanoid and targetHumanoid.Health > 0 and myRoot) then
+            return false
+        end
+
+        _G.SHOULDSPAMSKILLS = true
+        CombatActions.setSkillAimTarget(targetRoot.Position + Vector3.new(0, 2, 0))
+
+        if (tick() - _kkv4PvpEquipAt) >= 0.35 then
+            _kkv4PvpEquipAt = tick()
+            pcall(function() Movement.equip() end)
+            pcall(function() Movement.haki() end)
+        end
+
+        if (tick() - _kkv4PvpOffsetAt) >= 0.30 then
+            _kkv4PvpOffsetAt = tick()
+            local x = math.random(1, 4)
+            local z = math.random(1, 4)
+            if math.random(1, 2) == 1 then x = -x end
+            if math.random(1, 2) == 1 then z = -z end
+            _kkv4PvpOffset = CFrame.new(x, 3, z)
+        end
+
+        local targetCFrame = targetRoot.CFrame * _kkv4PvpOffset
+        local dist = (targetCFrame.Position - myRoot.Position).Magnitude
+        if dist <= 9 then
+            Movement.cancel()
+            myRoot.CFrame = CFrame.lookAt(targetCFrame.Position, targetRoot.Position)
+            myRoot.AssemblyLinearVelocity = Vector3.zero
+            myRoot.AssemblyAngularVelocity = Vector3.zero
+        elseif (tick() - _kkv4PvpMoveAt) >= 0.18 then
+            _kkv4PvpMoveAt = tick()
+            pcall(function()
+                topos(CFrame.lookAt(targetCFrame.Position, targetRoot.Position))
+            end)
+        end
+
+        CombatActions.doM1(target)
+        return true
     end
 
     -- weapon / spam-skills (File A 2039-2123)
@@ -2931,8 +3018,20 @@ do
                         local weapon
                         local fishSword = getFishTrialSwordForSpam(char)
                         if fishTrialSwordState.active then
-                            -- Fish Trial: không cho vòng spam chung giành equip sang vũ khí khác.
-                            weapon = fishSword and { fishSword } or {}
+                            -- Fish Trial: spam cả skill Melee và skill của Tushita/Yama.
+                            -- Chỉ lấy ToolTip Melee + đúng thanh Sword đã chọn, không lôi Fruit/Gun vào.
+                            weapon = {}
+                            local added = {}
+                            for _, tool in ipairs(getallweapon()) do
+                                if tool:IsA("Tool") and tool.ToolTip == "Melee" and not added[tool] then
+                                    weapon[#weapon + 1] = tool
+                                    added[tool] = true
+                                end
+                            end
+                            if fishSword and not added[fishSword] then
+                                weapon[#weapon + 1] = fishSword
+                                added[fishSword] = true
+                            end
                         else
                             weapon = getallweapon()
                             for _, v in pairs(weapon) do
@@ -3541,8 +3640,8 @@ do
             -- Cũ: đứng thẳng trên HRP +500 studs → nhiều skill rơi ngoài tầm/góc bắn.
             -- Mới: đứng thấp, lùi ngang, CFrame.lookAt vào Sea Beast và cập nhật aim theo HRP đang di chuyển.
             -- CẤU HÌNH CỨNG: không đọc getgenv()/loader.
-            -- 25 studs cao + lùi 20 studs: tránh Character/target bị chìm dưới nền Trial.
-            local FISH_HEIGHT = 25
+            -- 35 studs cao + lùi 20 studs: nâng cao hơn để tránh Character/target nằm dưới nền Trial.
+            local FISH_HEIGHT = 35
             local FISH_DISTANCE = 20
             local FISH_AIM_Y_OFFSET = 5
             local FISH_MOVE_INTERVAL = 0.25
@@ -3552,7 +3651,7 @@ do
             local fishSwordName
             pcall(function() fishSwordName = CombatActions.equipFishTrialSword() end)
             if fishSwordName then
-                status("[FISH TRIAL] Đã cầm " .. tostring(fishSwordName) .. " → bay tới Sea Beast + spam skill")
+                status("[FISH TRIAL] Đã cầm " .. tostring(fishSwordName) .. " → bay tới Sea Beast + spam Melee/Sword")
             else
                 status("[FISH TRIAL] Không có Tushita/Yama → dùng vũ khí hiện có")
             end
@@ -3574,11 +3673,11 @@ do
                         local lastSwordEnsureAt = 0
                         _G.SHOULDSPAMSKILLS = true
                         CombatActions.installSkillAim()
-                        status("[FISH TRIAL] Đang bay tới + spam skill Sea Beast")
+                        status("[FISH TRIAL] Đang bay tới + spam Melee/Sword Sea Beast")
 
                         repeat
                             task.wait()
-                            -- Giữ Tushita/Yama trên tay; hàm sẽ KHÔNG LoadItem lại nếu Tool đang cầm/ở Backpack.
+                            -- Giữ Tushita/Yama sẵn sàng; spam loop sẽ luân phiên equip Melee và Sword.
                             if (tick() - lastSwordEnsureAt) >= 0.5 then
                                 lastSwordEnsureAt = tick()
                                 pcall(function() fishSwordName = CombatActions.equipFishTrialSword() or fishSwordName end)
@@ -4739,7 +4838,7 @@ do
                 root.CFrame = State.postTrialHoldCFrame
             end
             -- Seed participant Character ngay trong grace; ai chết/respawn trước lúc Main bắt đầu đánh vẫn bị loại đúng.
-            getplayers(State.postTrialEliminated, State.postTrialSeen, State.postTrialCharacters)
+            getplayers(State.postTrialEliminated, State.postTrialSeen, State.postTrialCharacters, { includeAllies = true, includeAllPlayers = true })
             status("[MAIN " .. tostring(myStt) .. "] Kill phase → đứng im đủ 4s cho ally reset trước...")
             if not PostTrial.isMainAlive(cycleId) then
                 PostTrial.markMainLoss("grace_death", cycleId)
@@ -4763,6 +4862,8 @@ do
         local confirmedEmpty = false
         local lastTargetStatusUserId = nil
         local lastNoTargetStatusAt = 0
+        -- PvP skill phải có target aim riêng; hook đã scoped bởi SHOULDSPAMSKILLS.
+        pcall(function() CombatActions.installSkillAim() end)
 
         while Runtime.alive and templeState() == "ffup" do
             if not PostTrial.isMainAlive(cycleId) then
@@ -4778,7 +4879,7 @@ do
                 return "posttrial_running"
             end
 
-            local targets, unknown = getplayers(eliminated, seen, participantCharacters)
+            local targets, unknown = getplayers(eliminated, seen, participantCharacters, { includeAllies = true, includeAllPlayers = true })
             local target = targets[1]
 
             if target then
@@ -4821,10 +4922,9 @@ do
 
                         local tooFar = getdis(targetRoot.CFrame) > 1500
                         if tooFar then break end
-                        -- Post-trial PvP phải bật M1 rõ ràng. Trước đây caller không truyền opts.m1,
-                        -- nên Main chỉ tween/equip và phụ thuộc FastAttack nền; nhiều executor sẽ đứng gần target
-                        -- nhưng không gây damage. Offset của attackTick giữ Main trong tầm M1 <= 11 studs.
-                        attackTick(targetCharacter, { m1 = true })
+                        -- Dùng cách attack Player từ kkv4: bay sát offset ngẫu nhiên + equip/haki
+                        -- + spam skill + M1. Bản này thêm throttle tween để không đứng im vì cancel liên tục.
+                        CombatActions.attackPlayerKKV4Tick(targetCharacter)
                     until false
                 else
                     -- Đã được scan sống nhưng Character biến mất trước lúc đánh = đã chết/đổi Character → bị loại.
@@ -4833,6 +4933,7 @@ do
                 end
             else
                 lastTargetStatusUserId = nil
+                pcall(function() CombatActions.clearSkillAimTarget() end)
                 if unknown > 0 then
                     -- Có participant đã thấy nhưng Character đang replicate: chưa được phép báo thắng.
                     emptyConfirm = 0
