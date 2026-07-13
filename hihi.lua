@@ -2471,6 +2471,153 @@ do
         end
     end
 
+    -- Fish Trial only: ưu tiên kiếm đang CẦM, sau đó Backpack, cuối cùng mới LoadItem.
+    -- Nhận diện tên không phân biệt hoa/thường; LoadItem giữ các fallback theo yêu cầu.
+    local FISH_TRIAL_LOAD_NAMES = { "Tushita", "tushita", "Yama", "yama" }
+    local fishTrialSwordState = {
+        cycleKey = nil,
+        character = nil,
+        selectedName = nil, -- tên Tool thật trong game
+        active = false,     -- khi true, spam-skills chỉ dùng đúng kiếm Fish Trial
+        lastMissingTryAt = 0,
+    }
+
+    local function isFishTrialSwordName(name)
+        local lower = tostring(name or ""):lower()
+        return lower == "tushita" or lower == "yama"
+    end
+
+    local function findFishTrialSword(container, preferredName)
+        if not container then return nil end
+        local children = container:GetChildren()
+        local preferred = preferredName and tostring(preferredName):lower() or nil
+
+        if preferred then
+            for _, child in ipairs(children) do
+                if child:IsA("Tool") and child.Name:lower() == preferred and isFishTrialSwordName(child.Name) then
+                    return child
+                end
+            end
+            return nil
+        end
+
+        -- Khi có cả hai trong Backpack, luôn ưu tiên Tushita trước Yama.
+        for _, wanted in ipairs({ "tushita", "yama" }) do
+            for _, child in ipairs(children) do
+                if child:IsA("Tool") and child.Name:lower() == wanted then
+                    return child
+                end
+            end
+        end
+        return nil
+    end
+
+    local function resetFishSwordStateForCycle(char)
+        local cycleKey = tostring(
+            State.trialStartedCycleId
+            or State.trialCycleId
+            or State.trialStartedAt
+            or game.JobId
+        )
+        if fishTrialSwordState.character ~= char or fishTrialSwordState.cycleKey ~= cycleKey then
+            fishTrialSwordState.character = char
+            fishTrialSwordState.cycleKey = cycleKey
+            fishTrialSwordState.selectedName = nil
+            fishTrialSwordState.active = false
+            fishTrialSwordState.lastMissingTryAt = 0
+        end
+    end
+
+    function CombatActions.equipFishTrialSword()
+        local char = LP.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if not (char and hum and hum.Health > 0) then return nil end
+        resetFishSwordStateForCycle(char)
+
+        -- 1) Đang cầm Tushita/Yama: dùng luôn, tuyệt đối không gọi LoadItem.
+        local held = findFishTrialSword(char, fishTrialSwordState.selectedName)
+            or findFishTrialSword(char)
+        if held then
+            fishTrialSwordState.selectedName = held.Name
+            fishTrialSwordState.active = true
+            return held.Name
+        end
+
+        -- 2) Có trong Backpack: EquipTool trực tiếp, không gọi LoadItem.
+        local bp = LP:FindFirstChild("Backpack")
+        local stored = findFishTrialSword(bp, fishTrialSwordState.selectedName)
+            or findFishTrialSword(bp)
+        if stored then
+            pcall(function() hum:EquipTool(stored) end)
+            task.wait()
+            local equipped = findFishTrialSword(char, stored.Name) or findFishTrialSword(char)
+            if equipped then
+                fishTrialSwordState.selectedName = equipped.Name
+                fishTrialSwordState.active = true
+                Logger.info("Fish Trial sword: equipped from Backpack " .. equipped.Name, "fish_trial_sword_ok")
+                return equipped.Name
+            end
+        end
+
+        -- 3) Chỉ khi Character + Backpack đều không có mới thử LoadItem.
+        -- Cooldown tránh doTrialForMyRace() gọi lặp và spam remote khi account không sở hữu kiếm.
+        if fishTrialSwordState.lastMissingTryAt > 0
+            and (tick() - fishTrialSwordState.lastMissingTryAt) < 8 then
+            fishTrialSwordState.active = false
+            return nil
+        end
+        fishTrialSwordState.lastMissingTryAt = tick()
+
+        for _, loadName in ipairs(FISH_TRIAL_LOAD_NAMES) do
+            SafeRemote.invoke(0.8, "LoadItem", loadName)
+            task.wait(0.12)
+
+            char = LP.Character
+            hum = char and char:FindFirstChildOfClass("Humanoid")
+            bp = LP:FindFirstChild("Backpack")
+            if not (char and hum and hum.Health > 0) then break end
+
+            held = findFishTrialSword(char)
+            stored = findFishTrialSword(bp)
+            if not held and stored then
+                pcall(function() hum:EquipTool(stored) end)
+                task.wait()
+                held = findFishTrialSword(char, stored.Name) or findFishTrialSword(char)
+            end
+
+            if held then
+                fishTrialSwordState.selectedName = held.Name
+                fishTrialSwordState.active = true
+                Logger.info("Fish Trial sword: loaded and equipped " .. held.Name, "fish_trial_sword_ok")
+                return held.Name
+            end
+        end
+
+        fishTrialSwordState.selectedName = nil
+        fishTrialSwordState.active = false
+        Logger.warn("Fish Trial sword: không có Tushita/Yama, tiếp tục bằng vũ khí hiện có", "fish_trial_sword_missing")
+        return nil
+    end
+
+    function CombatActions.endFishTrialSwordMode()
+        fishTrialSwordState.active = false
+    end
+
+    local function getFishTrialSwordForSpam(char)
+        if not (fishTrialSwordState.active and fishTrialSwordState.selectedName) then return nil end
+        local held = findFishTrialSword(char, fishTrialSwordState.selectedName)
+        if held then return held end
+
+        local bp = LP:FindFirstChild("Backpack")
+        local stored = findFishTrialSword(bp, fishTrialSwordState.selectedName)
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if stored and hum and hum.Health > 0 then
+            pcall(function() hum:EquipTool(stored) end)
+            return findFishTrialSword(char, stored.Name) or stored
+        end
+        return nil
+    end
+
     -- GetMobPosition / TweenObject / BringMob (File A 1457-1517)
     local function TweenObject(Object, Pos, Speed)
         if Speed == nil then Speed = 350 end
@@ -2781,9 +2928,16 @@ do
                         local skillsUI = LP.PlayerGui:FindFirstChild("Main")
                         skillsUI = skillsUI and skillsUI:FindFirstChild("Skills")
                         if not (char and skillsUI) then return end
-                        local weapon = getallweapon()
-                        for _, v in pairs(weapon) do
-                            if not skillsUI:FindFirstChild(v.Name) then EquipTool(v.Name) end
+                        local weapon
+                        local fishSword = getFishTrialSwordForSpam(char)
+                        if fishTrialSwordState.active then
+                            -- Fish Trial: không cho vòng spam chung giành equip sang vũ khí khác.
+                            weapon = fishSword and { fishSword } or {}
+                        else
+                            weapon = getallweapon()
+                            for _, v in pairs(weapon) do
+                                if not skillsUI:FindFirstChild(v.Name) then EquipTool(v.Name) end
+                            end
                         end
                         for _, v in pairs(weapon) do
                             if v.Parent ~= char then EquipTool(v.Name) end
@@ -3023,7 +3177,7 @@ end
 -- alias File A
 local function getplayers(...) return CombatActions.getplayers(...) end
 local function countplayers(...) return CombatActions.countplayers(...) end
-local function attackTick(t) return CombatActions.attackTick(t) end
+local function attackTick(t, opts) return CombatActions.attackTick(t, opts) end
 local function getmob1(pos) return CombatActions.getmob1(pos) end
 local function checkmob_(v) return CombatActions.checkmob_(v) end
 local function BringMob() return CombatActions.BringMob() end
@@ -3387,12 +3541,29 @@ do
             -- Cũ: đứng thẳng trên HRP +500 studs → nhiều skill rơi ngoài tầm/góc bắn.
             -- Mới: đứng thấp, lùi ngang, CFrame.lookAt vào Sea Beast và cập nhật aim theo HRP đang di chuyển.
             -- CẤU HÌNH CỨNG: không đọc getgenv()/loader.
-            -- 15 studs cao + lùi 20 studs giúp skill gần mục tiêu hơn, hạn chế bắn hụt do bay quá cao.
-            local FISH_HEIGHT = 15
+            -- 25 studs cao + lùi 20 studs: tránh Character/target bị chìm dưới nền Trial.
+            local FISH_HEIGHT = 25
             local FISH_DISTANCE = 20
             local FISH_AIM_Y_OFFSET = 5
-            local FISH_MOVE_INTERVAL = 0.12
-            for _, v in pairs(workspace.SeaBeasts:GetChildren()) do
+            local FISH_MOVE_INTERVAL = 0.25
+
+            -- CHỈ Fish Trial mới tự lấy kiếm. Ưu tiên Tushita, không có mới thử Yama.
+            -- Không tìm thấy kiếm vẫn tiếp tục Trial, không block/return.
+            local fishSwordName
+            pcall(function() fishSwordName = CombatActions.equipFishTrialSword() end)
+            if fishSwordName then
+                status("[FISH TRIAL] Đã cầm " .. tostring(fishSwordName) .. " → bay tới Sea Beast + spam skill")
+            else
+                status("[FISH TRIAL] Không có Tushita/Yama → dùng vũ khí hiện có")
+            end
+
+            local seaBeastsFolder = workspace:FindFirstChild("SeaBeasts")
+            if not seaBeastsFolder then
+                CombatActions.endFishTrialSwordMode()
+                return
+            end
+
+            for _, v in pairs(seaBeastsFolder:GetChildren()) do
                 local ok, err = pcall(function()
                     local health = v:FindFirstChild("Health")
                     local targetRoot = v:FindFirstChild("HumanoidRootPart")
@@ -3400,13 +3571,20 @@ do
                         and (not race_trial_place or getdis(targetRoot.CFrame, race_trial_place.CFrame) < 1500) then
                         local t0 = tick()
                         local lastMoveAt = 0
+                        local lastSwordEnsureAt = 0
                         _G.SHOULDSPAMSKILLS = true
                         CombatActions.installSkillAim()
+                        status("[FISH TRIAL] Đang bay tới + spam skill Sea Beast")
 
                         repeat
                             task.wait()
+                            -- Giữ Tushita/Yama trên tay; hàm sẽ KHÔNG LoadItem lại nếu Tool đang cầm/ở Backpack.
+                            if (tick() - lastSwordEnsureAt) >= 0.5 then
+                                lastSwordEnsureAt = tick()
+                                pcall(function() fishSwordName = CombatActions.equipFishTrialSword() or fishSwordName end)
+                            end
                             -- Không tự mua Sharkman Karate/Fishman Karate trong Fish Trial.
-                            -- Giữ nguyên vũ khí/đồ đang có của account và chỉ xử lý vị trí + aim.
+                            -- Kiếm Fish Trial được chuẩn bị theo cycle; không spam LoadItem trong vòng target.
 
                             targetRoot = v:FindFirstChild("HumanoidRootPart")
                             if targetRoot then
@@ -3432,7 +3610,18 @@ do
                                     local standPosition = aimPosition
                                         + away.Unit * FISH_DISTANCE
                                         + Vector3.new(0, FISH_HEIGHT, 0)
-                                    tp(CFrame.lookAt(standPosition, aimPosition))
+                                    local standCFrame = CFrame.lookAt(standPosition, aimPosition)
+                                    local distanceToStand = (myRoot.Position - standPosition).Magnitude
+                                    if distanceToStand <= 6 then
+                                        -- Ở gần: đặt đúng vị trí ngay để không bị tween cũ/địa hình kéo xuống đất.
+                                        Movement.cancel()
+                                        myRoot.CFrame = standCFrame
+                                        myRoot.AssemblyLinearVelocity = Vector3.zero
+                                        myRoot.AssemblyAngularVelocity = Vector3.zero
+                                    else
+                                        -- Ở xa: tween thật sự tới Sea Beast; interval 0.25s tránh cancel tween quá dày.
+                                        Movement.topos(standCFrame)
+                                    end
                                 end
                             end
                         until (not v.Parent) or (not v:FindFirstChild("Health")) or v.Health.Value <= 0
@@ -3449,6 +3638,7 @@ do
             end
             _G.SHOULDSPAMSKILLS = false
             CombatActions.clearSkillAimTarget()
+            CombatActions.endFishTrialSwordMode()
             -- Draco / khác: File A không có handler riêng → fallback bay vào trial place (status rõ)
         elseif race_trial_place then
             flyTo(race_trial_place.CFrame)
@@ -4571,6 +4761,8 @@ do
         local participantCharacters = State.postTrialCharacters
         local emptyConfirm = 0
         local confirmedEmpty = false
+        local lastTargetStatusUserId = nil
+        local lastNoTargetStatusAt = 0
 
         while Runtime.alive and templeState() == "ffup" do
             if not PostTrial.isMainAlive(cycleId) then
@@ -4598,6 +4790,10 @@ do
 
                 if targetHumanoid and targetRoot and targetHumanoid.Health > 0 then
                     local userId = targetPlayer.UserId
+                    if lastTargetStatusUserId ~= userId then
+                        lastTargetStatusUserId = userId
+                        status("[MAIN " .. tostring(myStt) .. "] Đang đánh " .. tostring(targetPlayer.Name))
+                    end
                     repeat
                         task.wait()
 
@@ -4625,7 +4821,10 @@ do
 
                         local tooFar = getdis(targetRoot.CFrame) > 1500
                         if tooFar then break end
-                        attackTick(targetCharacter)
+                        -- Post-trial PvP phải bật M1 rõ ràng. Trước đây caller không truyền opts.m1,
+                        -- nên Main chỉ tween/equip và phụ thuộc FastAttack nền; nhiều executor sẽ đứng gần target
+                        -- nhưng không gây damage. Offset của attackTick giữ Main trong tầm M1 <= 11 studs.
+                        attackTick(targetCharacter, { m1 = true })
                     until false
                 else
                     -- Đã được scan sống nhưng Character biến mất trước lúc đánh = đã chết/đổi Character → bị loại.
@@ -4633,13 +4832,19 @@ do
                     task.wait(0.1)
                 end
             else
+                lastTargetStatusUserId = nil
                 if unknown > 0 then
                     -- Có participant đã thấy nhưng Character đang replicate: chưa được phép báo thắng.
                     emptyConfirm = 0
+                    if (tick() - lastNoTargetStatusAt) >= 1 then
+                        lastNoTargetStatusAt = tick()
+                        status("[MAIN " .. tostring(myStt) .. "] Chờ target FFA replicate...")
+                    end
                 else
                     emptyConfirm = emptyConfirm + 1
                     if emptyConfirm >= 3 then
                         confirmedEmpty = true
+                        status("[MAIN " .. tostring(myStt) .. "] Không còn target hợp lệ trong FFA")
                         break
                     end
                 end
