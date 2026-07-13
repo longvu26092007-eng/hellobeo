@@ -3006,13 +3006,14 @@ do
 
     -- spam-skills loop: BẬT theo _G.SHOULDSPAMSKILLS, 1 instance, check Runtime.alive (File A 2071-2123)
     -- [FISH TRIAL ONLY] Chu kỳ cố định theo yêu cầu:
-    --   Melee Z/X/C x2 trong ~1 giây -> Sword Z/X x2 trong ~1 giây -> quay lại Melee.
+    --   Melee Z/X/C x2 trong ~3 giây -> Sword Z/X x2 trong ~1 giây -> quay lại Melee.
+    -- Dành nhiều thời gian hơn cho Melee để skill kịp nhận phím/cast trước khi đổi sang Sword.
     -- Nhánh ngoài Fish Trial giữ nguyên cơ chế cooldown cũ.
     local FISH_MELEE_KEYS = { "Z", "X", "C" }
     local FISH_SWORD_KEYS = { "Z", "X" }
-    local FISH_MELEE_KEY_INTERVAL = 1 / (#FISH_MELEE_KEYS * 2) -- 6 lần bấm / 1 giây
-    local FISH_SWORD_KEY_INTERVAL = 1 / (#FISH_SWORD_KEYS * 2) -- 4 lần bấm / 1 giây
-    local FISH_KEY_HOLD = 0.035
+    local FISH_MELEE_KEY_INTERVAL = 3 / (#FISH_MELEE_KEYS * 2) -- 6 lần bấm / khoảng 3 giây
+    local FISH_SWORD_KEY_INTERVAL = 1 / (#FISH_SWORD_KEYS * 2) -- 4 lần bấm / khoảng 1 giây
+    local FISH_KEY_HOLD = 0.05
 
     local function fishSpamStillActive()
         return Runtime.alive
@@ -3076,7 +3077,7 @@ do
         local hum = char and char:FindFirstChildOfClass("Humanoid")
         if not (char and hum and hum.Health > 0) then return end
 
-        -- Pha 1: Melee Z/X/C hai lượt trong khoảng 1 giây.
+        -- Pha 1: Melee Z/X/C hai lượt trong khoảng 3 giây.
         local melee = findFishMeleeTool(char)
         if melee and equipFishPhaseTool(char, melee) then
             if not spamFishPhase(FISH_MELEE_KEYS, FISH_MELEE_KEY_INTERVAL) then return end
@@ -3598,6 +3599,7 @@ end
 --[[ ============================================================================
  [20] TRIALACTIONS — doTrialForMyRace + runTrialPhase. (File A 982-1128)
 ============================================================================ ]]
+local TrialTimeoutWatch -- forward declaration; khởi tạo ở [27.5]
 local TrialActions = {}
 do
     local LP = LocalPlayer
@@ -3716,8 +3718,8 @@ do
             -- Cũ: đứng thẳng trên HRP +500 studs → nhiều skill rơi ngoài tầm/góc bắn.
             -- Mới: đứng thấp, lùi ngang, CFrame.lookAt vào Sea Beast và cập nhật aim theo HRP đang di chuyển.
             -- CẤU HÌNH CỨNG: không đọc getgenv()/loader.
-            -- 35 studs cao + lùi 20 studs: nâng cao hơn để tránh Character/target nằm dưới nền Trial.
-            local FISH_HEIGHT = 35
+            -- 55 studs cao + lùi 20 studs: tránh Character/Sea Beast bị chìm hoặc nằm dưới nền Trial.
+            local FISH_HEIGHT = 55
             local FISH_DISTANCE = 20
             local FISH_AIM_Y_OFFSET = 5
             local FISH_MOVE_INTERVAL = 0.25
@@ -3746,20 +3748,16 @@ do
                         and (not race_trial_place or getdis(targetRoot.CFrame, race_trial_place.CFrame) < 1500) then
                         local t0 = tick()
                         local lastMoveAt = 0
-                        local lastSwordEnsureAt = 0
                         _G.SHOULDSPAMSKILLS = true
                         CombatActions.installSkillAim()
                         status("[FISH TRIAL] Đang bay tới + spam Melee/Sword Sea Beast")
 
                         repeat
                             task.wait()
-                            -- Giữ Tushita/Yama sẵn sàng; spam loop sẽ luân phiên equip Melee và Sword.
-                            if (tick() - lastSwordEnsureAt) >= 0.5 then
-                                lastSwordEnsureAt = tick()
-                                pcall(function() fishSwordName = CombatActions.equipFishTrialSword() or fishSwordName end)
-                            end
+                            -- Không ép equip Sword mỗi 0.5s: việc đó cướp tay khỏi Melee giữa pha Z/X/C.
+                            -- Sword đã được kiểm/load một lần trước target; spam sequence tự equip đúng vũ khí
+                            -- ở đầu từng pha (Melee rồi Sword), nên không spam LoadItem/equip tại đây.
                             -- Không tự mua Sharkman Karate/Fishman Karate trong Fish Trial.
-                            -- Kiếm Fish Trial được chuẩn bị theo cycle; không spam LoadItem trong vòng target.
 
                             targetRoot = v:FindFirstChild("HumanoidRootPart")
                             if targetRoot then
@@ -3832,10 +3830,21 @@ do
     function TrialActions.runTrialPhase(roleName, isMain)
         local race_trial_place = getRaceTrialPlace(WorldProbe.getRace())
         if race_trial_place and getdis(race_trial_place.CFrame) < 1500 then
+            -- Đây là điểm xác nhận Character đã thật sự vào khu Trial.
+            -- Ghi in_trail trước, rồi mới start timer 60s để cả lần gọi Trial đầu tiên cũng được canh timeout.
             if isMain then
                 local st = State.getMainStatus(State.myName)
                 if st ~= "in_trail" and st ~= "training" then State.setMyMainStatus("in_trail") end
+            elseif RuntimeState.inTrial ~= true then
+                State.reportStatus("in_trail")
             end
+            RuntimeState.inTrial = true
+            State.didEnterTrialThisTurn = true
+
+            if TrialTimeoutWatch and not TrialTimeoutWatch.start(isMain, State.myMainIndex) then
+                return "trial_timeout_reset"
+            end
+
             status(roleName .. " Doing trial")
             TrialActions.doTrialForMyRace()
             return "running_trial"
@@ -5911,6 +5920,141 @@ end
 _G.AllyFullMoonWatch = AllyFullMoonWatch
 
 --[[ ============================================================================
+ [27.5] TRIAL TIMEOUT WATCHDOG — CLIENT ONLY, đúng 60 giây kể từ lúc VÀO TRIAL.
+  - Chỉ start khi _inTrialNow == true và status đã chuyển sang in_trail.
+  - Không phụ thuộc server/cycle/event protocol.
+  - Nếu Trial chưa hoàn thành sau 60s: hủy movement/skill và reset Character.
+  - Chạy task riêng nên vẫn hoạt động nếu doTrialForMyRace() đang block.
+============================================================================ ]]
+TrialTimeoutWatch = {
+    generation = 0,
+    active = false,
+    characterToken = nil,
+    timedOutCharacterToken = nil,
+    startedAt = 0,
+}
+
+do
+    local function currentToken()
+        return tostring(State.characterToken or LocalPlayer.Character or "no-character")
+    end
+
+    local function cleanupTrialMotion()
+        Movement.cancel()
+        _G.SHOULDSPAMSKILLS = false
+        pcall(function() CombatActions.clearSkillAimTarget() end)
+        pcall(function() CombatActions.endFishTrialSwordMode() end)
+    end
+
+    local function clearActiveWatch(myGeneration)
+        if myGeneration and TrialTimeoutWatch.generation ~= myGeneration then return end
+        TrialTimeoutWatch.active = false
+        TrialTimeoutWatch.characterToken = nil
+        TrialTimeoutWatch.startedAt = 0
+        State.trialStartedAt = 0
+        State.trialStartedCycleId = nil
+    end
+
+    function TrialTimeoutWatch.stopNormal()
+        TrialTimeoutWatch.generation = TrialTimeoutWatch.generation + 1
+        clearActiveWatch()
+        -- timedOutCharacterToken chỉ được vô hiệu tự nhiên khi Character mới sinh token mới.
+    end
+
+    function TrialTimeoutWatch.start(isMain, myStt)
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if not (char and hum and hum.Health > 0) then return false end
+
+        local token = currentToken()
+
+        -- Cùng Character đã timeout thì không được tự bật lại in_trail trước khi reset xong.
+        if TrialTimeoutWatch.timedOutCharacterToken == token then
+            cleanupTrialMotion()
+            RuntimeState.inTrial = false
+            State.didEnterTrialThisTurn = false
+            if isMain then State.setMyMainStatus("waiting") else State.reportStatus("ally") end
+            pcall(function() if hum.Health > 0 then hum.Health = 0 end end)
+            return false
+        end
+
+        -- Đang đếm đúng Character này rồi: không restart timer ở mỗi tick.
+        if TrialTimeoutWatch.active
+            and TrialTimeoutWatch.characterToken == token
+            and TrialTimeoutWatch.startedAt > 0 then
+            return true
+        end
+
+        -- Hủy watch cũ (nếu có) rồi bắt đầu đúng một lần tại thời điểm đã vào Trial.
+        TrialTimeoutWatch.generation = TrialTimeoutWatch.generation + 1
+        local myGeneration = TrialTimeoutWatch.generation
+        TrialTimeoutWatch.active = true
+        TrialTimeoutWatch.characterToken = token
+        TrialTimeoutWatch.startedAt = tick()
+        State.trialStartedAt = TrialTimeoutWatch.startedAt
+        State.trialStartedCycleId = token
+
+        task.spawn(function()
+            while Runtime.alive and TrialTimeoutWatch.generation == myGeneration do
+                task.wait(0.1)
+
+                -- Character đổi hoặc chết: Trial cũ đã kết thúc, dừng timer.
+                if LocalPlayer.Character ~= char or currentToken() ~= token then
+                    clearActiveWatch(myGeneration)
+                    return
+                end
+
+                hum = char:FindFirstChildOfClass("Humanoid")
+                if not (hum and hum.Health > 0) then
+                    clearActiveWatch(myGeneration)
+                    return
+                end
+
+                -- Forcefield mở = Trial đã hoàn thành, không reset.
+                if templeState() == "ffup" then
+                    clearActiveWatch(myGeneration)
+                    return
+                end
+
+                -- Main loop đã xác nhận rời Trial bình thường.
+                if RuntimeState.inTrial ~= true then
+                    clearActiveWatch(myGeneration)
+                    return
+                end
+
+                if (tick() - TrialTimeoutWatch.startedAt) >= 60 then
+                    TrialTimeoutWatch.timedOutCharacterToken = token
+                    State.trialTimeoutCycleId = token
+                    TrialTimeoutWatch.active = false
+                    RuntimeState.inTrial = false
+                    State.didEnterTrialThisTurn = false
+                    cleanupTrialMotion()
+
+                    status((isMain and "[MAIN " .. tostring(myStt) .. "]" or "[ALLY]")
+                        .. " ⏱ Trial quá 60s chưa xong → tự reset")
+
+                    if isMain then
+                        State.setMyMainStatus("waiting")
+                        RuntimeState.myTurnStart = nil
+                    else
+                        State.reportStatus("ally")
+                    end
+
+                    -- Reset thật; CharacterAdded sẽ tạo token mới và cho phép retry sạch.
+                    pcall(function()
+                        local liveHum = char:FindFirstChildOfClass("Humanoid")
+                        if liveHum and liveHum.Health > 0 then liveHum.Health = 0 end
+                    end)
+                    return
+                end
+            end
+        end)
+
+        return true
+    end
+end
+
+--[[ ============================================================================
  [28] STATEMACHINE — flow chính y chang File A main loop (1689-2030).
 ============================================================================ ]]
 local StateMachine = {}
@@ -6135,58 +6279,7 @@ do
             local trialCycleKey = State.trialCycleId
                 or ("legacy:" .. tostring(game.JobId) .. ":" .. tostring(RuntimeState.myTurnStart or State.characterToken or "trial"))
 
-            -- Cùng cycle đã timeout: không cho latch in_trail bật lại trong lúc Character cũ chưa chết.
-            if State.trialTimeoutCycleId == trialCycleKey then
-                Movement.cancel()
-                _G.SHOULDSPAMSKILLS = false
-                pcall(function() CombatActions.clearSkillAimTarget() end)
-                if isMain then State.setMyMainStatus("waiting") else State.reportStatus("ally") end
-                pcall(function()
-                    local c = LocalPlayer.Character
-                    local h = c and c:FindFirstChildOfClass("Humanoid")
-                    if h and h.Health > 0 then h.Health = 0 end
-                end)
-                return
-            end
-
-            -- Timer riêng gắn đúng cycle; cycle đổi hoặc lần vào mới thì bắt đầu lại từ 0.
-            if State.trialStartedCycleId ~= trialCycleKey or State.trialStartedAt <= 0 then
-                State.trialStartedCycleId = trialCycleKey
-                State.trialStartedAt = tick()
-            end
-
-            if (tick() - State.trialStartedAt) >= Config.TRIAL_ACTIVE_TIMEOUT then
-                State.trialTimeoutCycleId = trialCycleKey
-                RuntimeState.inTrial = false
-                State.didEnterTrialThisTurn = false
-                Movement.cancel()
-                _G.SHOULDSPAMSKILLS = false
-                pcall(function() CombatActions.clearSkillAimTarget() end)
-                status((isMain and "[MAIN " .. tostring(myStt) .. "]" or "[ALLY]")
-                    .. " ⏱ Trial quá 60s → tính thua và retry")
-
-                if isMain then
-                    if Config.enableEventProtocol and CriticalEvents.enabled() and State.trialCycleId then
-                        CriticalEvents.emit("trial_loss", {
-                            cycle_id = State.trialCycleId,
-                            reason = "trial_timeout_60s",
-                            phase = "trial",
-                        })
-                    end
-                    State.setMyMainStatus("waiting")
-                    RuntimeState.myTurnStart = nil
-                else
-                    State.reportStatus("ally")
-                end
-
-                pcall(function()
-                    local c = LocalPlayer.Character
-                    local h = c and c:FindFirstChildOfClass("Humanoid")
-                    if h and h.Health > 0 then h.Health = 0 end
-                end)
-                return
-            end
-
+            -- Chỉ sau khi đã xác nhận VÀO TRIAL và ghi status in_trail mới bắt đầu đếm 60 giây.
             if isMain then
                 if myStatus ~= "in_trail" then State.setMyMainStatus("in_trail"); myStatus = "in_trail" end
             elseif not RuntimeState.inTrial then
@@ -6194,6 +6287,11 @@ do
             end
             RuntimeState.inTrial = true
             State.didEnterTrialThisTurn = true
+
+            -- Client-only watchdog: không restart mỗi tick, không cần server hỗ trợ.
+            if not TrialTimeoutWatch.start(isMain, myStt) then
+                return
+            end
             pcall(function() if TrialEvents then TrialEvents.trialEntered() end end)
             if isMain and State.fullmoonJobid and game.JobId == State.fullmoonJobid then RuntimeState.didTrialInFM = true end
             StateMachine.transition(S.IN_TRIAL, "in trial zone")
@@ -6202,7 +6300,8 @@ do
             return
         else
             if RuntimeState.inTrial then
-                -- Rời Trial bình thường (vào FFA hoặc ra ngoài): dừng timer 60s của lần Trial này.
+                -- Rời Trial bình thường (vào FFA hoặc ra ngoài): dừng watchdog/timer 60s của lần Trial này.
+                TrialTimeoutWatch.stopNormal()
                 State.trialStartedAt = 0
                 State.trialStartedCycleId = nil
                 if not isMain then
