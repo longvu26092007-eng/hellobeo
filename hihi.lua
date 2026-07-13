@@ -145,6 +145,7 @@ do
     Config.UI_THROTTLE        = 0.2    -- File A live status 0.2s
     Config.DEAD_JOB_TTL       = 1800   -- File A 2175
     Config.MAIN_TURN_TIMEOUT  = 300    -- File A 1752
+    Config.TRIAL_ACTIVE_TIMEOUT = 60   -- timeout riêng cho một lần Trial Race (không phải toàn lượt Main)
     Config.TRAIN_WINDOW       = 300    -- File A 1612
     Config.HELPRESET_TIMEOUT  = 25     -- File A 2005
     -- CLEAN JOIN: fullmoon-join LUÔN do server + 2 Ally điều phối (bỏ tự-hop). Method chỉ là hành vi sau trial.
@@ -667,6 +668,8 @@ do
     -- CLEAN JOIN: chống "chưa trial đã done" — chỉ set done/training khi thật sự đã vào trial lượt này
     State.didEnterTrialThisTurn = false
     State.trialStartedAt        = 0
+    State.trialStartedCycleId   = nil  -- cycle mà timer Trial 60s đang đo
+    State.trialTimeoutCycleId   = nil  -- latch chặn cùng cycle tự bật lại in_trail sau timeout
     State._lastCurrentMain      = nil  -- BS-5: theo dõi current đổi cycle
     -- [FINAL §7.2] session do server cấp
     State.sessionToken      = nil
@@ -685,6 +688,11 @@ do
     State.activeCycleId          = nil
     State.postTrialPhase         = "idle"
     State.postTrialStartedAt     = nil
+    State.postTrialCycleId       = nil  -- cycle canon của grace/kill phase
+    State.postTrialHoldCFrame    = nil  -- vị trí giữ Main đứng im đủ 4 giây
+    State.postTrialEliminated    = {}   -- userId đã chết trong cycle; respawn không đánh lại
+    State.postTrialSeen          = {}   -- userId từng được thấy trong FFA
+    State.postTrialCharacters    = {}   -- userId -> Character đầu tiên của participant trong cycle
     State.postTrialDeathDetected = false
     State.intentionalPostTrialReset = false
     State.intentionalResetCycleId    = nil   -- [§XIV] cycle của intentional reset (chỉ set khi win_confirmed)
@@ -977,6 +985,12 @@ do
             if data.trial_cycle_id ~= State.trialCycleId and TrialEvents then
                 pcall(function() TrialEvents.resetForNewCycle() end)
                 State.winConfirmed = false
+                State.trialStartedAt = 0
+                State.trialStartedCycleId = nil
+                State.trialTimeoutCycleId = nil
+                State.postTrialStartedAt = nil
+                State.postTrialCycleId = nil
+                State.postTrialHoldCFrame = nil
                 -- [FIX #5] KHÔNG clear intentional-reset flags ở đây (đường /sync–/curmain). Nếu /curmain tới
                 --   đúng lúc Main vừa Health=0 mà Humanoid.Died chưa chạy, clear ở đây → death thật bị hiểu là
                 --   death (không phải intentional) → gửi main_died oan. Chỉ processAfterRespawn() được clear.
@@ -992,6 +1006,12 @@ do
             if State.trialCycleId ~= nil and TrialEvents then pcall(function() TrialEvents.resetForNewCycle() end) end
             State.trialCycleId = nil
             State.winConfirmed = false
+            State.trialStartedAt = 0
+            State.trialStartedCycleId = nil
+            State.trialTimeoutCycleId = nil
+            State.postTrialStartedAt = nil
+            State.postTrialCycleId = nil
+            State.postTrialHoldCFrame = nil
             -- [FIX #5] KHÔNG clear intentional-reset flags ở idle-sync (lý do như trên). processAfterRespawn()
             --   sẽ clear sau khi Character mới sống. Giữ flag ở đây để Humanoid.Died đang chờ vẫn nhận diện
             --   đúng intentional reset thay vì loss.
@@ -1352,6 +1372,11 @@ do
         local function onNewCharacter()
             State.characterGeneration = (State.characterGeneration or 0) + 1
             rebuildToken()
+            -- Character mới = đã rời lifecycle Trial cũ; cho phép retry cùng lượt sạch timer/latch.
+            State.trialStartedAt = 0
+            State.trialStartedCycleId = nil
+            State.trialTimeoutCycleId = nil
+            State.postTrialHoldCFrame = nil
         end
         _G.KaitunCharacterToken = function() return State.characterToken or rebuildToken() end
         _G.KaitunRebuildToken   = rebuildToken   -- gọi lại sau /init để nhét sessionGeneration mới vào token
@@ -2299,27 +2324,68 @@ do
         if State.isAlly[v.Name] then return false end
         return true
     end
-    function CombatActions.getplayers()
-        local plrs = {}
-        for _, v in pairs(Players:GetPlayers()) do
-            if v ~= LP and v.Character and not State.isMain[v.Name] and noideaforname(v) then
-                local hum = v.Character:FindFirstChild("Humanoid")
-                local hrp = v.Character:FindFirstChild("HumanoidRootPart")
-                if hum and hrp and hum.Health > 0 then
-                    for _, pos in pairs(CombatActions.pos_plr_trial) do
-                        if Movement.getdis(hrp.CFrame, pos) < 10 then
-                            plrs[v.Character] = true
+    -- Quét động người còn sống trong toàn vùng FFA.
+    -- Trả record { player, character }, nhờ vậy Character đầu cycle được giữ ổn định khi target chết/respawn.
+    -- eliminated[userId]=true: người đã chết trong lượt này, respawn cũng KHÔNG đánh lại.
+    -- seen[userId]=true: từng quan sát thấy trong FFA; Character nil tạm thời được tính unknown để chặn thắng giả.
+    function CombatActions.getplayers(eliminated, seen, participantCharacters)
+        eliminated = eliminated or {}
+        seen = seen or {}
+        participantCharacters = participantCharacters or {}
+        local targets = {}
+        local unknown = 0
+        local myRoot = Movement.getHRP()
+
+        for _, player in ipairs(Players:GetPlayers()) do
+            local userId = player.UserId
+            if player ~= LP and not State.isMain[player.Name] and noideaforname(player)
+                and not eliminated[userId] then
+                local character = player.Character
+                local knownCharacter = participantCharacters[userId]
+
+                -- Cùng Player nhưng Character đã đổi: Character cũ đã chết và người này đã bị loại.
+                if knownCharacter and character ~= knownCharacter then
+                    eliminated[userId] = true
+                else
+                    local hum = character and character:FindFirstChildOfClass("Humanoid")
+                    local root = character and character:FindFirstChild("HumanoidRootPart")
+
+                    if hum and root then
+                        if hum.Health > 0 then
+                            local observed = CombatActions.observeCharacterInFFA(player)
+                            -- true = trong inner box; nil với Character sống + ffup = vùng đệm của FFA.
+                            -- Cả hai đều là mục tiêu hợp lệ; false mới là chắc chắn ngoài FFA.
+                            if observed ~= false then
+                                seen[userId] = true
+                                participantCharacters[userId] = participantCharacters[userId] or character
+                                targets[#targets + 1] = { player = player, character = participantCharacters[userId] }
+                            end
+                        elseif seen[userId] then
+                            eliminated[userId] = true
                         end
+                    elseif seen[userId] then
+                        unknown = unknown + 1
                     end
                 end
             end
         end
-        return plrs
+
+        -- Chọn người gần Main trước để giảm tween chéo và tránh đổi target lung tung.
+        table.sort(targets, function(a, b)
+            local ar = a.character and a.character:FindFirstChild("HumanoidRootPart")
+            local br = b.character and b.character:FindFirstChild("HumanoidRootPart")
+            if not myRoot then return a.player.UserId < b.player.UserId end
+            local ad = ar and (ar.Position - myRoot.Position).Magnitude or math.huge
+            local bd = br and (br.Position - myRoot.Position).Magnitude or math.huge
+            if ad == bd then return a.player.UserId < b.player.UserId end
+            return ad < bd
+        end)
+
+        return targets, unknown
     end
-    function CombatActions.countplayers()
-        local c = 0
-        for _ in pairs(CombatActions.getplayers()) do c = c + 1 end
-        return c
+    function CombatActions.countplayers(eliminated, seen, participantCharacters)
+        local targets, unknown = CombatActions.getplayers(eliminated, seen, participantCharacters)
+        return #targets, unknown
     end
 
     -- [FINAL §J1] attackTick: KHÔNG spam M1 toàn cục nữa. Mặc định chỉ di chuyển + equip/haki + FastAttack nền.
@@ -2612,6 +2678,98 @@ do
         end)
     end
 
+    -- [FISH TRIAL AIM] Aim target tạm thời cho skill do LocalScript của game gửi Remote.
+    -- Hook chỉ sửa Vector3/CFrame khi: target đang bật + SHOULDSPAMSKILLS=true + call đến từ game
+    -- (checkcaller=false). Vì vậy BuySharkman/HTTP/remote do chính script gọi không bị đụng.
+    do
+        local aimState = { target = nil, installed = false, installFailed = false }
+
+        local function resolveAimPosition(target)
+            local kind = typeof(target)
+            if kind == "Vector3" then return target end
+            if kind == "CFrame" then return target.Position end
+            if kind == "Instance" then
+                if target:IsA("BasePart") then return target.Position end
+                if target:IsA("Model") then
+                    local part = target:FindFirstChild("HumanoidRootPart")
+                        or target.PrimaryPart
+                        or target:FindFirstChildWhichIsA("BasePart", true)
+                    return part and part.Position or nil
+                end
+            end
+            return nil
+        end
+
+        local function rewriteAimArgs(oldNamecall, self, ...)
+            local method = getnamecallmethod()
+            local target = aimState.target
+            if target and _G.SHOULDSPAMSKILLS and not checkcaller()
+                and (method == "FireServer" or method == "InvokeServer") then
+                local args = { ... }
+                for i = 1, #args do
+                    local kind = typeof(args[i])
+                    if kind == "Vector3" then
+                        args[i] = target
+                        return oldNamecall(self, unpack(args))
+                    elseif kind == "CFrame" then
+                        args[i] = CFrame.new(target)
+                        return oldNamecall(self, unpack(args))
+                    end
+                end
+            end
+            return oldNamecall(self, ...)
+        end
+
+        function CombatActions.installSkillAim()
+            if aimState.installed then return true end
+            if aimState.installFailed then return false end
+            if type(newcclosure) ~= "function" or type(getnamecallmethod) ~= "function"
+                or type(checkcaller) ~= "function" then
+                aimState.installFailed = true
+                Logger.warn("Fish Trial aim: executor thiếu metamethod API; vẫn hạ độ cao nhưng không khóa remote aim", "fish_aim_api")
+                return false
+            end
+
+            local ok, err = pcall(function()
+                if type(hookmetamethod) == "function" then
+                    local oldNamecall
+                    oldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+                        return rewriteAimArgs(oldNamecall, self, ...)
+                    end))
+                else
+                    if type(getrawmetatable) ~= "function" or type(setreadonly) ~= "function" then
+                        error("missing hookmetamethod/getrawmetatable")
+                    end
+                    local mt = getrawmetatable(game)
+                    local oldNamecall = mt.__namecall
+                    setreadonly(mt, false)
+                    mt.__namecall = newcclosure(function(self, ...)
+                        return rewriteAimArgs(oldNamecall, self, ...)
+                    end)
+                    setreadonly(mt, true)
+                end
+            end)
+
+            if not ok then
+                aimState.installFailed = true
+                Logger.warn("Fish Trial aim hook fail: " .. tostring(err), "fish_aim_hook")
+                return false
+            end
+            aimState.installed = true
+            return true
+        end
+
+        function CombatActions.setSkillAimTarget(target)
+            aimState.target = resolveAimPosition(target)
+            if aimState.target then CombatActions.installSkillAim() end
+            return aimState.target ~= nil
+        end
+
+        function CombatActions.clearSkillAimTarget()
+            aimState.target = nil
+        end
+    end
+
     -- spam-skills loop: BẬT theo _G.SHOULDSPAMSKILLS, 1 instance, check Runtime.alive (File A 2071-2123)
     function CombatActions.startSpamSkills()
         task.spawn(function()
@@ -2863,8 +3021,8 @@ do
     end
 end
 -- alias File A
-local function getplayers() return CombatActions.getplayers() end
-local function countplayers() return CombatActions.countplayers() end
+local function getplayers(...) return CombatActions.getplayers(...) end
+local function countplayers(...) return CombatActions.countplayers(...) end
 local function attackTick(t) return CombatActions.attackTick(t) end
 local function getmob1(pos) return CombatActions.getmob1(pos) end
 local function checkmob_(v) return CombatActions.checkmob_(v) end
@@ -3225,24 +3383,72 @@ do
             end
 
         elseif myrace == "Fishman" then
+            -- [FISH TRIAL AIM] Logic target/timeout giữ nguyên; chỉ sửa cách đứng + khóa aim vào Sea Beast.
+            -- Cũ: đứng thẳng trên HRP +500 studs → nhiều skill rơi ngoài tầm/góc bắn.
+            -- Mới: đứng thấp, lùi ngang, CFrame.lookAt vào Sea Beast và cập nhật aim theo HRP đang di chuyển.
+            -- CẤU HÌNH CỨNG: không đọc getgenv()/loader.
+            -- 15 studs cao + lùi 20 studs giúp skill gần mục tiêu hơn, hạn chế bắn hụt do bay quá cao.
+            local FISH_HEIGHT = 15
+            local FISH_DISTANCE = 20
+            local FISH_AIM_Y_OFFSET = 5
+            local FISH_MOVE_INTERVAL = 0.12
             for _, v in pairs(workspace.SeaBeasts:GetChildren()) do
-                pcall(function()
-                    if v:FindFirstChild('Health') and v.Health.Value > 0 and v:FindFirstChild("HumanoidRootPart")
-                        and (not race_trial_place or getdis(v.HumanoidRootPart.CFrame, race_trial_place.CFrame) < 1500) then
+                local ok, err = pcall(function()
+                    local health = v:FindFirstChild("Health")
+                    local targetRoot = v:FindFirstChild("HumanoidRootPart")
+                    if health and health.Value > 0 and targetRoot
+                        and (not race_trial_place or getdis(targetRoot.CFrame, race_trial_place.CFrame) < 1500) then
                         local t0 = tick()
-                        repeat task.wait()
-                            local bp = LP:FindFirstChild("Backpack")
-                            if bp and not bp:FindFirstChild("Sharkman Karate") then
-                                SafeRemote.invoke(3, "BuySharkmanKarate")
+                        local lastMoveAt = 0
+                        _G.SHOULDSPAMSKILLS = true
+                        CombatActions.installSkillAim()
+
+                        repeat
+                            task.wait()
+                            -- Không tự mua Sharkman Karate/Fishman Karate trong Fish Trial.
+                            -- Giữ nguyên vũ khí/đồ đang có của account và chỉ xử lý vị trí + aim.
+
+                            targetRoot = v:FindFirstChild("HumanoidRootPart")
+                            if targetRoot then
+                                local aimPosition = targetRoot.Position + Vector3.new(0, FISH_AIM_Y_OFFSET, 0)
+                                CombatActions.setSkillAimTarget(aimPosition)
+
+                                local myChar = LP.Character
+                                local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+                                if myRoot and (tick() - lastMoveAt) >= FISH_MOVE_INTERVAL then
+                                    lastMoveAt = tick()
+                                    -- Giữ phía đang đứng để tránh nhảy xuyên qua Sea Beast khi target quay.
+                                    local away = Vector3.new(
+                                        myRoot.Position.X - aimPosition.X,
+                                        0,
+                                        myRoot.Position.Z - aimPosition.Z
+                                    )
+                                    if away.Magnitude < 1 then
+                                        local look = targetRoot.CFrame.LookVector
+                                        away = Vector3.new(-look.X, 0, -look.Z)
+                                    end
+                                    if away.Magnitude < 0.1 then away = Vector3.new(0, 0, -1) end
+
+                                    local standPosition = aimPosition
+                                        + away.Unit * FISH_DISTANCE
+                                        + Vector3.new(0, FISH_HEIGHT, 0)
+                                    tp(CFrame.lookAt(standPosition, aimPosition))
+                                end
                             end
-                            tp(v.HumanoidRootPart.CFrame * CFrame.new(0, 500, 0))
-                            _G.SHOULDSPAMSKILLS = true
-                        until (not v.Parent) or (not v:FindFirstChild('Health')) or v.Health.Value <= 0
+                        until (not v.Parent) or (not v:FindFirstChild("Health")) or v.Health.Value <= 0
                             or (not v:FindFirstChild("HumanoidRootPart")) or (tick() - t0) > 25
-                        _G.SHOULDSPAMSKILLS = false
                     end
                 end)
+
+                -- Cleanup bắt buộc kể cả khi target biến mất/error để không aim nhầm ngoài Fish Trial.
+                _G.SHOULDSPAMSKILLS = false
+                CombatActions.clearSkillAimTarget()
+                if not ok then
+                    Logger.warn("Fish Trial target error: " .. tostring(err), "fish_trial_target")
+                end
             end
+            _G.SHOULDSPAMSKILLS = false
+            CombatActions.clearSkillAimTarget()
             -- Draco / khác: File A không có handler riêng → fallback bay vào trial place (status rõ)
         elseif race_trial_place then
             flyTo(race_trial_place.CFrame)
@@ -4074,6 +4280,28 @@ do
 
     function PostTrial.deathReason() return _guard.reason end
 
+    local function clearKillRuntime()
+        State.postTrialStartedAt = nil
+        State.postTrialCycleId = nil
+        State.postTrialHoldCFrame = nil
+        State.postTrialEliminated = {}
+        State.postTrialSeen = {}
+        State.postTrialCharacters = {}
+    end
+    PostTrial.clearKillRuntime = clearKillRuntime
+
+    local function stopPostTrialMotion()
+        Movement.cancel()
+        _G.SHOULDSPAMSKILLS = false
+        pcall(function() CombatActions.clearSkillAimTarget() end)
+        local root = Movement.getHRP()
+        if root then
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+        end
+        return root
+    end
+
     -- Ally auto-reset CHẮC CHẮN + CHỜ Character mới rồi mới gửi helpreset (§14/B3).
     -- [FINAL §14] KHÔNG gửi helpreset sau task.wait(0.5) đơn giản. Phải: char cũ chết → CharacterAdded →
     --   Humanoid mới Health>0 → không còn FFA → cycle vẫn đúng → gửi ally_respawn_confirmed + helpreset (V2).
@@ -4285,133 +4513,204 @@ do
     end
 
     -- [FIX-BUG2] Main đang turn (current) kill player trong tầm rồi reset.
-    -- 3s đầu đứng im để ally kịp reset trước, tránh main reset theo trước ally.
+    -- 4s đầu đứng im thật để ally kịp reset trước, tránh tween cũ kéo Main đi.
     -- BỎ ĐUỔI khi player chạy xa > 1500 studs (chống tween đi lung tung ra khỏi vùng FFA).
     -- Chỉ reset khi đã thắng trial (didEnterTrialThisTurn).
     -- [FIX-BUG2] + DEATH GUARD: phát hiện MAIN chết trong kill phase → mark loss, KHÔNG reset
     function PostTrial.mainKillThenReset(myStt, currentmain)
-        -- [PROD REFACTOR §VII/§XIV] Death guard dùng SERVER cycle ID (State.trialCycleId) làm cycle ID canon.
-        --   State.postTrialStartedAt CHỈ là MỐC THỜI ĐIỂM bắt đầu chờ 4s (timestamp) — TUYỆT ĐỐI không so sánh
-        --   hoặc gửi như cycle ID. armDeathGuard() idempotent: chỉ connect khi Character đổi, disconnect cũ.
-        if not State.postTrialStartedAt or (tick() - State.postTrialStartedAt) > 60 then
-            State.postTrialStartedAt = tick()
-            -- cycle mới → dọn guard cũ (không giữ result), rồi arm lại cho Character hiện tại
-            PostTrial.clearCycle("new_kill_cycle", false)
+        -- Cycle canon: ưu tiên server cycle; legacy dùng đúng mốc đã vào Trial, không dùng timestamp grace làm cycle.
+        local cycleId = State.trialCycleId
+        if cycleId == nil then
+            cycleId = "legacy:" .. tostring(State.trialStartedCycleId or State.trialStartedAt or game.JobId)
         end
-        -- cycle ID canon = server cycle (V2). V2 tắt → fallback mốc chờ (CHỈ dùng nội bộ guard, KHÔNG gửi server).
-        local cycleId = State.trialCycleId or State.postTrialStartedAt
+
+        -- Chỉ khởi tạo grace/guard khi cycle thực sự đổi. Không tái sử dụng timestamp của lượt trước.
+        if State.postTrialCycleId ~= cycleId or not State.postTrialStartedAt then
+            PostTrial.clearCycle("new_kill_cycle", false)
+            clearKillRuntime()
+            State.postTrialCycleId = cycleId
+            State.postTrialStartedAt = tick()
+            State.postTrialEliminated = {}
+            State.postTrialSeen = {}
+            State.postTrialCharacters = {}
+            local root = stopPostTrialMotion()
+            State.postTrialHoldCFrame = root and root.CFrame or nil
+        end
+
         PostTrial.armDeathGuard(cycleId)
-        -- [FINAL] gắn cycle V2 hiện tại cho state per-cycle (death guard intentional-check dùng)
         State.activeCycleId = cycleId
         State.postTrialPhase = "kill_phase"
 
-        -- [§XIII] Guard 4s cho ally reset trước (đo bằng timestamp State.postTrialStartedAt — không phải cycle ID)
+        -- Đứng im THẬT đủ 4 giây: hủy tween, xóa velocity, giữ đúng CFrame đã chốt đầu cycle.
         if (tick() - State.postTrialStartedAt) < 4 then
-            _G.SHOULDSPAMSKILLS = false
-            status("[MAIN " .. tostring(myStt) .. "] Kill phase → đứng im 4s cho ally reset trước...")
+            local root = stopPostTrialMotion()
+            if root then
+                State.postTrialHoldCFrame = State.postTrialHoldCFrame or root.CFrame
+                root.CFrame = State.postTrialHoldCFrame
+            end
+            -- Seed participant Character ngay trong grace; ai chết/respawn trước lúc Main bắt đầu đánh vẫn bị loại đúng.
+            getplayers(State.postTrialEliminated, State.postTrialSeen, State.postTrialCharacters)
+            status("[MAIN " .. tostring(myStt) .. "] Kill phase → đứng im đủ 4s cho ally reset trước...")
             if not PostTrial.isMainAlive(cycleId) then
                 PostTrial.markMainLoss("grace_death", cycleId)
                 PostTrial.clearCycle("grace_death", true)
-                State.postTrialStartedAt = nil
+                clearKillRuntime()
                 DBG("[POSTTRIAL] Died in grace period → abort", "err", "posttrial_grace_death")
+                State.setMyMainStatus("waiting")
                 return "posttrial_died"
             end
             return "posttrial_wait_ally"
         end
+        State.postTrialHoldCFrame = nil
 
-        -- Sau 3s: chủ động đi kill player theo tọa độ
+        -- Kill động: giết một người → đánh dấu bị loại → QUÉT LẠI toàn vùng FFA → tìm người tiếp theo.
+        -- Không chờ Character của người đã chết respawn và không đánh lại UserId đã bị loại.
         status("[MAIN " .. tostring(myStt) .. "] Kill Players After Trial")
-        for plr in pairs(getplayers()) do
-            if plr then
-                repeat
-                    task.wait()
+        local eliminated = State.postTrialEliminated
+        local seen = State.postTrialSeen
+        local participantCharacters = State.postTrialCharacters
+        local emptyConfirm = 0
+        local confirmedEmpty = false
 
-                    -- [PROD REFACTOR §22] death guard: dựa vào cờ cycle-scoped (KHÔNG tạo connection mới).
-                    if not PostTrial.isMainAlive(cycleId) then
-                        PostTrial.markMainLoss("kill_loop_death", cycleId)
-                        DBG("[POSTTRIAL] MAIN died during kill loop → break", "err", "posttrial_kill_death")
+        while Runtime.alive and templeState() == "ffup" do
+            if not PostTrial.isMainAlive(cycleId) then
+                PostTrial.markMainLoss("kill_loop_death", cycleId)
+                DBG("[POSTTRIAL] MAIN died during kill loop → abort", "err", "posttrial_kill_death")
+                break
+            end
+            if State.trialCycleId ~= nil and State.trialCycleId ~= cycleId then
+                DBG("[POSTTRIAL] Server cycle changed during kill → abort old cycle", "warn", "posttrial_cycle_changed")
+                stopPostTrialMotion()
+                PostTrial.clearCycle("server_cycle_changed", false)
+                clearKillRuntime()
+                return "posttrial_running"
+            end
+
+            local targets, unknown = getplayers(eliminated, seen, participantCharacters)
+            local target = targets[1]
+
+            if target then
+                emptyConfirm = 0
+                local targetPlayer = target.player
+                local targetCharacter = target.character
+                local targetHumanoid = targetCharacter and targetCharacter:FindFirstChildOfClass("Humanoid")
+                local targetRoot = targetCharacter and targetCharacter:FindFirstChild("HumanoidRootPart")
+
+                if targetHumanoid and targetRoot and targetHumanoid.Health > 0 then
+                    local userId = targetPlayer.UserId
+                    repeat
+                        task.wait()
+
+                        if not PostTrial.isMainAlive(cycleId) then
+                            PostTrial.markMainLoss("kill_loop_death", cycleId)
+                            break
+                        end
+                        if templeState() ~= "ffup" or State.postTrialDeathDetected then break end
+
+                        -- Character đổi = người cũ đã chết/respawn; trong Trial họ đã bị loại, không đuổi Character mới.
+                        if targetPlayer.Character ~= targetCharacter then
+                            eliminated[userId] = true
+                            break
+                        end
+
+                        targetHumanoid = targetCharacter:FindFirstChildOfClass("Humanoid")
+                        targetRoot = targetCharacter:FindFirstChild("HumanoidRootPart")
+                        if not targetHumanoid or not targetRoot or targetHumanoid.Health <= 0 then
+                            eliminated[userId] = true
+                            break
+                        end
+
+                        local observed = CombatActions.observeCharacterInFFA(targetPlayer)
+                        if observed == false then break end -- chắc chắn đã ra ngoài FFA
+
+                        local tooFar = getdis(targetRoot.CFrame) > 1500
+                        if tooFar then break end
+                        attackTick(targetCharacter)
+                    until false
+                else
+                    -- Đã được scan sống nhưng Character biến mất trước lúc đánh = đã chết/đổi Character → bị loại.
+                    eliminated[targetPlayer.UserId] = true
+                    task.wait(0.1)
+                end
+            else
+                if unknown > 0 then
+                    -- Có participant đã thấy nhưng Character đang replicate: chưa được phép báo thắng.
+                    emptyConfirm = 0
+                else
+                    emptyConfirm = emptyConfirm + 1
+                    if emptyConfirm >= 3 then
+                        confirmedEmpty = true
                         break
                     end
-
-                    attackTick(plr)
-                    local hrp = plr:FindFirstChild("HumanoidRootPart")
-                    local tooFar = hrp and getdis(hrp.CFrame) > 1500
-                until not plr or not plr.Parent or not plr:FindFirstChild("Humanoid")
-                    or not plr:FindFirstChild("HumanoidRootPart") or plr.Humanoid.Health <= 0
-                    or templeState() ~= "ffup" or tooFar or State.postTrialDeathDetected
+                end
+                task.wait(0.2)
             end
-            if State.postTrialDeathDetected then break end
         end
-        _G.SHOULDSPAMSKILLS = false
+        stopPostTrialMotion()
 
-        -- [PROD REFACTOR §22] Nếu MAIN chết → abort reset, mark loss, giữ current (retry). KHÔNG disconnect
-        --   guard vô điều kiện giữa lượt; clearCycle(preserveResult=true) để FSM đọc kết quả.
-        if State.postTrialDeathDetected then
+        -- Main chết luôn ưu tiên hơn mọi kết quả thắng.
+        if State.postTrialDeathDetected or not PostTrial.isMainAlive(cycleId) then
+            PostTrial.markMainLoss("posttrial_death", cycleId)
             PostTrial.clearCycle("loss", true)
-            State.postTrialStartedAt = nil
+            clearKillRuntime()
             DBG("[POSTTRIAL] Loss marked → KHÔNG reset, KHÔNG training", "err", "posttrial_loss")
-            State.setMyMainStatus("waiting")  -- Stay waiting, will retry trial
+            State.setMyMainStatus("waiting")
             return "posttrial_died"
         end
 
-        -- [FIX-BUG2] Only proceed to win/reset if countplayers==0 AND MAIN still alive
-        if countplayers() <= 0 then
-            -- §21: double-check MAIN còn sống (respawn race) — death ưu tiên hơn win
-            if not PostTrial.isMainAlive(cycleId) then
-                PostTrial.markMainLoss("win_check_death", cycleId)
-                PostTrial.clearCycle("win_check_death", true)
-                State.postTrialStartedAt = nil
-                DBG("[POSTTRIAL] MAIN dead at win check → mark loss", "err", "posttrial_win_check_death")
-                State.setMyMainStatus("waiting")
-                return "posttrial_died"
-            end
+        -- FFA/cycle đổi giữa lúc quét: không tự suy ra thắng.
+        if templeState() ~= "ffup" or not confirmedEmpty then
+            return "posttrial_running"
+        end
 
-            local isCurrentMain = State.isMain[State.myName] and State.myName == currentmain
-            local isOtherMain   = State.isMain[State.myName] and State.myName ~= currentmain
-            if isCurrentMain then
-                -- [FINAL §B5/§18-20] V2: gửi win candidate, chờ win_confirmed rồi mới intentional reset.
-                --   V2 tắt/disabled → fallback currentMainReset() (helpreset all_done legacy).
-                if Config.enableEventProtocol and CriticalEvents.enabled() and State.trialCycleId then
-                    local r = PostTrial.currentMainWinV2(myStt, State.trialCycleId)
-                    if r == "win_confirmed_reset" then
-                        PostTrial.clearCycle("win", false)
-                        State.postTrialStartedAt = nil
-                        -- [§XVII/§XVIII] KHÔNG set thẳng training. Check V4 progress 3 lần rồi ROUTE theo result.
-                        local cls = PostTrial.processAfterRespawn(myStt)
-                        if cls == "training" then
-                            State.setMyMainStatus("training")
-                        elseif cls == "done" then
-                            State.setMyMainStatus("done")
-                        else
-                            -- trialable / can_buy_gear / uncertain → GIỮ current (waiting), KHÔNG training/done.
-                            --   trialable: retry lượt sau; can_buy_gear: gear flow ở nhánh dưới verify; uncertain: chờ.
-                            State.setMyMainStatus("waiting")
-                        end
-                        return "main_reset_done"
-                    elseif r == "posttrial_died" then
-                        PostTrial.clearCycle("loss", true)
-                        State.postTrialStartedAt = nil
-                        State.setMyMainStatus("waiting")
-                        return "posttrial_died"
+        -- §21: kiểm lần cuối ngay trước win candidate.
+        if not PostTrial.isMainAlive(cycleId) then
+            PostTrial.markMainLoss("win_check_death", cycleId)
+            PostTrial.clearCycle("win_check_death", true)
+            clearKillRuntime()
+            DBG("[POSTTRIAL] MAIN dead at win check → mark loss", "err", "posttrial_win_check_death")
+            State.setMyMainStatus("waiting")
+            return "posttrial_died"
+        end
+
+        local isCurrentMain = State.isMain[State.myName] and State.myName == currentmain
+        local isOtherMain   = State.isMain[State.myName] and State.myName ~= currentmain
+        if isCurrentMain then
+            -- V2: server xác nhận đủ điều kiện rồi mới intentional reset.
+            if Config.enableEventProtocol and CriticalEvents.enabled() and State.trialCycleId then
+                local r = PostTrial.currentMainWinV2(myStt, State.trialCycleId)
+                if r == "win_confirmed_reset" then
+                    PostTrial.clearCycle("win", false)
+                    clearKillRuntime()
+                    local cls = PostTrial.processAfterRespawn(myStt)
+                    if cls == "training" then
+                        State.setMyMainStatus("training")
+                    elseif cls == "done" then
+                        State.setMyMainStatus("done")
                     else
-                        -- win_timeout / no_cycle → GIỮ current, retry lượt sau (KHÔNG reset)
-                        return "posttrial_running"
+                        State.setMyMainStatus("waiting")
                     end
+                    return "main_reset_done"
+                elseif r == "posttrial_died" then
+                    PostTrial.clearCycle("loss", true)
+                    clearKillRuntime()
+                    State.setMyMainStatus("waiting")
+                    return "posttrial_died"
+                else
+                    return "posttrial_running"
                 end
-                PostTrial.clearCycle("win", false)
-                State.postTrialStartedAt = nil
-                DBG("[POSTTRIAL] Win confirmed (legacy) → reset", "ok", "posttrial_win")
-                return PostTrial.currentMainReset(myStt)
-            elseif isOtherMain then
-                -- [FINAL §B8] Main2–5 KHÔNG vào FFA lượt current → KHÔNG chạy otherMainReset trong V2.
-                --   Chỉ dọn cycle. (V2 tắt: giữ hành vi cũ để tương thích.)
-                PostTrial.clearCycle("win_other", false)
-                State.postTrialStartedAt = nil
-                if not (Config.enableEventProtocol and CriticalEvents.enabled()) then
-                    return PostTrial.otherMainReset()
-                end
-                return "posttrial_running"
             end
+            PostTrial.clearCycle("win", false)
+            clearKillRuntime()
+            DBG("[POSTTRIAL] Win confirmed (legacy) → reset", "ok", "posttrial_win")
+            return PostTrial.currentMainReset(myStt)
+        elseif isOtherMain then
+            PostTrial.clearCycle("win_other", false)
+            clearKillRuntime()
+            if not (Config.enableEventProtocol and CriticalEvents.enabled()) then
+                return PostTrial.otherMainReset()
+            end
+            return "posttrial_running"
         end
         return "posttrial_running"
     end
@@ -5423,6 +5722,9 @@ do
                 local in_temple = getdis(CFrame.new(TEMPLE_ENTRY_POS)) < 3000
                 if not in_temple then
                     status("[MAIN " .. myStt .. "] Died in trial, retrying...")
+                    State.trialStartedAt = 0
+                    State.trialStartedCycleId = nil
+                    State.trialTimeoutCycleId = nil
                     State.setMyMainStatus("waiting"); myStatus = "waiting"
                 end
             end
@@ -5448,24 +5750,79 @@ do
         local _tplace = getRaceTrialPlace(WorldProbe.getRace())
         local _inTrialNow = (_tplace and ab and getdis(_tplace.CFrame) < 1500 and templeState() ~= "ffup") and true or false
         if _inTrialNow then
+            local trialCycleKey = State.trialCycleId
+                or ("legacy:" .. tostring(game.JobId) .. ":" .. tostring(RuntimeState.myTurnStart or State.characterToken or "trial"))
+
+            -- Cùng cycle đã timeout: không cho latch in_trail bật lại trong lúc Character cũ chưa chết.
+            if State.trialTimeoutCycleId == trialCycleKey then
+                Movement.cancel()
+                _G.SHOULDSPAMSKILLS = false
+                pcall(function() CombatActions.clearSkillAimTarget() end)
+                if isMain then State.setMyMainStatus("waiting") else State.reportStatus("ally") end
+                pcall(function()
+                    local c = LocalPlayer.Character
+                    local h = c and c:FindFirstChildOfClass("Humanoid")
+                    if h and h.Health > 0 then h.Health = 0 end
+                end)
+                return
+            end
+
+            -- Timer riêng gắn đúng cycle; cycle đổi hoặc lần vào mới thì bắt đầu lại từ 0.
+            if State.trialStartedCycleId ~= trialCycleKey or State.trialStartedAt <= 0 then
+                State.trialStartedCycleId = trialCycleKey
+                State.trialStartedAt = tick()
+            end
+
+            if (tick() - State.trialStartedAt) >= Config.TRIAL_ACTIVE_TIMEOUT then
+                State.trialTimeoutCycleId = trialCycleKey
+                RuntimeState.inTrial = false
+                State.didEnterTrialThisTurn = false
+                Movement.cancel()
+                _G.SHOULDSPAMSKILLS = false
+                pcall(function() CombatActions.clearSkillAimTarget() end)
+                status((isMain and "[MAIN " .. tostring(myStt) .. "]" or "[ALLY]")
+                    .. " ⏱ Trial quá 60s → tính thua và retry")
+
+                if isMain then
+                    if Config.enableEventProtocol and CriticalEvents.enabled() and State.trialCycleId then
+                        CriticalEvents.emit("trial_loss", {
+                            cycle_id = State.trialCycleId,
+                            reason = "trial_timeout_60s",
+                            phase = "trial",
+                        })
+                    end
+                    State.setMyMainStatus("waiting")
+                    RuntimeState.myTurnStart = nil
+                else
+                    State.reportStatus("ally")
+                end
+
+                pcall(function()
+                    local c = LocalPlayer.Character
+                    local h = c and c:FindFirstChildOfClass("Humanoid")
+                    if h and h.Health > 0 then h.Health = 0 end
+                end)
+                return
+            end
+
             if isMain then
                 if myStatus ~= "in_trail" then State.setMyMainStatus("in_trail"); myStatus = "in_trail" end
             elseif not RuntimeState.inTrial then
                 State.reportStatus("in_trail")
             end
             RuntimeState.inTrial = true
-            State.didEnterTrialThisTurn = true -- CLEAN JOIN: đã vào trial thật lượt này
-            -- [FINAL §9.1/A5] emit trial_entered THẬT (1 lần/cycle) — có JobId/PlaceId/Role/Character.
+            State.didEnterTrialThisTurn = true
             pcall(function() if TrialEvents then TrialEvents.trialEntered() end end)
-            -- FIX #4: đánh dấu ĐÃ in_trail khi đang ở đúng server full moon → cho phép hop training SAU trial
             if isMain and State.fullmoonJobid and game.JobId == State.fullmoonJobid then RuntimeState.didTrialInFM = true end
-            if State.trialStartedAt == 0 then State.trialStartedAt = tick() end
             StateMachine.transition(S.IN_TRIAL, "in trial zone")
             status((isMain and "[MAIN " .. tostring(myStt) .. "]" or "[ALLY]") .. " 🔥 IN-TRIAL → đang làm trial")
             doTrialForMyRace()
             return
         else
             if RuntimeState.inTrial then
+                -- Rời Trial bình thường (vào FFA hoặc ra ngoài): dừng timer 60s của lần Trial này.
+                State.trialStartedAt = 0
+                State.trialStartedCycleId = nil
                 if not isMain then
                     State.reportStatus("ally")
                 else
