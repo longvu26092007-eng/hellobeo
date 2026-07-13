@@ -3005,39 +3005,115 @@ do
     end
 
     -- spam-skills loop: BẬT theo _G.SHOULDSPAMSKILLS, 1 instance, check Runtime.alive (File A 2071-2123)
+    -- [FISH TRIAL ONLY] Chu kỳ cố định theo yêu cầu:
+    --   Melee Z/X/C x2 trong ~1 giây -> Sword Z/X x2 trong ~1 giây -> quay lại Melee.
+    -- Nhánh ngoài Fish Trial giữ nguyên cơ chế cooldown cũ.
+    local FISH_MELEE_KEYS = { "Z", "X", "C" }
+    local FISH_SWORD_KEYS = { "Z", "X" }
+    local FISH_MELEE_KEY_INTERVAL = 1 / (#FISH_MELEE_KEYS * 2) -- 6 lần bấm / 1 giây
+    local FISH_SWORD_KEY_INTERVAL = 1 / (#FISH_SWORD_KEYS * 2) -- 4 lần bấm / 1 giây
+    local FISH_KEY_HOLD = 0.035
+
+    local function fishSpamStillActive()
+        return Runtime.alive
+            and _G.SHOULDSPAMSKILLS == true
+            and fishTrialSwordState.active == true
+    end
+
+    local function tapFishSkillKey(keyName, interval)
+        if not fishSpamStillActive() then return false end
+        VirtualInputManager:SendKeyEvent(true, keyName, false, game)
+        task.wait(FISH_KEY_HOLD)
+        VirtualInputManager:SendKeyEvent(false, keyName, false, game)
+
+        local remain = math.max(0, interval - FISH_KEY_HOLD)
+        if remain > 0 then task.wait(remain) end
+        return fishSpamStillActive()
+    end
+
+    local function findFishMeleeTool(char)
+        if char then
+            for _, tool in ipairs(char:GetChildren()) do
+                if tool:IsA("Tool") and tool.ToolTip == "Melee" then
+                    return tool
+                end
+            end
+        end
+        local bp = LP:FindFirstChild("Backpack")
+        if bp then
+            for _, tool in ipairs(bp:GetChildren()) do
+                if tool:IsA("Tool") and tool.ToolTip == "Melee" then
+                    return tool
+                end
+            end
+        end
+        return nil
+    end
+
+    local function equipFishPhaseTool(char, tool)
+        if not (char and tool and tool.Parent) then return false end
+        if tool.Parent == char then return true end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if not (hum and hum.Health > 0) then return false end
+        pcall(function() hum:EquipTool(tool) end)
+        task.wait(0.05)
+        return tool.Parent == char
+    end
+
+    local function spamFishPhase(keys, interval)
+        for _ = 1, 2 do
+            for _, keyName in ipairs(keys) do
+                if not tapFishSkillKey(keyName, interval) then
+                    return false
+                end
+            end
+        end
+        return fishSpamStillActive()
+    end
+
+    local function runFishTrialSkillSequence()
+        local char = LP.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if not (char and hum and hum.Health > 0) then return end
+
+        -- Pha 1: Melee Z/X/C hai lượt trong khoảng 1 giây.
+        local melee = findFishMeleeTool(char)
+        if melee and equipFishPhaseTool(char, melee) then
+            if not spamFishPhase(FISH_MELEE_KEYS, FISH_MELEE_KEY_INTERVAL) then return end
+        end
+
+        if not fishSpamStillActive() then return end
+
+        -- Pha 2: đúng Tushita/Yama đã chọn, Z/X hai lượt trong khoảng 1 giây.
+        char = LP.Character
+        local sword = char and getFishTrialSwordForSpam(char) or nil
+        if sword and equipFishPhaseTool(char, sword) then
+            spamFishPhase(FISH_SWORD_KEYS, FISH_SWORD_KEY_INTERVAL)
+        end
+    end
+
     function CombatActions.startSpamSkills()
         task.spawn(function()
             while Runtime.alive do
                 task.wait()
                 if _G.SHOULDSPAMSKILLS then
                     pcall(function()
+                        -- Fish Trial dùng chu kỳ riêng, không đi qua vòng cooldown/vũ khí chung.
+                        if fishTrialSwordState.active then
+                            runFishTrialSkillSequence()
+                            return
+                        end
+
                         local char = LP.Character
                         local skillsUI = LP.PlayerGui:FindFirstChild("Main")
                         skillsUI = skillsUI and skillsUI:FindFirstChild("Skills")
                         if not (char and skillsUI) then return end
-                        local weapon
-                        local fishSword = getFishTrialSwordForSpam(char)
-                        if fishTrialSwordState.active then
-                            -- Fish Trial: spam cả skill Melee và skill của Tushita/Yama.
-                            -- Chỉ lấy ToolTip Melee + đúng thanh Sword đã chọn, không lôi Fruit/Gun vào.
-                            weapon = {}
-                            local added = {}
-                            for _, tool in ipairs(getallweapon()) do
-                                if tool:IsA("Tool") and tool.ToolTip == "Melee" and not added[tool] then
-                                    weapon[#weapon + 1] = tool
-                                    added[tool] = true
-                                end
-                            end
-                            if fishSword and not added[fishSword] then
-                                weapon[#weapon + 1] = fishSword
-                                added[fishSword] = true
-                            end
-                        else
-                            weapon = getallweapon()
-                            for _, v in pairs(weapon) do
-                                if not skillsUI:FindFirstChild(v.Name) then EquipTool(v.Name) end
-                            end
+
+                        local weapon = getallweapon()
+                        for _, v in pairs(weapon) do
+                            if not skillsUI:FindFirstChild(v.Name) then EquipTool(v.Name) end
                         end
+
                         for _, v in pairs(weapon) do
                             if v.Parent ~= char then EquipTool(v.Name) end
                             local ui_ = skillsUI:FindFirstChild(v.Name)
