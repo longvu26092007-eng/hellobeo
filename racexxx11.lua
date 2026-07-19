@@ -214,7 +214,8 @@ local function targetMatchesScalar(target, value, fieldKind)
     local n = normalize(raw)
 
     if fieldKind == "number" then
-        local asNumber = tonumber(raw:gsub("#", ""))
+        local cleanedNumber = (raw:gsub("#", ""))
+        local asNumber = tonumber(cleanedNumber)
         return asNumber == target.number
     elseif fieldKind == "title" then
         return n == normalize(target.title)
@@ -880,7 +881,7 @@ local function buildSerializable(results, remoteOk, remoteData, remoteError, gui
 
     return {
         checker = "Race Title Multi-Checker",
-        version = "2.0-fast-safe",
+        version = "3.0-fix-tonumber-gsub",
         player = {
             name = LocalPlayer.Name,
             userId = LocalPlayer.UserId,
@@ -1653,7 +1654,7 @@ getgenv().__RACE_TITLE_CHECKER_STOP = function()
     end)
 end
 
-print("[RaceTitleChecker] Started v2 fast-safe")
+print("[RaceTitleChecker] Started v3 tonumber-gsub fix")
 print("[RaceTitleChecker] Team:", Config.Team)
 print("[RaceTitleChecker] Interval:", Config.Interval)
 print("[RaceTitleChecker] Results: getgenv().RaceTitleCheckerLastResults")
