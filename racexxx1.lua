@@ -880,7 +880,7 @@ local function buildSerializable(results, remoteOk, remoteData, remoteError, gui
 
     return {
         checker = "Race Title Multi-Checker",
-        version = "1.0",
+        version = "2.0-fast-safe",
         player = {
             name = LocalPlayer.Name,
             userId = LocalPlayer.UserId,
@@ -1084,78 +1084,279 @@ local function ensureTeam()
     return LocalPlayer.Team ~= nil
 end
 
-local function invokeGetTitles()
-    local ok, result = pcall(function()
-        return CommF_:InvokeServer("getTitles")
-    end)
+local function isDescendantOrSelf(object, ancestor)
+    return object == ancestor or object:IsDescendantOf(ancestor)
+end
 
-    if ok then
-        return true, result, nil
+local function commonAncestor(objects, stopAt)
+    if #objects == 0 then
+        return nil
     end
 
-    return false, nil, tostring(result)
+    local current = objects[1]
+    while current and current ~= stopAt.Parent do
+        local allInside = true
+        for index = 2, #objects do
+            if not isDescendantOrSelf(objects[index], current) then
+                allInside = false
+                break
+            end
+        end
+
+        if allInside then
+            return current
+        end
+
+        if current == stopAt then
+            break
+        end
+        current = current.Parent
+    end
+
+    return nil
+end
+
+-- Lightweight GUI scanner:
+-- Collects the title menu text once, then finds the smallest shared card for
+-- number/title/obtainment. This avoids rescanning the entire menu many times.
+local function inspectGuiFast(results)
+    local main = PlayerGui:FindFirstChild("Main")
+    local titlesFrame = main and main:FindFirstChild("Titles")
+    if not titlesFrame then
+        return false, "PlayerGui.Main.Titles not found"
+    end
+
+    local textItems = {}
+    for _, descendant in ipairs(titlesFrame:GetDescendants()) do
+        if descendant:IsA("TextLabel")
+            or descendant:IsA("TextButton")
+            or descendant:IsA("TextBox")
+        then
+            local value = trim(descendant.Text)
+            if value ~= "" then
+                table.insert(textItems, {
+                    object = descendant,
+                    text = value,
+                })
+            end
+        end
+    end
+
+    for _, result in ipairs(results) do
+        local target = result.target
+        local numberObject
+        local titleObject
+        local obtainmentObject
+
+        for _, item in ipairs(textItems) do
+            if not numberObject and targetMatchesScalar(target, item.text, "number") then
+                numberObject = item.object
+                addEvidence(result, "GUI_NUMBER", safePath(item.object), 1, "info")
+            end
+
+            if not titleObject and targetMatchesScalar(target, item.text, "title") then
+                titleObject = item.object
+                addEvidence(result, "GUI_TITLE", safePath(item.object), 1, "info")
+            end
+
+            if not obtainmentObject and targetMatchesScalar(target, item.text, "obtainment") then
+                obtainmentObject = item.object
+                addEvidence(result, "GUI_OBTAINMENT", safePath(item.object), 1, "info")
+            end
+        end
+
+        local markerObjects = {}
+        if numberObject then table.insert(markerObjects, numberObject) end
+        if titleObject then table.insert(markerObjects, titleObject) end
+        if obtainmentObject then table.insert(markerObjects, obtainmentObject) end
+
+        if #markerObjects >= 2 then
+            local card = commonAncestor(markerObjects, titlesFrame)
+            if card and card ~= titlesFrame then
+                local hits = {
+                    number = numberObject ~= nil,
+                    title = titleObject ~= nil,
+                    obtainment = obtainmentObject ~= nil,
+                }
+                inspectGuiCard({
+                    root = card,
+                    hits = hits,
+                    descendants = #card:GetDescendants(),
+                }, result)
+            elseif #markerObjects == 3 then
+                addEvidence(result, "GUI_FULL_ROW_TEXT", "All 3 markers found but card unresolved", 3, "info")
+            end
+        end
+    end
+
+    return true, "Fast GUI scan: " .. tostring(#textItems) .. " text objects"
+end
+
+local remoteRequest = {
+    inFlight = false,
+    ok = false,
+    data = nil,
+    error = "not requested",
+    completedAt = 0,
+}
+
+local function startGetTitlesRequest()
+    if remoteRequest.inFlight then
+        return
+    end
+
+    remoteRequest.inFlight = true
+
+    task.spawn(function()
+        local ok, result = pcall(function()
+            return CommF_:InvokeServer("getTitles")
+        end)
+
+        remoteRequest.ok = ok
+        remoteRequest.data = ok and result or nil
+        remoteRequest.error = ok and nil or tostring(result)
+        remoteRequest.completedAt = tick()
+        remoteRequest.inFlight = false
+    end)
+end
+
+-- InvokeServer cannot be forcibly cancelled. Run it in a separate task and let
+-- the checker continue after a short timeout. If it returns later, the next scan
+-- will use the cached result.
+local function invokeGetTitles(timeoutSeconds)
+    timeoutSeconds = tonumber(timeoutSeconds) or 1.5
+    local previousCompletedAt = remoteRequest.completedAt
+
+    startGetTitlesRequest()
+
+    local deadline = tick() + timeoutSeconds
+    repeat
+        task.wait(0.05)
+    until remoteRequest.completedAt ~= previousCompletedAt
+        or not remoteRequest.inFlight
+        or tick() >= deadline
+
+    if remoteRequest.completedAt ~= previousCompletedAt then
+        return remoteRequest.ok, remoteRequest.data, remoteRequest.error
+    end
+
+    if remoteRequest.completedAt > 0 then
+        return remoteRequest.ok, remoteRequest.data,
+            remoteRequest.error or "using cached getTitles response"
+    end
+
+    return false, nil, "getTitles timeout; GUI scan continued"
+end
+
+local function scanErrorHandler(err)
+    local message = tostring(err)
+    pcall(function()
+        if debug and debug.traceback then
+            message = debug.traceback(message, 2)
+        end
+    end)
+    return message
 end
 
 local function doScan()
     if scanBusy or not running then
         return
     end
+
     scanBusy = true
     scanCount = scanCount + 1
 
-    pcall(ensureTeam)
+    local scanOk, scanError = xpcall(function()
+        statusLabel.Text = "Scan #" .. tostring(scanCount) .. " | Step 1/5: joining team..."
+        pcall(ensureTeam)
 
-    local results = {}
-    for _, target in ipairs(TARGETS) do
-        table.insert(results, newResult(target))
-    end
+        local results = {}
+        for _, target in ipairs(TARGETS) do
+            table.insert(results, newResult(target))
+        end
 
-    local remoteOk, remoteData, remoteError = invokeGetTitles()
+        statusLabel.Text = "Scan #" .. tostring(scanCount) .. " | Step 2/5: requesting getTitles..."
+        local remoteOk, remoteData, remoteError = invokeGetTitles(1.5)
 
-    if remoteOk and type(remoteData) == "table" then
-        inspectRemoteNode(remoteData, "getTitles", 0, results, {})
-    end
+        statusLabel.Text = "Scan #" .. tostring(scanCount) .. " | Step 3/5: parsing title data..."
+        if remoteOk and type(remoteData) == "table" then
+            inspectRemoteNode(remoteData, "getTitles", 0, results, {})
+        end
+        inspectPlayerTitles(results)
 
-    inspectPlayerTitles(results)
+        local previousVisible = nil
+        local titlesFrame = nil
+        local main = PlayerGui:FindFirstChild("Main")
+        if main then
+            titlesFrame = main:FindFirstChild("Titles")
+        end
 
-    local previousVisible = nil
-    local titlesFrame = nil
-    local main = PlayerGui:FindFirstChild("Main")
-    if main then
-        titlesFrame = main:FindFirstChild("Titles")
-    end
+        statusLabel.Text = "Scan #" .. tostring(scanCount) .. " | Step 4/5: scanning title GUI..."
+        if titlesFrame and Config.OpenTitlesForScan then
+            previousVisible = titlesFrame.Visible
+            pcall(function()
+                titlesFrame.Visible = true
+            end)
+            task.wait(0.35)
+        end
 
-    if titlesFrame and Config.OpenTitlesForScan then
-        previousVisible = titlesFrame.Visible
+        local guiOk, guiMessage = inspectGuiFast(results)
+        if not guiOk then
+            guiMessage = "GUI unavailable: " .. tostring(guiMessage)
+        end
+
+        if titlesFrame
+            and Config.OpenTitlesForScan
+            and Config.RestoreTitlesVisibility
+            and previousVisible ~= nil
+        then
+            pcall(function()
+                titlesFrame.Visible = previousVisible
+            end)
+        end
+
+        statusLabel.Text = "Scan #" .. tostring(scanCount) .. " | Step 5/5: finalizing..."
+        for _, result in ipairs(results) do
+            finalizeResult(result)
+        end
+
+        updateUi(results, remoteOk, remoteData, guiMessage)
+
+        local serializable = buildSerializable(
+            results,
+            remoteOk,
+            remoteData,
+            remoteError,
+            guiMessage
+        )
+
+        saveDebug(serializable)
+        getgenv().RaceTitleCheckerLastResults = serializable
+    end, scanErrorHandler)
+
+    if not scanOk then
+        local shortError = tostring(scanError):gsub("\n", " | ")
+        if #shortError > 210 then
+            shortError = shortError:sub(1, 210) .. "..."
+        end
+
+        statusLabel.Text = "SCAN ERROR #" .. tostring(scanCount) .. ": " .. shortError
+        statusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+        warn("[RaceTitleChecker] Scan error:", scanError)
+
         pcall(function()
-            titlesFrame.Visible = true
+            if writefile then
+                local fileName =
+                    LocalPlayer.Name .. "-"
+                    .. tostring(LocalPlayer.UserId)
+                    .. "-RaceTitleChecker-error.txt"
+                writefile(fileName, tostring(scanError))
+            end
         end)
-        task.wait(0.65)
     else
-        task.wait(0.1)
+        statusLabel.TextColor3 = Color3.fromRGB(170, 180, 205)
     end
 
-    local guiOk, guiMessage = inspectGui(results)
-    if not guiOk then
-        guiMessage = "GUI unavailable: " .. tostring(guiMessage)
-    end
-
-    if titlesFrame and Config.OpenTitlesForScan and Config.RestoreTitlesVisibility and previousVisible ~= nil then
-        pcall(function()
-            titlesFrame.Visible = previousVisible
-        end)
-    end
-
-    for _, result in ipairs(results) do
-        finalizeResult(result)
-    end
-
-    updateUi(results, remoteOk, remoteData, guiMessage)
-
-    local serializable = buildSerializable(results, remoteOk, remoteData, remoteError, guiMessage)
-    saveDebug(serializable)
-
-    getgenv().RaceTitleCheckerLastResults = serializable
     scanBusy = false
 end
 
@@ -1452,7 +1653,7 @@ getgenv().__RACE_TITLE_CHECKER_STOP = function()
     end)
 end
 
-print("[RaceTitleChecker] Started")
+print("[RaceTitleChecker] Started v2 fast-safe")
 print("[RaceTitleChecker] Team:", Config.Team)
 print("[RaceTitleChecker] Interval:", Config.Interval)
 print("[RaceTitleChecker] Results: getgenv().RaceTitleCheckerLastResults")
