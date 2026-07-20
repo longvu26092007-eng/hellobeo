@@ -551,7 +551,7 @@ do
     Top_1.Position = UDim2.new(0.5, 0, 0.055, 0)
     Top_1.Size = UDim2.new(0.8, 0, 0, 24)
     Top_1.FontFace = Font.new("rbxasset://fonts/families/GothamSSm.json", Enum.FontWeight.Bold)
-    Top_1.Text = "Kaitun Races BF [TITLE-R15-ANGEL-MELEE]"
+    Top_1.Text = "Kaitun Races BF [TITLE-R16-ANGEL-CONFIRM]"
     Top_1.TextColor3 = Color3.fromRGB(255, 80, 80)
     Top_1.TextSize = 22
     Top_1.TextXAlignment = Enum.TextXAlignment.Center
@@ -2526,6 +2526,42 @@ task.spawn(function() wait(1)
                                             and player.Data.Race.Value == "Skypiea"
                                     end
 
+                                    local function ConfirmAngelV3AfterKill()
+                                        local lastResult = nil
+
+                                        -- Đợi server ghi nhận kill rồi thử lại vài lần.
+                                        for attempt = 1, 5 do
+                                            task.wait(attempt == 1 and 1 or 0.5)
+
+                                            local ok, result = pcall(function()
+                                                return COMMF_:InvokeServer(
+                                                    "Wenlocktoad",
+                                                    "3"
+                                                )
+                                            end)
+
+                                            lastResult = result
+
+                                            SetText(
+                                                "Angel V3 | Confirm "
+                                                .. tostring(attempt)
+                                                .. "/5 | Wenlock: "
+                                                .. tostring(result)
+                                            )
+
+                                            if ok
+                                                and (
+                                                    result == -2
+                                                    or tostring(result) == "-2"
+                                                )
+                                            then
+                                                return true, result
+                                            end
+                                        end
+
+                                        return false, lastResult
+                                    end
+
                                     local function GetValidAngelTarget()
                                         local bestPlayer = nil
                                         local bestCharacter = nil
@@ -2605,6 +2641,21 @@ task.spawn(function() wait(1)
                                         local attackStartedAt = nil
                                         local targetKilled = false
                                         local switchTarget = false
+                                        local targetDiedSignal = false
+                                        local originalTargetCharacter = targetCharacter
+                                        local originalTargetHumanoid =
+                                            targetCharacter
+                                            and targetCharacter:FindFirstChildWhichIsA(
+                                                "Humanoid"
+                                            )
+                                        local targetDiedConnection = nil
+
+                                        if originalTargetHumanoid then
+                                            targetDiedConnection =
+                                                originalTargetHumanoid.Died:Connect(function()
+                                                    targetDiedSignal = true
+                                                end)
+                                        end
 
                                         -- Bật PvP ngay khi đã chọn được target Angel.
                                         EnsureAngelPvpEnabled(true)
@@ -2612,21 +2663,68 @@ task.spawn(function() wait(1)
                                         repeat
                                             task.wait()
 
+                                            local currentTargetCharacter =
+                                                targetPlayer.Character
                                             local humanoid =
-                                                targetCharacter:FindFirstChildWhichIsA("Humanoid")
+                                                originalTargetCharacter
+                                                and originalTargetCharacter
+                                                    :FindFirstChildWhichIsA("Humanoid")
                                             local root =
-                                                targetCharacter:FindFirstChild("HumanoidRootPart")
+                                                originalTargetCharacter
+                                                and originalTargetCharacter
+                                                    :FindFirstChild("HumanoidRootPart")
 
-                                            if not targetPlayer.Parent
-                                                or not humanoid
-                                                or not root
+                                            -- Chỉ coi là kill sau khi script đã thực sự
+                                            -- bắt đầu đánh target này.
+                                            if attackStartedAt
+                                                and (
+                                                    targetDiedSignal
+                                                    or (
+                                                        humanoid
+                                                        and humanoid.Health <= 0
+                                                    )
+                                                    or (
+                                                        currentTargetCharacter
+                                                        and currentTargetCharacter
+                                                            ~= originalTargetCharacter
+                                                    )
+                                                    or (
+                                                        originalTargetCharacter
+                                                        and not originalTargetCharacter.Parent
+                                                    )
+                                                )
                                             then
+                                                targetKilled = true
+                                                break
+                                            end
+
+                                            if not targetPlayer.Parent then
                                                 switchTarget = true
                                                 break
                                             end
 
-                                            if humanoid.Health <= 0 then
-                                                targetKilled = true
+                                            if not humanoid or not root then
+                                                -- Roblox có thể xóa Root/Humanoid ngay
+                                                -- khi chết. Cho Died/respawn một khoảng
+                                                -- ngắn để cập nhật trước khi đổi target.
+                                                if attackStartedAt then
+                                                    task.wait(0.25)
+
+                                                    if targetDiedSignal
+                                                        or targetPlayer.Character
+                                                            ~= originalTargetCharacter
+                                                        or (
+                                                            originalTargetCharacter
+                                                            and not originalTargetCharacter.Parent
+                                                        )
+                                                    then
+                                                        targetKilled = true
+                                                    else
+                                                        switchTarget = true
+                                                    end
+                                                else
+                                                    switchTarget = true
+                                                end
                                                 break
                                             end
 
@@ -2719,31 +2817,30 @@ task.spawn(function() wait(1)
 
                                         SetAimbotTarget(false)
 
-                                        if targetKilled then
-                                            local angelConfirmOk, angelConfirmResult =
-                                                pcall(function()
-                                                    return COMMF_:InvokeServer(
-                                                        "Wenlocktoad",
-                                                        "3"
-                                                    )
-                                                end)
+                                        if targetDiedConnection then
+                                            targetDiedConnection:Disconnect()
+                                            targetDiedConnection = nil
+                                        end
 
-                                            if angelConfirmOk
-                                                and (
-                                                    angelConfirmResult == -2
-                                                    or tostring(angelConfirmResult) == "-2"
-                                                )
-                                            then
+                                        if targetKilled then
+                                            SetText(
+                                                "Angel V3 | Target died | Confirming..."
+                                            )
+
+                                            local angelConfirmed, angelConfirmResult =
+                                                ConfirmAngelV3AfterKill()
+
+                                            if angelConfirmed then
                                                 SetText("Angel V3 | CONFIRMED (-2)")
                                                 SaveCompletedRace(CurrentRace)
                                                 task.wait(1)
                                                 return
                                             else
-                                                -- Đã hạ target nhưng server chưa xác nhận.
-                                                -- Bỏ target vừa chết và tìm Angel khác.
+                                                -- Đã phát hiện target chết nhưng server
+                                                -- chưa xác nhận sau 5 lần.
                                                 ignoredAngelPlayers[targetPlayer.Name] = true
                                                 SetText(
-                                                    "Angel V3 | Kill done, not confirmed | Wenlock: "
+                                                    "Angel V3 | Kill detected, not confirmed | Wenlock: "
                                                     .. tostring(angelConfirmResult)
                                                 )
                                                 task.wait(0.5)
