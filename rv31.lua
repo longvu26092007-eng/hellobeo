@@ -1,6 +1,6 @@
 --[[
     BANANAHUB RACE V2-V3 TITLE CONTROLLER
-    Build: TITLE-CONTROLLER-R1
+    Build: TITLE-CONTROLLER-UI-R2
 
     Chức năng:
       1. Chọn/load team trước khi gọi BananaHub.
@@ -13,32 +13,8 @@
 ]]
 
 -- ============================================================
--- [ CONFIG BÊN NGOÀI - CHỈ SỬA PHẦN NÀY ]
+-- [ CONTROLLER ]
 -- ============================================================
-
-getgenv().Team = "Pirate"
-
--- Nhập key BananaHub tại đây.
-getgenv().Key = ""
-
--- true  = cần làm V3 race này.
--- false = không dừng khi reroll trúng race này.
-getgenv().Races = {
-    ["Human"] = true,
-    ["Mink"] = true,
-    ["Fishman"] = true,
-    ["Skypiea"] = true,
-    ["Cyborg"] = false,
-    ["Ghoul"] = false,
-}
-
--- ============================================================
--- [ WAIT GAME ]
--- ============================================================
-
-repeat
-    wait()
-until game:IsLoaded() and game.Players.LocalPlayer
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -63,6 +39,15 @@ local controllerRunning = true
 local controllerCompleted = false
 local lastStatus = nil
 
+local ControllerUI = {
+    ScreenGui = nil,
+    MainFrame = nil,
+    StatusLabel = nil,
+    CurrentRaceLabel = nil,
+    FragmentLabel = nil,
+    RaceLabels = {},
+}
+
 getgenv().__BANANA_RACE_V3_CONTROLLER_STOP = function()
     controllerRunning = false
 end
@@ -78,6 +63,12 @@ local function SetControllerStatus(text)
     warn("[Race V3 Controller] " .. text)
 
     getgenv().BananaRaceV3ControllerStatus = text
+
+    pcall(function()
+        if ControllerUI.StatusLabel then
+            ControllerUI.StatusLabel.Text = "Status: " .. text
+        end
+    end)
 end
 
 -- ============================================================
@@ -99,6 +90,7 @@ end
 
 local bananaTeam, remoteTeam = NormalizeBananaTeam(getgenv().Team)
 getgenv().Team = bananaTeam
+getgenv().Config["Select Team"] = bananaTeam
 
 local function ChooseTeam()
     if LocalPlayer.Team then
@@ -154,16 +146,6 @@ end
 
 SetControllerStatus("Choosing team: " .. remoteTeam)
 ChooseTeam()
-
--- ============================================================
--- [ BANANAHUB CONFIG ]
--- Key được đọc trực tiếp từ getgenv().Key ở trên.
--- ============================================================
-
-getgenv().Config = {
-    ["Select Team"] = bananaTeam,
-    ["Auto Upgrade Race V2-V3"] = true,
-}
 
 -- ============================================================
 -- [ TITLE NAME V3 CHECKER - METHOD 02 ]
@@ -462,6 +444,310 @@ local function GetMissingEnabledRaces(titleMap)
     return enabled, missing
 end
 
+-- ============================================================
+-- [ UI HIỂN THỊ RACE V3 ]
+-- ============================================================
+
+local RACE_UI_NAMES = {
+    Human = "Human V3",
+    Mink = "Rabbit V3",
+    Fishman = "Shark V3",
+    Skypiea = "Angel V3",
+    Cyborg = "Cyborg V3",
+    Ghoul = "Ghoul V3",
+}
+
+local function GetControllerGuiParent()
+    local ok, guiParent = pcall(function()
+        if type(gethui) == "function" then
+            return gethui()
+        end
+
+        return game:GetService("CoreGui")
+    end)
+
+    if ok and guiParent then
+        return guiParent
+    end
+
+    return PlayerGui
+end
+
+local function CreateControllerUI()
+    local guiParent = GetControllerGuiParent()
+
+    pcall(function()
+        local old = guiParent:FindFirstChild(
+            "BananaRaceV3ControllerUI"
+        )
+
+        if old then
+            old:Destroy()
+        end
+    end)
+
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "BananaRaceV3ControllerUI"
+    screenGui.ResetOnSpawn = false
+    screenGui.DisplayOrder = 50
+    screenGui.IgnoreGuiInset = false
+    screenGui.Parent = guiParent
+
+    local frame = Instance.new("Frame")
+    frame.Name = "Main"
+    frame.AnchorPoint = Vector2.new(1, 0.5)
+    frame.Position = UDim2.new(1, -20, 0.5, 0)
+    frame.Size = UDim2.fromOffset(310, 330)
+    frame.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
+    frame.BackgroundTransparency = 0.08
+    frame.BorderSizePixel = 0
+    frame.Active = true
+    frame.Draggable = true
+    frame.Parent = screenGui
+
+    local frameCorner = Instance.new("UICorner")
+    frameCorner.CornerRadius = UDim.new(0, 10)
+    frameCorner.Parent = frame
+
+    local frameStroke = Instance.new("UIStroke")
+    frameStroke.Color = Color3.fromRGB(255, 190, 40)
+    frameStroke.Thickness = 2
+    frameStroke.Parent = frame
+
+    local title = Instance.new("TextLabel")
+    title.Name = "Title"
+    title.Position = UDim2.fromOffset(12, 8)
+    title.Size = UDim2.new(1, -52, 0, 30)
+    title.BackgroundTransparency = 1
+    title.Font = Enum.Font.GothamBold
+    title.Text = "BananaHub Race V3"
+    title.TextSize = 19
+    title.TextColor3 = Color3.fromRGB(255, 210, 70)
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Parent = frame
+
+    local minimize = Instance.new("TextButton")
+    minimize.Name = "Minimize"
+    minimize.AnchorPoint = Vector2.new(1, 0)
+    minimize.Position = UDim2.new(1, -8, 0, 8)
+    minimize.Size = UDim2.fromOffset(32, 28)
+    minimize.BackgroundColor3 = Color3.fromRGB(35, 35, 42)
+    minimize.BorderSizePixel = 0
+    minimize.Font = Enum.Font.GothamBold
+    minimize.Text = "—"
+    minimize.TextSize = 18
+    minimize.TextColor3 = Color3.fromRGB(255, 255, 255)
+    minimize.Parent = frame
+
+    local minimizeCorner = Instance.new("UICorner")
+    minimizeCorner.CornerRadius = UDim.new(0, 6)
+    minimizeCorner.Parent = minimize
+
+    local content = Instance.new("Frame")
+    content.Name = "Content"
+    content.Position = UDim2.fromOffset(10, 44)
+    content.Size = UDim2.new(1, -20, 1, -54)
+    content.BackgroundTransparency = 1
+    content.Parent = frame
+
+    local playerLabel = Instance.new("TextLabel")
+    playerLabel.Name = "Player"
+    playerLabel.Size = UDim2.new(1, 0, 0, 22)
+    playerLabel.BackgroundTransparency = 1
+    playerLabel.Font = Enum.Font.GothamSemibold
+    playerLabel.Text =
+        "Player: " .. tostring(LocalPlayer.Name)
+    playerLabel.TextSize = 14
+    playerLabel.TextColor3 = Color3.fromRGB(235, 235, 235)
+    playerLabel.TextXAlignment = Enum.TextXAlignment.Left
+    playerLabel.Parent = content
+
+    local currentRaceLabel = Instance.new("TextLabel")
+    currentRaceLabel.Name = "CurrentRace"
+    currentRaceLabel.Position = UDim2.fromOffset(0, 24)
+    currentRaceLabel.Size = UDim2.new(1, 0, 0, 22)
+    currentRaceLabel.BackgroundTransparency = 1
+    currentRaceLabel.Font = Enum.Font.GothamSemibold
+    currentRaceLabel.Text = "Current Race: ..."
+    currentRaceLabel.TextSize = 14
+    currentRaceLabel.TextColor3 = Color3.fromRGB(235, 235, 235)
+    currentRaceLabel.TextXAlignment = Enum.TextXAlignment.Left
+    currentRaceLabel.Parent = content
+
+    local fragmentLabel = Instance.new("TextLabel")
+    fragmentLabel.Name = "Fragments"
+    fragmentLabel.Position = UDim2.fromOffset(0, 48)
+    fragmentLabel.Size = UDim2.new(1, 0, 0, 22)
+    fragmentLabel.BackgroundTransparency = 1
+    fragmentLabel.Font = Enum.Font.GothamSemibold
+    fragmentLabel.Text = "Fragments: ..."
+    fragmentLabel.TextSize = 14
+    fragmentLabel.TextColor3 = Color3.fromRGB(235, 235, 235)
+    fragmentLabel.TextXAlignment = Enum.TextXAlignment.Left
+    fragmentLabel.Parent = content
+
+    local divider = Instance.new("Frame")
+    divider.Position = UDim2.fromOffset(0, 76)
+    divider.Size = UDim2.new(1, 0, 0, 1)
+    divider.BackgroundColor3 = Color3.fromRGB(75, 75, 85)
+    divider.BorderSizePixel = 0
+    divider.Parent = content
+
+    local raceHeader = Instance.new("TextLabel")
+    raceHeader.Position = UDim2.fromOffset(0, 84)
+    raceHeader.Size = UDim2.new(1, 0, 0, 22)
+    raceHeader.BackgroundTransparency = 1
+    raceHeader.Font = Enum.Font.GothamBold
+    raceHeader.Text = "Race V3 title status"
+    raceHeader.TextSize = 15
+    raceHeader.TextColor3 = Color3.fromRGB(255, 210, 70)
+    raceHeader.TextXAlignment = Enum.TextXAlignment.Left
+    raceHeader.Parent = content
+
+    local raceLabels = {}
+
+    for index, raceName in ipairs(RACE_ORDER) do
+        local label = Instance.new("TextLabel")
+        label.Name = raceName
+        label.Position =
+            UDim2.fromOffset(0, 108 + (index - 1) * 25)
+        label.Size = UDim2.new(1, 0, 0, 23)
+        label.BackgroundColor3 = Color3.fromRGB(28, 28, 34)
+        label.BackgroundTransparency = 0.25
+        label.BorderSizePixel = 0
+        label.Font = Enum.Font.GothamSemibold
+        label.Text = "⚪ " .. RACE_UI_NAMES[raceName]
+        label.TextSize = 14
+        label.TextColor3 = Color3.fromRGB(200, 200, 205)
+        label.TextXAlignment = Enum.TextXAlignment.Left
+        label.Parent = content
+
+        local padding = Instance.new("UIPadding")
+        padding.PaddingLeft = UDim.new(0, 8)
+        padding.Parent = label
+
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 5)
+        corner.Parent = label
+
+        raceLabels[raceName] = label
+    end
+
+    local statusLabel = Instance.new("TextLabel")
+    statusLabel.Name = "Status"
+    statusLabel.Position = UDim2.fromOffset(0, 262)
+    statusLabel.Size = UDim2.new(1, 0, 0, 55)
+    statusLabel.BackgroundColor3 = Color3.fromRGB(28, 28, 34)
+    statusLabel.BackgroundTransparency = 0.2
+    statusLabel.BorderSizePixel = 0
+    statusLabel.Font = Enum.Font.GothamSemibold
+    statusLabel.Text = "Status: Starting..."
+    statusLabel.TextWrapped = true
+    statusLabel.TextSize = 13
+    statusLabel.TextColor3 = Color3.fromRGB(245, 245, 245)
+    statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+    statusLabel.TextYAlignment = Enum.TextYAlignment.Center
+    statusLabel.Parent = content
+
+    local statusPadding = Instance.new("UIPadding")
+    statusPadding.PaddingLeft = UDim.new(0, 8)
+    statusPadding.PaddingRight = UDim.new(0, 8)
+    statusPadding.Parent = statusLabel
+
+    local statusCorner = Instance.new("UICorner")
+    statusCorner.CornerRadius = UDim.new(0, 6)
+    statusCorner.Parent = statusLabel
+
+    local minimized = false
+
+    minimize.MouseButton1Click:Connect(function()
+        minimized = not minimized
+        content.Visible = not minimized
+        frame.Size =
+            minimized
+            and UDim2.fromOffset(310, 46)
+            or UDim2.fromOffset(310, 330)
+        minimize.Text = minimized and "+" or "—"
+    end)
+
+    ControllerUI.ScreenGui = screenGui
+    ControllerUI.MainFrame = frame
+    ControllerUI.StatusLabel = statusLabel
+    ControllerUI.CurrentRaceLabel = currentRaceLabel
+    ControllerUI.FragmentLabel = fragmentLabel
+    ControllerUI.RaceLabels = raceLabels
+end
+
+local function UpdateControllerUI()
+    if not ControllerUI.ScreenGui
+        or not ControllerUI.ScreenGui.Parent
+    then
+        CreateControllerUI()
+    end
+
+    local currentRace = GetCurrentRace()
+    local fragments = GetFragments()
+    local titleMap = titleCache.map or {}
+
+    if ControllerUI.CurrentRaceLabel then
+        ControllerUI.CurrentRaceLabel.Text =
+            "Current Race: " .. tostring(currentRace)
+    end
+
+    if ControllerUI.FragmentLabel then
+        ControllerUI.FragmentLabel.Text =
+            "Fragments: " .. tostring(fragments)
+    end
+
+    for _, raceName in ipairs(RACE_ORDER) do
+        local label = ControllerUI.RaceLabels[raceName]
+
+        if label then
+            local done = titleMap[raceName] == true
+            local enabled = getgenv().Races[raceName] == true
+            local stateText = done and "DONE" or "MISSING"
+            local configText = enabled and "ON" or "OFF"
+            local icon = done and "🟢" or "🔴"
+
+            label.Text =
+                icon
+                .. " "
+                .. tostring(RACE_UI_NAMES[raceName])
+                .. " | "
+                .. stateText
+                .. " | "
+                .. configText
+
+            label.TextColor3 =
+                done
+                and Color3.fromRGB(90, 255, 130)
+                or (
+                    enabled
+                    and Color3.fromRGB(255, 100, 100)
+                    or Color3.fromRGB(170, 170, 180)
+                )
+        end
+    end
+
+    if ControllerUI.StatusLabel then
+        ControllerUI.StatusLabel.Text =
+            "Status: "
+            .. tostring(
+                getgenv().BananaRaceV3ControllerStatus
+                or "Starting..."
+            )
+    end
+end
+
+CreateControllerUI()
+
+task.spawn(function()
+    while controllerRunning do
+        pcall(UpdateControllerUI)
+        task.wait(0.5)
+    end
+end)
+
 local completionFileWritten = false
 
 local function WriteCompletedFile()
@@ -642,13 +928,13 @@ task.spawn(function()
     )
 
     local ok, err = pcall(function()
-        local source = game:HttpGet(
+        -- BananaHub nhận trực tiếp:
+        -- getgenv().Team
+        -- getgenv().Key
+        -- getgenv().Config
+        loadstring(game:HttpGet(
             "https://raw.githubusercontent.com/obiiyeuem/vthangsitink/main/BananaHub.lua"
-        )
-        local loader, loadError = loadstring(source)
-
-        assert(loader, tostring(loadError))
-        loader()
+        ))()
     end)
 
     if ok then
