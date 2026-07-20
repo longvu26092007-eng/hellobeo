@@ -1326,7 +1326,7 @@ do
         lbl.Size = UDim2.new(0.82, 0, 0, 18)
         lbl.FontFace = Font.new("rbxasset://fonts/families/GothamSSm.json", Enum.FontWeight.Bold)
         lbl.TextColor3 = Color3.fromRGB(255, 255, 255)
-        lbl.TextSize = 16
+        lbl.TextSize = 14
         lbl.TextXAlignment = Enum.TextXAlignment.Center
         lbl.RichText = true
     end
@@ -1378,7 +1378,7 @@ do
 
     local raceGrid = Instance.new("UIGridLayout")
     raceGrid.Parent = RaceContainer
-    raceGrid.CellSize = UDim2.new(0, 150, 0, 24)
+    raceGrid.CellSize = UDim2.new(0, 175, 0, 24)
     raceGrid.CellPadding = UDim2.new(0, 12, 0, 6)
     raceGrid.HorizontalAlignment = Enum.HorizontalAlignment.Center
     raceGrid.VerticalAlignment = Enum.VerticalAlignment.Top
@@ -1516,7 +1516,7 @@ do
         lbl.Name = raceName:gsub("%s+", "")
         lbl.Parent = RaceContainer
         lbl.BackgroundTransparency = 1
-        lbl.Size = UDim2.new(0, 150, 0, 24)
+        lbl.Size = UDim2.new(0, 175, 0, 24)
         lbl.FontFace = Font.new("rbxasset://fonts/families/GothamSSm.json", Enum.FontWeight.Bold)
         lbl.TextSize = 16
         lbl.TextXAlignment = Enum.TextXAlignment.Left
@@ -1567,9 +1567,26 @@ do
                         math.floor(stateColor.B * 255 + 0.5)
                     )
 
+                    local baseRaceName = race:gsub("%s*V3$", "")
+                    local displayText
+
+                    if status == "CONFIRMED" then
+                        displayText = baseRaceName .. " V3 ✓"
+                    elseif status == "LOCKED" then
+                        displayText = baseRaceName .. " chưa V3"
+                    elseif status == "PROBABLE" then
+                        displayText = baseRaceName .. " có thể V3"
+                    elseif status == "FOUND_ONLY" then
+                        displayText = baseRaceName .. " chưa xác định"
+                    elseif status == "SCANNING" then
+                        displayText = baseRaceName .. " đang check..."
+                    else
+                        displayText = baseRaceName .. " chưa xác định"
+                    end
+
                     raceLabels[race].Text =
                         '<font color="' .. stateHex .. '">●</font> '
-                        .. '<font color="' .. raceHex .. '">' .. race .. '</font>'
+                        .. '<font color="' .. raceHex .. '">' .. displayText .. '</font>'
                 end
             end)
         end
