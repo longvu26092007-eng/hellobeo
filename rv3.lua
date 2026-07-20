@@ -1143,7 +1143,11 @@ local function RunRaceTitleV3Scan(force)
     return RaceTitleV3Cache.map
 end
 
-local function GetRaceTitleV3MapCachedInternal()
+local function GetRaceTitleV3MapCachedInternal(force)
+    if force == true then
+        return RunRaceTitleV3Scan(true)
+    end
+
     if not RaceTitleV3Cache.initialized then
         return RunRaceTitleV3Scan(true)
     end
@@ -1174,6 +1178,25 @@ return GetRaceTitleV3MapCachedInternal
 -- [ END RACE V3 TITLE MULTI-CHECK ]
 -- ==========================================
 end)()
+
+-- Quét lại một lần sau khi team và giao diện Titles thật sự load xong.
+-- Chỉ làm mới cache; không thay đổi logic farm/reroll/hoàn thành.
+task.spawn(function()
+    local timeoutAt = tick() + 30
+    repeat
+        task.wait(0.5)
+        local main = LocalPlayer:FindFirstChild("PlayerGui")
+            and LocalPlayer.PlayerGui:FindFirstChild("Main")
+        local titles = main and main:FindFirstChild("Titles")
+        if LocalPlayer.Team and titles then
+            task.wait(1)
+            pcall(function()
+                GetRaceTitleV3MapCached(true)
+            end)
+            return
+        end
+    until tick() >= timeoutAt
+end)
 
 local KaitunGuiStatusLabel
 local KaitunGuiBlur
@@ -1460,18 +1483,33 @@ do
 
     local raceLabels = {}
 
-    local function GetUnlockedRaces()
-        local unlockedV3 = {}
+    local function GetRaceDisplayStatus(raceVer)
         local unlockedMap = GetRaceTitleV3MapCached()
 
-        for _, raceVer in ipairs(allV3) do
-            if unlockedMap[raceVer] == true then
-                table.insert(unlockedV3, raceVer)
-            end
+        -- Map hoàn thành vẫn là nguồn quyết định chính:
+        -- chỉ CONFIRMED mới có giá trị true.
+        if unlockedMap[raceVer] == true then
+            return "CONFIRMED"
         end
 
-        return unlockedV3
+        local debugData = getgenv().KaitunRaceTitleV3Debug
+        local statusMap = debugData and debugData.status
+
+        if type(statusMap) == "table" and type(statusMap[raceVer]) == "string" then
+            return statusMap[raceVer]
+        end
+
+        return "SCANNING"
     end
+
+    local displayStatusColors = {
+        CONFIRMED = Color3.fromRGB(75, 255, 105),
+        LOCKED = Color3.fromRGB(255, 75, 85),
+        PROBABLE = Color3.fromRGB(255, 205, 65),
+        FOUND_ONLY = Color3.fromRGB(65, 175, 255),
+        UNKNOWN = Color3.fromRGB(175, 175, 185),
+        SCANNING = Color3.fromRGB(255, 145, 45),
+    }
 
     local function createRaceLabel(raceName, order)
         local lbl = Instance.new("TextLabel")
@@ -1511,14 +1549,27 @@ do
                 CharacterLabel.Text = '<font color="#FFFFFF">Character: ' .. tostring(plr.Name) .. '</font>'
                 LevelLabel_1.Text = ""
 
-                local unlockedV3 = GetUnlockedRaces()
-
                 for _, race in ipairs(allV3) do
-                    local has = table.find(unlockedV3, race) ~= nil
-                    local dot = has and "🟢" or "🔴"
-                    local color = raceColors[race] or Color3.fromRGB(255, 255, 255)
-                    local hex = string.format("#%02X%02X%02X", color.R * 255, color.G * 255, color.B * 255)
-                    raceLabels[race].Text = dot .. ' <font color="' .. hex .. '">' .. race .. '</font>'
+                    local status = GetRaceDisplayStatus(race)
+                    local raceColor = raceColors[race] or Color3.fromRGB(255, 255, 255)
+                    local stateColor = displayStatusColors[status] or displayStatusColors.UNKNOWN
+
+                    local raceHex = string.format(
+                        "#%02X%02X%02X",
+                        math.floor(raceColor.R * 255 + 0.5),
+                        math.floor(raceColor.G * 255 + 0.5),
+                        math.floor(raceColor.B * 255 + 0.5)
+                    )
+                    local stateHex = string.format(
+                        "#%02X%02X%02X",
+                        math.floor(stateColor.R * 255 + 0.5),
+                        math.floor(stateColor.G * 255 + 0.5),
+                        math.floor(stateColor.B * 255 + 0.5)
+                    )
+
+                    raceLabels[race].Text =
+                        '<font color="' .. stateHex .. '">●</font> '
+                        .. '<font color="' .. raceHex .. '">' .. race .. '</font>'
                 end
             end)
         end
