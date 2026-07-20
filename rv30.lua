@@ -551,7 +551,7 @@ do
     Top_1.Position = UDim2.new(0.5, 0, 0.055, 0)
     Top_1.Size = UDim2.new(0.8, 0, 0, 24)
     Top_1.FontFace = Font.new("rbxasset://fonts/families/GothamSSm.json", Enum.FontWeight.Bold)
-    Top_1.Text = "Kaitun Races BF [TITLE-R13-CONFIRM-PVP]"
+    Top_1.Text = "Kaitun Races BF [TITLE-R15-ANGEL-MELEE]"
     Top_1.TextColor3 = Color3.fromRGB(255, 80, 80)
     Top_1.TextSize = 22
     Top_1.TextXAlignment = Enum.TextXAlignment.Center
@@ -2224,22 +2224,88 @@ task.spawn(function() wait(1)
                                     end
 
                                     local function SharkV3GetSeaBeast()
-                                        if not workspace:FindFirstChild("SeaBeasts") then return nil end
-                                        for _, seaBeast in next, workspace.SeaBeasts:GetChildren() do
+                                        if not workspace:FindFirstChild("SeaBeasts") then
+                                            return nil
+                                        end
+
+                                        local nearest = nil
+                                        local nearestDistance = math.huge
+
+                                        for _, seaBeast in ipairs(workspace.SeaBeasts:GetChildren()) do
                                             local health = seaBeast:FindFirstChild("Health")
                                             local hp = health and tonumber(health.Value) or 0
-                                            if hp > 30000 then
-                                                return seaBeast
+                                            local targetPart =
+                                                seaBeast:FindFirstChild("HumanoidRootPart")
+                                                or seaBeast.PrimaryPart
+                                                or seaBeast:FindFirstChildWhichIsA("BasePart", true)
+
+                                            if hp > 0 and targetPart then
+                                                local distance =
+                                                    (
+                                                        targetPart.Position
+                                                        - HumanoidRootPart.Position
+                                                    ).Magnitude
+
+                                                if distance < nearestDistance then
+                                                    nearest = seaBeast
+                                                    nearestDistance = distance
+                                                end
                                             end
                                         end
-                                        return nil
+
+                                        return nearest
                                     end
 
-                                    local function SharkV3GetSeaMob()
-                                        return workspace.Enemies:FindFirstChild("Shark")
-                                            or workspace.Enemies:FindFirstChild("Piranha")
-                                            or ReplicatedStorage:FindFirstChild("Shark")
-                                            or ReplicatedStorage:FindFirstChild("Piranha")
+                                    local function SharkV3GetTargetPart(seaBeast)
+                                        if not seaBeast then
+                                            return nil
+                                        end
+
+                                        return seaBeast:FindFirstChild("HumanoidRootPart")
+                                            or seaBeast.PrimaryPart
+                                            or seaBeast:FindFirstChildWhichIsA("BasePart", true)
+                                    end
+
+                                    local function SharkV3EquipFishmanKarate()
+                                        local equipped =
+                                            Character
+                                            and Character:FindFirstChild("Fishman Karate")
+
+                                        if equipped then
+                                            return true
+                                        end
+
+                                        local tool =
+                                            LocalPlayer.Backpack:FindFirstChild("Fishman Karate")
+
+                                        if tool and Humanoid then
+                                            pcall(function()
+                                                Humanoid:EquipTool(tool)
+                                            end)
+                                            task.wait(0.1)
+                                        end
+
+                                        return Character
+                                            and Character:FindFirstChild("Fishman Karate")
+                                            ~= nil
+                                    end
+
+                                    local function SharkV3SkillReady(key)
+                                        local mainGui =
+                                            LocalPlayer.PlayerGui:FindFirstChild("Main")
+                                        local skills =
+                                            mainGui and mainGui:FindFirstChild("Skills")
+                                        local style =
+                                            skills and skills:FindFirstChild("Fishman Karate")
+                                        local skill = style and style:FindFirstChild(key)
+                                        local cooldown =
+                                            skill and skill:FindFirstChild("Cooldown")
+
+                                        if not skill or not cooldown then
+                                            return true
+                                        end
+
+                                        return cooldown.AbsoluteSize.X <= 0
                                     end
 
                                     local function SharkV3SendKey(key, hold)
@@ -2249,40 +2315,11 @@ task.spawn(function() wait(1)
                                         VirtualInputManager:SendKeyEvent(false, keyCode, false, game)
                                     end
 
-                                    local function SharkV3GetPivot(model)
-                                        if not model then return nil end
-                                        local ok, pivot = pcall(function()
-                                            return model.WorldPivot
-                                        end)
-                                        if ok and typeof(pivot) == "CFrame" then
-                                            return pivot
-                                        end
-                                        ok, pivot = pcall(function()
-                                            return model:GetPivot()
-                                        end)
-                                        if ok and typeof(pivot) == "CFrame" then
-                                            return pivot
-                                        end
-                                        local hrp = model:FindFirstChild("HumanoidRootPart") or model:FindFirstChildWhichIsA("BasePart")
-                                        return hrp and hrp.CFrame or nil
-                                    end
-
                                     local seaBeast = SharkV3GetSeaBeast()
                                     if not seaBeast then
                                         local boat = SharkV3GetPlayerBoat()
-                                        local sharkMob = SharkV3GetSeaMob()
 
-                                        if sharkMob then
-                                            SetText("Shark V3 | Killing " .. tostring(sharkMob.Name))
-                                            if sharkMob:IsDescendantOf(workspace.Enemies) then
-                                                KillMonster(tostring(sharkMob.Name))
-                                            else
-                                                local hrp = sharkMob:FindFirstChild("HumanoidRootPart") or sharkMob:FindFirstChildWhichIsA("BasePart")
-                                                if hrp then Tween(hrp.CFrame) end
-                                            end
-                                            return
-                                        end
-
+                                        -- Fishman V3 cần Sea Beast. Không đánh Shark/Piranha.
                                         if not boat then
                                             local buyBoatPos = CFrame.new(-14, 10, 2955)
                                             SetText("Shark V3 | Buying PirateBrigade boat")
@@ -2305,33 +2342,80 @@ task.spawn(function() wait(1)
                                             SetText("Shark V3 | Boat missing VehicleSeat")
                                         end
                                     else
-                                        if not CheckTool("Sharkman Karate") and not CheckInventory("Sharkman Karate") then
-                                            SetText("Shark V3 | Buy Sharkman Karate")
-                                            COMMF_:InvokeServer("BuySharkmanKarate")
+                                        if not CheckTool("Fishman Karate")
+                                            and not CheckInventory("Fishman Karate")
+                                        then
+                                            SetText("Shark V3 | Buy Fishman Karate")
+                                            pcall(function()
+                                                COMMF_:InvokeServer("BuyFishmanKarate")
+                                            end)
+                                            task.wait(0.5)
                                         end
 
                                         repeat
                                             task.wait()
-                                            local pivot = SharkV3GetPivot(seaBeast)
-                                            if not pivot then break end
+
+                                            local targetPart =
+                                                SharkV3GetTargetPart(seaBeast)
                                             local health = seaBeast:FindFirstChild("Health")
-                                            local hpText = health and tostring(math.floor(tonumber(health.Value) or 0)) or "nil"
-                                            SetText("Shark V3 | Killing Sea Beast | HP: " .. hpText)
+                                            local hp =
+                                                health and tonumber(health.Value) or 0
 
-                                            if pivot.Position.Y >= -179 then
-                                                local lockCFrame = pivot * CFrame.new(0, 300, 0)
-                                                Tween(lockCFrame)
-                                                SetAimbotTarget(lockCFrame)
-                                                for _, key in ipairs({"Z", "X", "C"}) do
-                                                    EquipWeapon((math.random(1, 2) == 1) and "Melee" or "Sword")
-                                                    SharkV3SendKey(key, 0.05)
-                                                end
-                                                FastAttack()
-                                            else
-                                                Tween(pivot * CFrame.new(0, 900, 0))
+                                            if not targetPart or hp <= 0 then
+                                                break
                                             end
-                                        until not seaBeast or not seaBeast.Parent or not seaBeast:FindFirstChild("Health") or seaBeast.Health.Value <= 0 or IsDied(Character)
 
+                                            local distance =
+                                                (
+                                                    targetPart.Position
+                                                    - HumanoidRootPart.Position
+                                                ).Magnitude
+
+                                            SetText(
+                                                "Shark V3 | Sea Beast | HP: "
+                                                .. tostring(math.floor(hp))
+                                                .. " | Dist: "
+                                                .. tostring(math.floor(distance))
+                                            )
+
+                                            local attackCFrame =
+                                                targetPart.CFrame
+                                                * CFrame.new(0, 3, 0)
+
+                                            if distance > 8 then
+                                                Tween(attackCFrame)
+                                            else
+                                                pcall(function()
+                                                    HumanoidRootPart.CFrame = attackCFrame
+                                                    HumanoidRootPart.AssemblyLinearVelocity =
+                                                        Vector3.zero
+                                                end)
+                                            end
+
+                                            SetAimbotTarget(targetPart)
+
+                                            if SharkV3EquipFishmanKarate() then
+                                                for _, key in ipairs({"Z", "X", "C"}) do
+                                                    if SharkV3SkillReady(key) then
+                                                        SetAimbotTarget(targetPart)
+                                                        SharkV3SendKey(key, 0.5)
+                                                        task.wait(0.2)
+                                                    end
+                                                end
+                                            else
+                                                SetText(
+                                                    "Shark V3 | Waiting Fishman Karate equip"
+                                                )
+                                                task.wait(0.2)
+                                            end
+                                        until
+                                            not seaBeast
+                                            or not seaBeast.Parent
+                                            or not seaBeast:FindFirstChild("Health")
+                                            or tonumber(seaBeast.Health.Value) <= 0
+                                            or IsDied(Character)
+
+                                        Tween(false)
                                         SetAimbotTarget(false)
 
                                         local fishConfirmOk, fishConfirmResult = pcall(function()
@@ -2386,6 +2470,49 @@ task.spawn(function() wait(1)
                                             pcall(function()
                                                 COMMF_:InvokeServer("EnablePvp")
                                             end)
+                                        end
+                                    end
+
+                                    local lastAngelMeleeSkillSpam = 0
+
+                                    local function AngelV3SendMeleeKey(key, holdTime)
+                                        local keyCode = Enum.KeyCode[key]
+                                        if not keyCode then
+                                            return
+                                        end
+
+                                        VirtualInputManager:SendKeyEvent(
+                                            true,
+                                            keyCode,
+                                            false,
+                                            game
+                                        )
+                                        task.wait(holdTime or 0.05)
+                                        VirtualInputManager:SendKeyEvent(
+                                            false,
+                                            keyCode,
+                                            false,
+                                            game
+                                        )
+                                    end
+
+                                    local function AngelV3SpamMelee(root)
+                                        -- Chỉ dùng melee: không chuyển Sword/Gun/Fruit.
+                                        EquipWeapon("Melee")
+                                        SetAimbotTarget(root)
+                                        FastAttack()
+
+                                        -- Giới hạn nhịp để không giữ phím liên tục,
+                                        -- nhưng vẫn spam Z/X/C trong lúc áp sát.
+                                        if tick() - lastAngelMeleeSkillSpam >= 0.35 then
+                                            lastAngelMeleeSkillSpam = tick()
+
+                                            for _, key in ipairs({"Z", "X", "C"}) do
+                                                EquipWeapon("Melee")
+                                                SetAimbotTarget(root)
+                                                AngelV3SendMeleeKey(key, 0.08)
+                                                task.wait(0.08)
+                                            end
                                         end
                                     end
 
@@ -2584,16 +2711,9 @@ task.spawn(function() wait(1)
                                                 -- Bật lại PvP ngay trước khi đánh để tránh
                                                 -- trường hợp GUI cập nhật chậm.
                                                 EnsureAngelPvpEnabled(true)
-                                                FastAttack()
-                                                SetAimbotTarget(root)
-                                                EquipWeapon(
-                                                    ({
-                                                        "Melee",
-                                                        "Sword",
-                                                        "Gun",
-                                                        "Blox Fruit",
-                                                    })[math.random(4)]
-                                                )
+
+                                                -- Chỉ đánh melee và spam skill melee Z/X/C.
+                                                AngelV3SpamMelee(root)
                                             end
                                         until false
 
