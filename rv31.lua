@@ -1,3 +1,4 @@
+-- BUILD: TITLE-CHECK-STRICT-R6 / UI-PLAIN-R6
 local MeleeData = {
     ["Black Leg"] = "Dark Step Teacher";
     ["Electro"] = "Mad Scientist";
@@ -33,7 +34,7 @@ getgenv().Settings = getgenv().Settings or {
     };
     ["Focus Melee"] = "Sharkman Karate";
     -- FOCUS WHEN DO SHARK V3
-    ["Races"] = { -- bật race nào thì script sẽ check V3 race đó, đủ hết sẽ đổi folder
+    ["Races"] = getgenv().Races or { -- bật race nào thì script sẽ check V3 race đó, đủ hết sẽ tạo file
         ["Human"] = true;
         ["Mink"] = true;      
         ["Fishman"] = true;   
@@ -204,9 +205,14 @@ local TITLE_FIELDS = {title = true, name = true, titlename = true, displayname =
 local OBTAIN_FIELDS = {obtainment = true, requirement = true, description = true, obtain = true}
 
 local OWNED_WORDS = {
-    ["equipped"] = true, ["selected"] = true, ["owned"] = true,
-    ["unlocked"] = true, ["obtained"] = true, ["acquired"] = true,
-    ["use title"] = true, ["equip"] = true,
+    -- Chỉ nhận trạng thái đã sở hữu rõ ràng.
+    -- "Equip"/"Use Title" chỉ là tên nút, không phải bằng chứng sở hữu.
+    ["equipped"] = true,
+    ["selected"] = true,
+    ["owned"] = true,
+    ["unlocked"] = true,
+    ["obtained"] = true,
+    ["acquired"] = true,
 }
 
 local LOCKED_WORDS = {
@@ -370,12 +376,138 @@ local function tableNodeMatchesTarget(node, target)
     return next(matched) ~= nil, matched
 end
 
-local function inspectRemoteNode(node, path, depth, results, visited)
-    if depth > 8 then
+local OWNED_COLLECTION_MARKERS = {
+    "unlockedtitles",
+    "ownedtitles",
+    "obtainedtitles",
+    "acquiredtitles",
+    "titlesunlocked",
+    "titlesowned",
+}
+
+local function isOwnedCollectionContext(path, keyName)
+    local context = normalize(tostring(path or "") .. tostring(keyName or ""))
+    for _, marker in ipairs(OWNED_COLLECTION_MARKERS) do
+        if context:find(marker, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+local function addUniqueResult(list, seen, result)
+    if result and not seen[result] then
+        seen[result] = true
+        table.insert(list, result)
+    end
+end
+
+local function findResultsMatchingScalar(results, value, fieldKind)
+    local found, seen = {}, {}
+    for _, result in ipairs(results) do
+        if targetMatchesScalar(result.target, value, fieldKind) then
+            addUniqueResult(found, seen, result)
+        end
+    end
+    return found
+end
+
+local function collectRecordResults(node, results, inheritedResults)
+    local found, seen = {}, {}
+
+    if type(inheritedResults) == "table" then
+        for _, result in ipairs(inheritedResults) do
+            addUniqueResult(found, seen, result)
+        end
+    end
+
+    for key, value in pairs(node) do
+        local keyName = normalize(key)
+        if type(value) ~= "table" then
+            local fieldKind
+            if ID_FIELDS[keyName] then
+                fieldKind = "number"
+            elseif TITLE_FIELDS[keyName] then
+                fieldKind = "title"
+            elseif OBTAIN_FIELDS[keyName] then
+                fieldKind = "obtainment"
+            end
+
+            if fieldKind then
+                for _, result in ipairs(findResultsMatchingScalar(results, value, fieldKind)) do
+                    addUniqueResult(found, seen, result)
+                end
+            end
+        end
+    end
+
+    return found
+end
+
+local function applyRemoteExplicitFields(node, path, recordResults)
+    if #recordResults == 0 then
         return
     end
 
-    if type(node) ~= "table" then
+    for key, value in pairs(node) do
+        local keyName = normalize(key)
+
+        if TRUE_FIELDS[keyName] then
+            local state = boolLike(value)
+            if state ~= nil then
+                for _, result in ipairs(recordResults) do
+                    if state == true then
+                        result.remoteExplicitOwned = true
+                        addEvidence(
+                            result,
+                            "REMOTE_EXPLICIT_" .. string.upper(tostring(key)),
+                            path .. "=" .. tostring(value),
+                            10,
+                            "owned"
+                        )
+                    else
+                        result.remoteExplicitLocked = true
+                        addEvidence(
+                            result,
+                            "REMOTE_EXPLICIT_" .. string.upper(tostring(key)),
+                            path .. "=" .. tostring(value),
+                            10,
+                            "locked"
+                        )
+                    end
+                end
+            end
+        elseif LOCK_FIELDS[keyName] then
+            local state = boolLike(value)
+            if state ~= nil then
+                for _, result in ipairs(recordResults) do
+                    if state == true then
+                        result.remoteExplicitLocked = true
+                        addEvidence(
+                            result,
+                            "REMOTE_EXPLICIT_LOCKED",
+                            path .. "=" .. tostring(value),
+                            10,
+                            "locked"
+                        )
+                    else
+                        result.remoteExplicitOwned = true
+                        addEvidence(
+                            result,
+                            "REMOTE_EXPLICIT_NOT_LOCKED",
+                            path .. "=" .. tostring(value),
+                            10,
+                            "owned"
+                        )
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function inspectRemoteNode(node, path, depth, results, visited, inheritedResults)
+    if depth > 8 or type(node) ~= "table" then
         return
     end
 
@@ -384,99 +516,102 @@ local function inspectRemoteNode(node, path, depth, results, visited)
     end
     visited[node] = true
 
-    for _, result in ipairs(results) do
+    local recordResults = collectRecordResults(node, results, inheritedResults)
+
+    -- Ghi bằng chứng nhận dạng, nhưng không xem số/tên/obtainment là đã mở.
+    for _, result in ipairs(recordResults) do
         local target = result.target
-        local related, matched = tableNodeMatchesTarget(node, target)
-
-        if related then
-            if matched.number or matched.numberKey then
-                addEvidence(result, "REMOTE_NUMBER", path, 1, "info")
-            end
-            if matched.title or matched.titleKey then
-                addEvidence(result, "REMOTE_TITLE", path, 1, "info")
-            end
-            if matched.obtainment or matched.obtainmentKey then
-                addEvidence(result, "REMOTE_OBTAINMENT", path, 1, "info")
-            end
-            if matched.generic then
-                addEvidence(result, "REMOTE_TEXT", path, 1, "info")
-            end
-
-            for key, value in pairs(node) do
-                local keyName = normalize(key)
-
-                if TRUE_FIELDS[keyName] then
-                    local state = boolLike(value)
-                    if state == true then
-                        result.remoteExplicitOwned = true
-                        addEvidence(result, "REMOTE_" .. string.upper(tostring(key)), path .. "=" .. tostring(value), 10, "owned")
-                    elseif state == false then
-                        result.remoteExplicitLocked = true
-                        addEvidence(result, "REMOTE_" .. string.upper(tostring(key)), path .. "=" .. tostring(value), 10, "locked")
-                    end
-                elseif LOCK_FIELDS[keyName] then
-                    local state = boolLike(value)
-                    if state == true then
-                        result.remoteExplicitLocked = true
-                        addEvidence(result, "REMOTE_" .. string.upper(tostring(key)), path .. "=" .. tostring(value), 10, "locked")
-                    elseif state == false then
-                        result.remoteExplicitOwned = true
-                        addEvidence(result, "REMOTE_NOT_LOCKED", path .. "=" .. tostring(value), 8, "owned")
-                    end
+        for key, value in pairs(node) do
+            local keyName = normalize(key)
+            if type(value) ~= "table" then
+                if ID_FIELDS[keyName] and targetMatchesScalar(target, value, "number") then
+                    addEvidence(result, "REMOTE_NUMBER", path, 1, "info")
+                elseif TITLE_FIELDS[keyName] and targetMatchesScalar(target, value, "title") then
+                    addEvidence(result, "REMOTE_TITLE", path, 1, "info")
+                elseif OBTAIN_FIELDS[keyName] and targetMatchesScalar(target, value, "obtainment") then
+                    addEvidence(result, "REMOTE_OBTAINMENT", path, 1, "info")
                 end
             end
         end
     end
 
+    -- Chỉ cờ Boolean/state nằm trong đúng record title mới xác nhận sở hữu.
+    applyRemoteExplicitFields(node, path, recordResults)
+
     for key, value in pairs(node) do
         local childPath = path .. "[" .. tostring(key) .. "]"
+        local keyName = normalize(key)
+        local keyResults, keySeen = {}, {}
 
-        for _, result in ipairs(results) do
-            local target = result.target
-            local keyName = normalize(key)
-            local parentContext = normalize(path)
-
-            if type(value) ~= "table" then
-                local state = boolLike(value)
-
-                local keyIsTarget =
-                    targetMatchesScalar(target, key, "number")
-                    or targetMatchesScalar(target, key, "title")
-                    or targetMatchesScalar(target, key, "obtainment")
-
-                if keyIsTarget and state ~= nil then
-                    if state then
-                        result.remoteExplicitOwned = true
-                        addEvidence(result, "REMOTE_KEY_TRUE", childPath, 10, "owned")
-                    else
-                        result.remoteExplicitLocked = true
-                        addEvidence(result, "REMOTE_KEY_FALSE", childPath, 10, "locked")
-                    end
-                end
-
-                local valueMatches =
-                    targetMatchesScalar(target, value, "number")
-                    or targetMatchesScalar(target, value, "title")
-                    or targetMatchesScalar(target, value, "obtainment")
-
-                if valueMatches then
-                    if parentContext:find("unlock", 1, true)
-                        or parentContext:find("owned", 1, true)
-                        or parentContext:find("obtain", 1, true)
-                        or keyName:find("unlock", 1, true)
-                        or keyName:find("owned", 1, true)
-                    then
-                        result.remoteExplicitOwned = true
-                        addEvidence(result, "REMOTE_UNLOCKED_LIST", childPath .. "=" .. tostring(value), 9, "owned")
-                    else
-                        addEvidence(result, "REMOTE_LIST_MATCH", childPath .. "=" .. tostring(value), 2, "info")
-                    end
-                end
-            end
+        for _, result in ipairs(findResultsMatchingScalar(results, key, "number")) do
+            addUniqueResult(keyResults, keySeen, result)
+        end
+        for _, result in ipairs(findResultsMatchingScalar(results, key, "title")) do
+            addUniqueResult(keyResults, keySeen, result)
+        end
+        for _, result in ipairs(findResultsMatchingScalar(results, key, "obtainment")) do
+            addUniqueResult(keyResults, keySeen, result)
         end
 
         if type(value) == "table" then
-            inspectRemoteNode(value, childPath, depth + 1, results, visited)
+            -- Hỗ trợ dạng [8] = {Unlocked=true} hoặc ["Full Power"] = {...}.
+            inspectRemoteNode(
+                value,
+                childPath,
+                depth + 1,
+                results,
+                visited,
+                #keyResults > 0 and keyResults or nil
+            )
+        else
+            local state = boolLike(value)
+
+            -- Hỗ trợ dạng [8]=true / ["Full Power"]=true.
+            if #keyResults > 0 and state ~= nil then
+                for _, result in ipairs(keyResults) do
+                    if state == true then
+                        result.remoteExplicitOwned = true
+                        addEvidence(result, "REMOTE_DIRECT_KEY_TRUE", childPath, 10, "owned")
+                    else
+                        result.remoteExplicitLocked = true
+                        addEvidence(result, "REMOTE_DIRECT_KEY_FALSE", childPath, 10, "locked")
+                    end
+                end
+            end
+
+            -- Hỗ trợ danh sách sở hữu có tên rõ ràng, ví dụ UnlockedTitles={8,9}.
+            -- Tuyệt đối không coi field "Obtainment" là bằng chứng đã sở hữu.
+            if isOwnedCollectionContext(path, keyName) then
+                local matched, matchedSeen = {}, {}
+                for _, result in ipairs(findResultsMatchingScalar(results, value, "number")) do
+                    addUniqueResult(matched, matchedSeen, result)
+                end
+                for _, result in ipairs(findResultsMatchingScalar(results, value, "title")) do
+                    addUniqueResult(matched, matchedSeen, result)
+                end
+
+                for _, result in ipairs(matched) do
+                    result.remoteExplicitOwned = true
+                    addEvidence(
+                        result,
+                        "REMOTE_EXPLICIT_OWNED_LIST",
+                        childPath .. "=" .. tostring(value),
+                        10,
+                        "owned"
+                    )
+                end
+            else
+                -- Text tồn tại chỉ là FOUND_ONLY/PROBABLE, không phải CONFIRMED.
+                for _, result in ipairs(findResultsMatchingScalar(results, value, "number")) do
+                    addEvidence(result, "REMOTE_NUMBER_VALUE", childPath, 1, "info")
+                end
+                for _, result in ipairs(findResultsMatchingScalar(results, value, "title")) do
+                    addEvidence(result, "REMOTE_TITLE_VALUE", childPath, 1, "info")
+                end
+                for _, result in ipairs(findResultsMatchingScalar(results, value, "obtainment")) do
+                    addEvidence(result, "REMOTE_OBTAINMENT_VALUE", childPath, 1, "info")
+                end
+            end
         end
     end
 end
@@ -529,13 +664,14 @@ local function inspectPlayerTitles(results)
                         addEvidence(result, "PLAYER_BOOL_FALSE", safePath(instance), 9, "locked")
                     end
                 elseif instance:IsA("IntValue") or instance:IsA("NumberValue") then
-                    if tonumber(instance.Value) == 1 then
-                        result.playerExplicitOwned = true
-                        addEvidence(result, "PLAYER_VALUE_1", safePath(instance), 7, "owned")
-                    elseif tonumber(instance.Value) == 0 then
-                        result.playerExplicitLocked = true
-                        addEvidence(result, "PLAYER_VALUE_0", safePath(instance), 7, "locked")
-                    end
+                    -- Giá trị số có thể là ID/thứ tự title, không được tự hiểu 1/0 là sở hữu.
+                    addEvidence(
+                        result,
+                        "PLAYER_NUMERIC_VALUE",
+                        safePath(instance) .. "=" .. tostring(instance.Value),
+                        2,
+                        "info"
+                    )
                 else
                     addEvidence(result, "PLAYER_INSTANCE_PRESENT", safePath(instance), 3, "info")
                 end
@@ -685,6 +821,20 @@ local function exactStateWord(text)
     return OWNED_WORDS[normalized] == true, LOCKED_WORDS[normalized] == true
 end
 
+local function isGuiActuallyVisible(instance, stopRoot)
+    local current = instance
+    while current and current ~= stopRoot.Parent do
+        if current:IsA("GuiObject") and current.Visible == false then
+            return false
+        end
+        if current == stopRoot then
+            break
+        end
+        current = current.Parent
+    end
+    return true
+end
+
 local function inspectGuiCard(cardInfo, result)
     local root = cardInfo.root
     local target = result.target
@@ -711,7 +861,7 @@ local function inspectGuiCard(cardInfo, result)
         local nameNormalized = normalize(instance.Name)
         local visible = true
         if instance:IsA("GuiObject") then
-            visible = instance.Visible
+            visible = isGuiActuallyVisible(instance, root)
         end
 
         local text = textOf(instance)
@@ -844,35 +994,46 @@ local function inspectGui(results)
 end
 
 local function finalizeResult(result)
-    if result.remoteExplicitOwned or result.guiExplicitOwned or result.playerExplicitOwned then
+    local explicitOwned =
+        result.remoteExplicitOwned
+        or result.guiExplicitOwned
+        or result.playerExplicitOwned
+
+    local explicitLocked =
+        result.remoteExplicitLocked
+        or result.guiExplicitLocked
+        or result.playerExplicitLocked
+
+    -- Có cả bằng chứng mở và khóa thì không được đoán là đã V3.
+    if explicitOwned and explicitLocked then
+        result.status = "CONFLICT"
+        result.reason = "Conflicting explicit owned and locked signals"
+        return
+    end
+
+    -- Không đoán: chỉ cờ sở hữu rõ ràng mới là CONFIRMED.
+    if explicitOwned then
         result.status = "CONFIRMED"
         result.reason = "Explicit owned/unlocked state detected"
         return
     end
 
-    if result.remoteExplicitLocked or result.guiExplicitLocked or result.playerExplicitLocked then
-        if result.ownedScore > result.lockedScore then
-            result.status = "PROBABLE"
-            result.reason = "Conflicting evidence; owned score is higher"
-        else
-            result.status = "LOCKED"
-            result.reason = "Explicit locked/false state detected"
-        end
+    if explicitLocked then
+        result.status = "LOCKED"
+        result.reason = "Explicit locked/false state detected"
         return
     end
 
-    if result.ownedScore >= 8 then
-        result.status = "CONFIRMED"
-        result.reason = "Strong independent ownership evidence"
-    elseif result.ownedScore >= 4 or result.infoScore >= 8 then
+    -- Điểm chỉ dùng để mô tả mức bằng chứng, không được tự nâng thành CONFIRMED.
+    if result.infoScore >= 6 or result.ownedScore > 0 then
         result.status = "PROBABLE"
-        result.reason = "Multiple matches, but no explicit ownership flag"
+        result.reason = "Multiple indicators found, but no explicit ownership flag"
     elseif result.infoScore > 0 then
         result.status = "FOUND_ONLY"
-        result.reason = "Title row/text exists; ownership is not proven"
+        result.reason = "Title metadata exists; ownership is not proven"
     else
         result.status = "UNKNOWN"
-        result.reason = "No matching title data found"
+        result.reason = "No matching title ownership data found"
     end
 end
 
@@ -1124,11 +1285,13 @@ local function RunRaceTitleV3Scan(force)
         RaceTitleV3Cache.initialized = true
 
         getgenv().KaitunRaceTitleV3Debug = {
+            build = "TITLE-CHECK-STRICT-R6",
             interval = RACE_TITLE_SCAN_INTERVAL,
             lastScan = RaceTitleV3Cache.lastScan,
             map = newMap,
             status = newStatus,
             evidence = newEvidence,
+            rawGetTitles = remoteData,
         }
     end, function(err)
         return tostring(err)
@@ -1197,6 +1360,11 @@ task.spawn(function()
         end
     until tick() >= timeoutAt
 end)
+
+getgenv().__KAITUN_RACE_GUI_GENERATION =
+    (tonumber(getgenv().__KAITUN_RACE_GUI_GENERATION) or 0) + 1
+local KAITUN_RACE_GUI_GENERATION = getgenv().__KAITUN_RACE_GUI_GENERATION
+local KAITUN_RACE_GUI_BUILD = "STRICT-R6"
 
 local KaitunGuiStatusLabel
 local KaitunGuiBlur
@@ -1289,7 +1457,7 @@ do
     Top_1.Position = UDim2.new(0.5, 0, 0.055, 0)
     Top_1.Size = UDim2.new(0.8, 0, 0, 24)
     Top_1.FontFace = Font.new("rbxasset://fonts/families/GothamSSm.json", Enum.FontWeight.Bold)
-    Top_1.Text = "Kaitun Races BF"
+    Top_1.Text = "Kaitun Races BF [STRICT-R6]"
     Top_1.TextColor3 = Color3.fromRGB(255, 80, 80)
     Top_1.TextSize = 22
     Top_1.TextXAlignment = Enum.TextXAlignment.Center
@@ -1454,49 +1622,36 @@ do
 
     KaitunGuiStatusLabel = StatusLabel
 
-    local raceTitles = {
-        ["Full Power"] = "Human V3",
-        ["Godspeed"] = "Rabbit V3",
-        ["Warrior of the Sea"] = "Shark V3",
-        ["Perfect Being"] = "Angel V3",
-        ["Hell Hound"] = "Ghoul V3",
-        ["War Machine"] = "Cyborg V3",
-    }
-
-    local allV3 = {
-        "Human V3",
-        "Rabbit V3",
-        "Shark V3",
-        "Angel V3",
-        "Ghoul V3",
-        "Cyborg V3"
-    }
-
-    local raceColors = {
-        ["Angel V3"] = Color3.fromRGB(255, 204, 0),
-        ["Human V3"] = Color3.fromRGB(255, 50, 50),
-        ["Shark V3"] = Color3.fromRGB(0, 168, 255),
-        ["Cyborg V3"] = Color3.fromRGB(204, 0, 255),
-        ["Ghoul V3"] = Color3.fromRGB(160, 255, 80),
-        ["Rabbit V3"] = Color3.fromRGB(0, 255, 60),
+    local raceEntries = {
+        {key = "Human V3",  name = "Human"},
+        {key = "Rabbit V3", name = "Rabbit"},
+        {key = "Shark V3",  name = "Shark"},
+        {key = "Angel V3",  name = "Angel"},
+        {key = "Ghoul V3",  name = "Ghoul"},
+        {key = "Cyborg V3", name = "Cyborg"},
     }
 
     local raceLabels = {}
 
-    local function GetRaceDisplayStatus(raceVer)
+    local function GetRaceDisplayStatus(raceKey)
         local unlockedMap = GetRaceTitleV3MapCached()
 
-        -- Map hoàn thành vẫn là nguồn quyết định chính:
-        -- chỉ CONFIRMED mới có giá trị true.
-        if unlockedMap[raceVer] == true then
+        if unlockedMap[raceKey] == true then
             return "CONFIRMED"
         end
 
         local debugData = getgenv().KaitunRaceTitleV3Debug
         local statusMap = debugData and debugData.status
+        local status = type(statusMap) == "table" and statusMap[raceKey] or nil
 
-        if type(statusMap) == "table" and type(statusMap[raceVer]) == "string" then
-            return statusMap[raceVer]
+        if status == "CONFIRMED"
+            or status == "LOCKED"
+            or status == "PROBABLE"
+            or status == "FOUND_ONLY"
+            or status == "UNKNOWN"
+            or status == "CONFLICT"
+        then
+            return status
         end
 
         return "SCANNING"
@@ -1509,31 +1664,48 @@ do
         FOUND_ONLY = Color3.fromRGB(65, 175, 255),
         UNKNOWN = Color3.fromRGB(175, 175, 185),
         SCANNING = Color3.fromRGB(255, 145, 45),
+        CONFLICT = Color3.fromRGB(255, 70, 210),
     }
 
-    local function createRaceLabel(raceName, order)
+    local displayStatusText = {
+        CONFIRMED = "V3",
+        LOCKED = "CHUA V3",
+        PROBABLE = "CHUA XAC NHAN",
+        FOUND_ONLY = "CHUA XAC DINH",
+        UNKNOWN = "UNKNOWN",
+        SCANNING = "DANG CHECK",
+        CONFLICT = "XUNG DOT",
+    }
+
+    local function createRaceLabel(entry, order)
         local lbl = Instance.new("TextLabel")
-        lbl.Name = raceName:gsub("%s+", "")
+        lbl.Name = entry.name .. "RaceStatus"
         lbl.Parent = RaceContainer
         lbl.BackgroundTransparency = 1
         lbl.Size = UDim2.new(0, 175, 0, 24)
-        lbl.FontFace = Font.new("rbxasset://fonts/families/GothamSSm.json", Enum.FontWeight.Bold)
-        lbl.TextSize = 16
+        lbl.FontFace = Font.new(
+            "rbxasset://fonts/families/GothamSSm.json",
+            Enum.FontWeight.Bold
+        )
+        lbl.TextSize = 13
         lbl.TextXAlignment = Enum.TextXAlignment.Left
         lbl.TextYAlignment = Enum.TextYAlignment.Center
-        lbl.TextColor3 = Color3.fromRGB(255, 255, 255)
+        lbl.TextColor3 = displayStatusColors.SCANNING
         lbl.LayoutOrder = order
-        lbl.RichText = true
+        lbl.RichText = false
+        lbl.Text = "● " .. entry.name .. ": DANG CHECK"
         return lbl
     end
 
-    for i, race in ipairs(allV3) do
-        raceLabels[race] = createRaceLabel(race, i)
+    for index, entry in ipairs(raceEntries) do
+        raceLabels[entry.key] = createRaceLabel(entry, index)
     end
 
     task.spawn(function()
-        while task.wait(0.4) do
-            pcall(function()
+        while task.wait(0.4)
+            and getgenv().__KAITUN_RACE_GUI_GENERATION == KAITUN_RACE_GUI_GENERATION
+        do
+            local ok, err = xpcall(function()
                 if plr:FindFirstChild("Data") then
                     if plr.Data:FindFirstChild("Beli") then
                         BeliLabel_1.Text = "Beli: " .. tostring(plr.Data.Beli.Value)
@@ -1546,51 +1718,33 @@ do
                     end
                 end
 
-                CharacterLabel.Text = '<font color="#FFFFFF">Character: ' .. tostring(plr.Name) .. '</font>'
+                CharacterLabel.Text =
+                    '<font color="#FFFFFF">Character: '
+                    .. tostring(plr.Name)
+                    .. '</font>'
                 LevelLabel_1.Text = ""
 
-                for _, race in ipairs(allV3) do
-                    local status = GetRaceDisplayStatus(race)
-                    local raceColor = raceColors[race] or Color3.fromRGB(255, 255, 255)
-                    local stateColor = displayStatusColors[status] or displayStatusColors.UNKNOWN
+                for _, entry in ipairs(raceEntries) do
+                    local status = GetRaceDisplayStatus(entry.key)
+                    local label = raceLabels[entry.key]
+                    local statusText =
+                        displayStatusText[status] or displayStatusText.UNKNOWN
 
-                    local raceHex = string.format(
-                        "#%02X%02X%02X",
-                        math.floor(raceColor.R * 255 + 0.5),
-                        math.floor(raceColor.G * 255 + 0.5),
-                        math.floor(raceColor.B * 255 + 0.5)
-                    )
-                    local stateHex = string.format(
-                        "#%02X%02X%02X",
-                        math.floor(stateColor.R * 255 + 0.5),
-                        math.floor(stateColor.G * 255 + 0.5),
-                        math.floor(stateColor.B * 255 + 0.5)
-                    )
-
-                    local baseRaceName = race:gsub("%s*V3$", "")
-                    local displayText
-
-                    if status == "CONFIRMED" then
-                        displayText = baseRaceName .. " V3 ✓"
-                    elseif status == "LOCKED" then
-                        displayText = baseRaceName .. " chưa V3"
-                    elseif status == "PROBABLE" then
-                        displayText = baseRaceName .. " có thể V3"
-                    elseif status == "FOUND_ONLY" then
-                        displayText = baseRaceName .. " chưa xác định"
-                    elseif status == "SCANNING" then
-                        displayText = baseRaceName .. " đang check..."
-                    else
-                        displayText = baseRaceName .. " chưa xác định"
-                    end
-
-                    raceLabels[race].Text =
-                        '<font color="' .. stateHex .. '">●</font> '
-                        .. '<font color="' .. raceHex .. '">' .. displayText .. '</font>'
+                    label.TextColor3 =
+                        displayStatusColors[status] or displayStatusColors.UNKNOWN
+                    label.Text =
+                        "● " .. entry.name .. ": " .. statusText
                 end
+            end, function(message)
+                return tostring(message)
             end)
+
+            if not ok then
+                warn("[RaceProgressUI " .. KAITUN_RACE_GUI_BUILD .. "] " .. tostring(err))
+            end
         end
     end)
+
 end
 
 function SetStatus(text)
