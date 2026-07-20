@@ -1,6 +1,6 @@
 --[[
     BANANAHUB RACE V2-V3 TITLE CONTROLLER
-    Build: TITLE-CONTROLLER-UI-R3
+    Build: TITLE-CONTROLLER-UI-R4-COMPLETED-PREFIX
 
     Chức năng:
       1. Chọn/load team trước khi gọi BananaHub.
@@ -11,13 +11,12 @@
       6. Khi tất cả race true đều V3:
          tạo <PlayerName>.txt theo số race được bật:
            - 1 race: Completed-<Race>
-           - 2 race: 2racev3
-           - 3 race: 3racev3
-           - tương tự tới 6racev3.
+           - 2 race: Completed-2racev3
+           - 3 race: Completed-3racev3
+           - tương tự tới Completed-6racev3.
 ]]
 
 
--- ============================================================
 -- [ CONTROLLER ]
 -- ============================================================
 
@@ -779,12 +778,15 @@ local function GetCompletionFileContent()
     local enabledRaces = GetEnabledRaces()
     local enabledCount = #enabledRaces
 
+    -- Nội dung file luôn phải bắt đầu bằng "Completed-".
     if enabledCount == 1 then
         return "Completed-" .. tostring(enabledRaces[1])
     end
 
     if enabledCount >= 2 then
-        return tostring(enabledCount) .. "racev3"
+        return "Completed-"
+            .. tostring(enabledCount)
+            .. "racev3"
     end
 
     return nil
