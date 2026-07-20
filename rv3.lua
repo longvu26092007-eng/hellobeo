@@ -1210,6 +1210,75 @@ local RaceTitleV3Cache = {
     scanning = false,
 }
 
+-- Xác nhận trực tiếp từ logic tộc hiện tại (Wenlocktoad).
+-- Giữ riêng để lần quét getTitles sau không ghi đè mất kết quả chắc chắn này.
+local DirectConfirmedV3 = {}
+
+local DIRECT_RACE_TO_V3 = {
+    human = "Human V3",
+    mink = "Rabbit V3",
+    rabbit = "Rabbit V3",
+    fishman = "Shark V3",
+    shark = "Shark V3",
+    skypiea = "Angel V3",
+    angel = "Angel V3",
+    ghoul = "Ghoul V3",
+    cyborg = "Cyborg V3",
+    draco = "Draco V3",
+}
+
+local function SyncDirectDebug()
+    getgenv().KaitunRaceTitleV3Debug = getgenv().KaitunRaceTitleV3Debug or {}
+    local debugData = getgenv().KaitunRaceTitleV3Debug
+    debugData.interval = RACE_TITLE_SCAN_INTERVAL
+    debugData.lastScan = RaceTitleV3Cache.lastScan
+    debugData.map = RaceTitleV3Cache.map
+    debugData.status = RaceTitleV3Cache.status
+    debugData.evidence = RaceTitleV3Cache.evidence
+end
+
+getgenv().KaitunConfirmRaceV3Direct = function(raceName, source)
+    local key = normalize(raceName)
+    local raceV3 = DIRECT_RACE_TO_V3[key]
+    if not raceV3 then
+        return false
+    end
+
+    local detail = tostring(source or "Direct current-race check")
+    DirectConfirmedV3[raceV3] = {
+        source = detail,
+        confirmedAt = tick(),
+    }
+
+    RaceTitleV3Cache.map[raceV3] = true
+    RaceTitleV3Cache.status[raceV3] = "CONFIRMED"
+    RaceTitleV3Cache.evidence[raceV3] = RaceTitleV3Cache.evidence[raceV3] or {}
+
+    local exists = false
+    for _, item in ipairs(RaceTitleV3Cache.evidence[raceV3]) do
+        if item.code == "DIRECT_CURRENT_RACE" then
+            item.detail = detail
+            item.weight = 100
+            item.polarity = "owned"
+            exists = true
+            break
+        end
+    end
+
+    if not exists then
+        table.insert(RaceTitleV3Cache.evidence[raceV3], {
+            code = "DIRECT_CURRENT_RACE",
+            detail = detail,
+            weight = 100,
+            polarity = "owned",
+        })
+    end
+
+    RaceTitleV3Cache.initialized = true
+    SyncDirectDebug()
+    return true
+end
+
 local function RunRaceTitleV3Scan(force)
     if RaceTitleV3Cache.scanning then
         local timeoutAt = tick() + 3
@@ -1275,6 +1344,31 @@ local function RunRaceTitleV3Scan(force)
             -- Chỉ trạng thái CONFIRMED mới được tính là hoàn thành.
             if result.status == "CONFIRMED" then
                 newMap[raceV3] = true
+            end
+        end
+
+        -- Xác nhận trực tiếp từ Wenlocktoad có độ ưu tiên cao nhất.
+        -- Không để lần quét title sau hạ từ CONFIRMED về UNKNOWN/FOUND_ONLY.
+        for raceV3, directInfo in pairs(DirectConfirmedV3) do
+            newMap[raceV3] = true
+            newStatus[raceV3] = "CONFIRMED"
+            newEvidence[raceV3] = newEvidence[raceV3] or {}
+
+            local foundDirect = false
+            for _, item in ipairs(newEvidence[raceV3]) do
+                if item.code == "DIRECT_CURRENT_RACE" then
+                    foundDirect = true
+                    break
+                end
+            end
+
+            if not foundDirect then
+                table.insert(newEvidence[raceV3], {
+                    code = "DIRECT_CURRENT_RACE",
+                    detail = tostring(directInfo.source or "Direct current-race check"),
+                    weight = 100,
+                    polarity = "owned",
+                })
             end
         end
 
@@ -1457,7 +1551,7 @@ do
     Top_1.Position = UDim2.new(0.5, 0, 0.055, 0)
     Top_1.Size = UDim2.new(0.8, 0, 0, 24)
     Top_1.FontFace = Font.new("rbxasset://fonts/families/GothamSSm.json", Enum.FontWeight.Bold)
-    Top_1.Text = "Kaitun Races BF [STRICT-R6]"
+    Top_1.Text = "Kaitun Races BF [STRICT-R7-SYNC]"
     Top_1.TextColor3 = Color3.fromRGB(255, 80, 80)
     Top_1.TextSize = 22
     Top_1.TextXAlignment = Enum.TextXAlignment.Center
@@ -1672,7 +1766,7 @@ do
         LOCKED = "CHUA V3",
         PROBABLE = "CHUA XAC NHAN",
         FOUND_ONLY = "CHUA XAC DINH",
-        UNKNOWN = "UNKNOWN",
+        UNKNOWN = "CHUA XAC DINH",
         SCANNING = "DANG CHECK",
         CONFLICT = "XUNG DOT",
     }
@@ -2754,7 +2848,23 @@ CompletedRace = setmetatable({}, {
 })
 
 SaveCompletedRace = function(x)
-    SetText("Detected " .. tostring(x) .. " V3 completed by title check")
+    local synced = false
+
+    if type(getgenv().KaitunConfirmRaceV3Direct) == "function" then
+        local ok, result = pcall(function()
+            return getgenv().KaitunConfirmRaceV3Direct(
+                x,
+                "Wenlocktoad direct current-race confirmation"
+            )
+        end)
+        synced = ok and result == true
+    end
+
+    if synced then
+        SetText("Detected " .. tostring(x) .. " V3 | Synced GUI")
+    else
+        SetText("Detected " .. tostring(x) .. " V3")
+    end
 end
 
 task.spawn(function() wait(1)
