@@ -551,7 +551,7 @@ do
     Top_1.Position = UDim2.new(0.5, 0, 0.055, 0)
     Top_1.Size = UDim2.new(0.8, 0, 0, 24)
     Top_1.FontFace = Font.new("rbxasset://fonts/families/GothamSSm.json", Enum.FontWeight.Bold)
-    Top_1.Text = "Kaitun Races BF [TITLE-R12-ANGEL-EXACT]"
+    Top_1.Text = "Kaitun Races BF [TITLE-R13-CONFIRM-PVP]"
     Top_1.TextColor3 = Color3.fromRGB(255, 80, 80)
     Top_1.TextSize = 22
     Top_1.TextXAlignment = Enum.TextXAlignment.Center
@@ -2333,13 +2333,61 @@ task.spawn(function() wait(1)
                                         until not seaBeast or not seaBeast.Parent or not seaBeast:FindFirstChild("Health") or seaBeast.Health.Value <= 0 or IsDied(Character)
 
                                         SetAimbotTarget(false)
-                                        COMMF_:InvokeServer("Wenlocktoad", "3")
-                                        SetText("Shark V3 | Done Sea Beast | Talked Wenlocktoad")
-                                        task.wait(1)
+
+                                        local fishConfirmOk, fishConfirmResult = pcall(function()
+                                            return COMMF_:InvokeServer("Wenlocktoad", "3")
+                                        end)
+
+                                        if fishConfirmOk
+                                            and (
+                                                fishConfirmResult == -2
+                                                or tostring(fishConfirmResult) == "-2"
+                                            )
+                                        then
+                                            SetText("Shark V3 | CONFIRMED (-2)")
+                                            SaveCompletedRace(CurrentRace)
+                                            task.wait(1)
+                                            return
+                                        else
+                                            SetText(
+                                                "Shark V3 | Not confirmed | Wenlock: "
+                                                .. tostring(fishConfirmResult)
+                                            )
+                                            task.wait(1)
+                                        end
                                     end
                                 elseif CurrentRace == "Skypiea" then
                                     local ignoredAngelPlayers = {}
                                     local lastPvpEnable = 0
+
+                                    local function EnsureAngelPvpEnabled(force)
+                                        local pvpDisabled = nil
+
+                                        pcall(function()
+                                            local mainGui =
+                                                LocalPlayer.PlayerGui:FindFirstChild("Main")
+                                            pvpDisabled =
+                                                mainGui
+                                                and mainGui:FindFirstChild("PvpDisabled")
+                                        end)
+
+                                        local shouldEnable =
+                                            force == true
+                                            or (
+                                                pvpDisabled
+                                                and pvpDisabled.Visible == true
+                                            )
+
+                                        if shouldEnable
+                                            and tick() - lastPvpEnable >= 1
+                                        then
+                                            lastPvpEnable = tick()
+
+                                            pcall(function()
+                                                COMMF_:InvokeServer("EnablePvp")
+                                            end)
+                                        end
+                                    end
 
                                     local function IsAngelRacePlayer(player)
                                         -- Giữ đúng cách check của bản gốc:
@@ -2390,8 +2438,8 @@ task.spawn(function() wait(1)
                                                             CheckSafeZone(root.Position)
                                                     end)
 
-                                                    -- Bỏ qua player Angel quá 15000 studs.
-                                                    if distance <= 15000
+                                                    -- Bỏ qua player Angel quá 20000 studs.
+                                                    if distance <= 20000
                                                         and not inSafeZone
                                                         and dangerLevel == 0
                                                         and distance < bestDistance
@@ -2425,9 +2473,14 @@ task.spawn(function() wait(1)
                                             return
                                         end
 
-                                        local targetStartedAt = tick()
+                                        -- Chỉ bắt đầu đếm timeout sau khi đã áp sát
+                                        -- và thực sự bắt đầu đánh trên đầu mục tiêu.
+                                        local attackStartedAt = nil
                                         local targetKilled = false
                                         local switchTarget = false
+
+                                        -- Bật PvP ngay khi đã chọn được target Angel.
+                                        EnsureAngelPvpEnabled(true)
 
                                         repeat
                                             task.wait()
@@ -2456,13 +2509,13 @@ task.spawn(function() wait(1)
                                                     - HumanoidRootPart.Position
                                                 ).Magnitude
 
-                                            -- Nếu target chạy quá 15000 studs thì bỏ qua.
-                                            if currentDistance > 15000 then
+                                            -- Nếu target chạy quá 20000 studs thì bỏ qua.
+                                            if currentDistance > 20000 then
                                                 ignoredAngelPlayers[targetPlayer.Name] = true
                                                 SetText(
                                                     "Angel V3 | Skip "
                                                     .. targetPlayer.Name
-                                                    .. " | Distance > 15000"
+                                                    .. " | Distance > 20000"
                                                 )
                                                 switchTarget = true
                                                 break
@@ -2485,12 +2538,14 @@ task.spawn(function() wait(1)
                                                 break
                                             end
 
-                                            -- Bay trên đầu quá 30 giây chưa giết được:
-                                            -- bỏ target này và chọn Angel player khác.
-                                            if tick() - targetStartedAt >= 30 then
+                                            -- Chỉ timeout khi đã vào tầm đánh và
+                                            -- FastAttack đã bắt đầu chạy.
+                                            if attackStartedAt
+                                                and tick() - attackStartedAt >= 30
+                                            then
                                                 ignoredAngelPlayers[targetPlayer.Name] = true
                                                 SetText(
-                                                    "Angel V3 | Timeout 30s | Switch target"
+                                                    "Angel V3 | Attack timeout 30s | Switch target"
                                                 )
                                                 switchTarget = true
                                                 break
@@ -2508,15 +2563,9 @@ task.spawn(function() wait(1)
                                                 .. "%"
                                             )
 
-                                            if LocalPlayer.PlayerGui.Main.PvpDisabled.Visible
-                                                and tick() - lastPvpEnable > 3
-                                            then
-                                                lastPvpEnable = tick()
-
-                                                pcall(function()
-                                                    COMMF_:InvokeServer("EnablePvp")
-                                                end)
-                                            end
+                                            -- Trong lúc truy đuổi/đánh, nếu PvP lại
+                                            -- bị tắt thì tự bật lại.
+                                            EnsureAngelPvpEnabled(false)
 
                                             Tween(
                                                 root.CFrame
@@ -2524,6 +2573,17 @@ task.spawn(function() wait(1)
                                             )
 
                                             if currentDistance < 100 then
+                                                if not attackStartedAt then
+                                                    attackStartedAt = tick()
+                                                    SetText(
+                                                        "Angel V3 | Attack timer started | "
+                                                        .. targetPlayer.Name
+                                                    )
+                                                end
+
+                                                -- Bật lại PvP ngay trước khi đánh để tránh
+                                                -- trường hợp GUI cập nhật chậm.
+                                                EnsureAngelPvpEnabled(true)
                                                 FastAttack()
                                                 SetAimbotTarget(root)
                                                 EquipWeapon(
@@ -2540,7 +2600,34 @@ task.spawn(function() wait(1)
                                         SetAimbotTarget(false)
 
                                         if targetKilled then
-                                            break
+                                            local angelConfirmOk, angelConfirmResult =
+                                                pcall(function()
+                                                    return COMMF_:InvokeServer(
+                                                        "Wenlocktoad",
+                                                        "3"
+                                                    )
+                                                end)
+
+                                            if angelConfirmOk
+                                                and (
+                                                    angelConfirmResult == -2
+                                                    or tostring(angelConfirmResult) == "-2"
+                                                )
+                                            then
+                                                SetText("Angel V3 | CONFIRMED (-2)")
+                                                SaveCompletedRace(CurrentRace)
+                                                task.wait(1)
+                                                return
+                                            else
+                                                -- Đã hạ target nhưng server chưa xác nhận.
+                                                -- Bỏ target vừa chết và tìm Angel khác.
+                                                ignoredAngelPlayers[targetPlayer.Name] = true
+                                                SetText(
+                                                    "Angel V3 | Kill done, not confirmed | Wenlock: "
+                                                    .. tostring(angelConfirmResult)
+                                                )
+                                                task.wait(0.5)
+                                            end
                                         end
 
                                         if switchTarget then
