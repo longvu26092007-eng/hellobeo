@@ -551,7 +551,7 @@ do
     Top_1.Position = UDim2.new(0.5, 0, 0.055, 0)
     Top_1.Size = UDim2.new(0.8, 0, 0, 24)
     Top_1.FontFace = Font.new("rbxasset://fonts/families/GothamSSm.json", Enum.FontWeight.Bold)
-    Top_1.Text = "Kaitun Races BF [TITLE-R17-SHARK-BOAT]"
+    Top_1.Text = "Kaitun Races BF [TITLE-R18-SHARK-ZXC]"
     Top_1.TextColor3 = Color3.fromRGB(255, 80, 80)
     Top_1.TextSize = 22
     Top_1.TextXAlignment = Enum.TextXAlignment.Center
@@ -2210,200 +2210,17 @@ task.spawn(function() wait(1)
                                 elseif CurrentRace == "Fishman" then
                                     -- Shark V3 logic replaced from sida script, adapted to this script
                                     local function SharkV3GetPlayerBoat()
-                                        for _, boat in ipairs(workspace.Boats:GetChildren()) do
+                                        for _, boat in next, workspace.Boats:GetChildren() do
                                             if boat:IsA("Model") then
                                                 local owner = boat:FindFirstChild("Owner")
-                                                local seat = boat:FindFirstChild("VehicleSeat")
-                                                local boatHealth = boat:FindFirstChild("Humanoid")
-                                                local hp =
-                                                    boatHealth
-                                                    and tonumber(boatHealth.Value)
-                                                    or nil
-
-                                                if owner
-                                                    and tostring(owner.Value)
-                                                        == LocalPlayer.Name
-                                                    and seat
-                                                    and (hp == nil or hp > 0)
-                                                then
+                                                local hd = boat:FindFirstChild("Humanoid")
+                                                local hp = hd and tonumber(hd.Value) or 0
+                                                if owner and tostring(owner.Value) == LocalPlayer.Name and hp > 0 then
                                                     return boat
                                                 end
                                             end
                                         end
-
                                         return CheckOwnerBoat()
-                                    end
-
-                                    local SharkV3SendKey
-
-                                    local SHARK_V3_BOAT_BUY_CFRAME =
-                                        CFrame.new(
-                                            -1967.2530517578125,
-                                            9.2692289352417,
-                                            -2579.33154296875
-                                        )
-
-                                    local SHARK_V3_BOAT_TARGET_CFRAME =
-                                        CFrame.new(
-                                            3017.20068359375,
-                                            -4.25,
-                                            -2686.33251953125
-                                        )
-
-                                    local function SharkV3GetSeaMob()
-                                        local names = {"Shark", "Piranha"}
-
-                                        for _, container in ipairs({
-                                            workspace.Enemies,
-                                            ReplicatedStorage,
-                                        }) do
-                                            for _, mobName in ipairs(names) do
-                                                local mob =
-                                                    container:FindFirstChild(mobName)
-
-                                                if mob and mob:IsA("Model") then
-                                                    local humanoid =
-                                                        mob:FindFirstChildWhichIsA(
-                                                            "Humanoid"
-                                                        )
-                                                    local root =
-                                                        mob:FindFirstChild(
-                                                            "HumanoidRootPart"
-                                                        )
-                                                        or mob:FindFirstChildWhichIsA(
-                                                            "BasePart",
-                                                            true
-                                                        )
-
-                                                    if root
-                                                        and (
-                                                            not humanoid
-                                                            or humanoid.Health > 0
-                                                        )
-                                                    then
-                                                        return mob, root
-                                                    end
-                                                end
-                                            end
-                                        end
-
-                                        return nil, nil
-                                    end
-
-                                    local function SharkV3SpamMeleeMob(mob, root)
-                                        if not mob or not root then
-                                            return
-                                        end
-
-                                        EquipWeapon("Melee")
-                                        SetAimbotTarget(root)
-
-                                        if mob:IsDescendantOf(workspace.Enemies) then
-                                            local distance =
-                                                (
-                                                    root.Position
-                                                    - HumanoidRootPart.Position
-                                                ).Magnitude
-
-                                            if distance > 65 then
-                                                Tween(
-                                                    root.CFrame
-                                                    * CFrame.new(0, 20, 0)
-                                                )
-                                            else
-                                                FastAttack(mob.Name)
-                                            end
-
-                                            -- Giữ đúng yêu cầu: chỉ Melee,
-                                            -- đánh thường và spam skill Z/X/C.
-                                            for _, key in ipairs({"Z", "X", "C"}) do
-                                                EquipWeapon("Melee")
-                                                SetAimbotTarget(root)
-                                                SharkV3SendKey(key, 0.08)
-                                                task.wait(0.08)
-                                            end
-                                        else
-                                            -- Mob mới nằm trong ReplicatedStorage:
-                                            -- đi tới vị trí spawn, chưa spam đánh giả.
-                                            Tween(root.CFrame)
-                                        end
-                                    end
-
-                                    local function SharkV3MoveBoatToSea(boat)
-                                        local seat =
-                                            boat
-                                            and boat:FindFirstChild("VehicleSeat")
-
-                                        if not seat then
-                                            return false
-                                        end
-
-                                        local boatDistance =
-                                            (
-                                                seat.Position
-                                                - SHARK_V3_BOAT_TARGET_CFRAME.Position
-                                            ).Magnitude
-
-                                        if boatDistance <= 30 then
-                                            return true
-                                        end
-
-                                        local seatDistance =
-                                            (
-                                                HumanoidRootPart.Position
-                                                - seat.Position
-                                            ).Magnitude
-
-                                        if not Humanoid.Sit then
-                                            if seatDistance > 10 then
-                                                SetText(
-                                                    "Shark V3 | Tween to PirateBasic seat"
-                                                )
-                                                Tween(seat.CFrame)
-                                            else
-                                                Tween(false)
-                                                HumanoidRootPart.CFrame =
-                                                    seat.CFrame
-                                                    * CFrame.new(0, 2, 0)
-                                                task.wait(0.5)
-                                            end
-
-                                            return false
-                                        end
-
-                                        SetText(
-                                            "Shark V3 | Push boat to sea | "
-                                            .. tostring(math.floor(boatDistance))
-                                            .. " studs"
-                                        )
-
-                                        -- Source gốc dùng TPBoat tốc độ 200.
-                                        -- Bản này đẩy VehicleSeat theo từng bước
-                                        -- về đúng tọa độ nguồn để tránh teleport hụt.
-                                        local direction =
-                                            (
-                                                SHARK_V3_BOAT_TARGET_CFRAME.Position
-                                                - seat.Position
-                                            ).Unit
-                                        local stepDistance =
-                                            math.min(100, boatDistance)
-                                        local nextPosition =
-                                            seat.Position
-                                            + direction * stepDistance
-
-                                        pcall(function()
-                                            seat.AssemblyLinearVelocity =
-                                                Vector3.zero
-                                            seat.AssemblyAngularVelocity =
-                                                Vector3.zero
-                                            seat.CFrame =
-                                                CFrame.new(
-                                                    nextPosition,
-                                                    SHARK_V3_BOAT_TARGET_CFRAME.Position
-                                                )
-                                        end)
-
-                                        return false
                                     end
 
                                     local function SharkV3GetSeaBeast()
@@ -2491,81 +2308,103 @@ task.spawn(function() wait(1)
                                         return cooldown.AbsoluteSize.X <= 0
                                     end
 
-                                    SharkV3SendKey = function(key, hold)
-                                        local keyCode =
-                                            Enum.KeyCode[tostring(key)] or key
+                                    local function SharkV3GetSeaMob()
+                                        return workspace.Enemies:FindFirstChild("Shark")
+                                            or workspace.Enemies:FindFirstChild("Piranha")
+                                            or ReplicatedStorage:FindFirstChild("Shark")
+                                            or ReplicatedStorage:FindFirstChild("Piranha")
+                                    end
 
-                                        VirtualInputManager:SendKeyEvent(
-                                            true,
-                                            keyCode,
-                                            false,
-                                            game
-                                        )
+                                    local function SharkV3SendKey(key, hold)
+                                        local keyCode = Enum.KeyCode[tostring(key)] or key
+                                        VirtualInputManager:SendKeyEvent(true, keyCode, false, game)
                                         task.wait(hold or 0.05)
-                                        VirtualInputManager:SendKeyEvent(
-                                            false,
-                                            keyCode,
-                                            false,
-                                            game
-                                        )
+                                        VirtualInputManager:SendKeyEvent(false, keyCode, false, game)
                                     end
 
                                     local seaBeast = SharkV3GetSeaBeast()
                                     if not seaBeast then
-                                        local sharkMob, sharkRoot =
-                                            SharkV3GetSeaMob()
+                                        local boat = SharkV3GetPlayerBoat()
+                                        local sharkMob = SharkV3GetSeaMob()
 
-                                        -- Giữ logic cũ: có Shark/Piranha thì vẫn đánh.
-                                        if sharkMob and sharkRoot then
+                                        if sharkMob then
                                             SetText(
                                                 "Shark V3 | Killing "
                                                 .. tostring(sharkMob.Name)
                                                 .. " | Melee Z/X/C"
                                             )
-                                            SharkV3SpamMeleeMob(
-                                                sharkMob,
-                                                sharkRoot
-                                            )
+
+                                            if sharkMob:IsDescendantOf(workspace.Enemies) then
+                                                -- Giữ nguyên cách đánh Shark/Piranha cũ.
+                                                KillMonster(tostring(sharkMob.Name))
+
+                                                -- Chỉ bổ sung spam skill Melee Z/X/C.
+                                                local sharkRoot =
+                                                    sharkMob:FindFirstChild(
+                                                        "HumanoidRootPart"
+                                                    )
+                                                    or sharkMob:FindFirstChildWhichIsA(
+                                                        "BasePart"
+                                                    )
+
+                                                if sharkRoot then
+                                                    EquipWeapon("Melee")
+                                                    SetAimbotTarget(sharkRoot)
+
+                                                    for _, key in ipairs({
+                                                        "Z",
+                                                        "X",
+                                                        "C",
+                                                    }) do
+                                                        EquipWeapon("Melee")
+                                                        SetAimbotTarget(sharkRoot)
+                                                        SharkV3SendKey(key, 0.08)
+                                                        task.wait(0.08)
+                                                    end
+                                                end
+                                            else
+                                                -- Giữ nguyên logic cũ khi mob mới nằm
+                                                -- trong ReplicatedStorage.
+                                                local hrp =
+                                                    sharkMob:FindFirstChild(
+                                                        "HumanoidRootPart"
+                                                    )
+                                                    or sharkMob:FindFirstChildWhichIsA(
+                                                        "BasePart"
+                                                    )
+
+                                                if hrp then
+                                                    Tween(hrp.CFrame)
+                                                end
+                                            end
+
                                             return
                                         end
 
+                                        -- Phần mua thuyền và đưa thuyền bên dưới
+                                        -- được giữ nguyên đúng từ file người dùng gửi.
                                         SetAimbotTarget(false)
 
-                                        local boat = SharkV3GetPlayerBoat()
-
                                         if not boat then
-                                            SetText(
-                                                "Shark V3 | Buying PirateBasic"
-                                            )
-                                            Tween(SHARK_V3_BOAT_BUY_CFRAME)
-
-                                            if CheckDistance(
-                                                SHARK_V3_BOAT_BUY_CFRAME
-                                            ) <= 3
-                                            then
-                                                pcall(function()
-                                                    COMMF_:InvokeServer(
-                                                        "BuyBoat",
-                                                        "PirateBasic"
-                                                    )
-                                                end)
-                                                task.wait(1)
+                                            local buyBoatPos = CFrame.new(-14, 10, 2955)
+                                            SetText("Shark V3 | Buying PirateBrigade boat")
+                                            Tween(buyBoatPos)
+                                            if CheckDistance(buyBoatPos) < 10 then
+                                                COMMF_:InvokeServer("BuyBoat", "PirateBrigade")
                                             end
-                                        elseif boat:FindFirstChild(
-                                            "VehicleSeat"
-                                        ) then
-                                            local reachedSea =
-                                                SharkV3MoveBoatToSea(boat)
-
-                                            if reachedSea then
-                                                SetText(
-                                                    "Shark V3 | Boat at sea | Waiting Sea Beast"
-                                                )
+                                        elseif boat:FindFirstChild("VehicleSeat") then
+                                            local targetBoatCFrame = CFrame.new(-67, 5.5647872686386108, 4205 + math.random(1, 400))
+                                            if CheckDistance(boat.VehicleSeat.CFrame, targetBoatCFrame) > 800 then
+                                                SetText("Shark V3 | Move boat to sea")
+                                                boat.VehicleSeat.CFrame = targetBoatCFrame
+                                            elseif CheckDistance(boat.VehicleSeat.CFrame) > 5 then
+                                                SetText("Shark V3 | Tween to boat seat")
+                                                Tween(boat.VehicleSeat.CFrame + Vector3.new(0, math.random(-1, 2), 0))
+                                            else
+                                                SetText("Shark V3 | Waiting for Sea Beast")
                                             end
                                         else
-                                            SetText(
-                                                "Shark V3 | Boat missing VehicleSeat"
-                                            )
+                                            SetText("Shark V3 | Boat missing VehicleSeat")
                                         end
                                     else
                                         if not CheckTool("Fishman Karate")
