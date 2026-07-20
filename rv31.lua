@@ -551,7 +551,7 @@ do
     Top_1.Position = UDim2.new(0.5, 0, 0.055, 0)
     Top_1.Size = UDim2.new(0.8, 0, 0, 24)
     Top_1.FontFace = Font.new("rbxasset://fonts/families/GothamSSm.json", Enum.FontWeight.Bold)
-    Top_1.Text = "Kaitun Races BF [TITLE-R11-EXACT02]"
+    Top_1.Text = "Kaitun Races BF [TITLE-R12-ANGEL-EXACT]"
     Top_1.TextColor3 = Color3.fromRGB(255, 80, 80)
     Top_1.TextSize = 22
     Top_1.TextXAlignment = Enum.TextXAlignment.Center
@@ -2342,18 +2342,13 @@ task.spawn(function() wait(1)
                                     local lastPvpEnable = 0
 
                                     local function IsAngelRacePlayer(player)
-                                        if not player
-                                            or player == LocalPlayer
-                                            or not player:FindFirstChild("Data")
-                                            or not player.Data:FindFirstChild("Race")
-                                        then
-                                            return false
-                                        end
-
-                                        local raceName =
-                                            NormalizeRaceName(player.Data.Race.Value)
-
-                                        return raceName == "Skypiea"
+                                        -- Giữ đúng cách check của bản gốc:
+                                        -- player khác LocalPlayer + có Data
+                                        -- + Data.Race.Value phải chính xác là "Skypiea".
+                                        return player
+                                            and player.Name ~= LocalPlayer.Name
+                                            and player:FindFirstChild("Data")
+                                            and player.Data.Race.Value == "Skypiea"
                                     end
 
                                     local function GetValidAngelTarget()
