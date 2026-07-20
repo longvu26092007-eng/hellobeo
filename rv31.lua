@@ -1,6 +1,6 @@
 --[[
     BANANAHUB RACE V2-V3 TITLE CONTROLLER
-    Build: TITLE-CONTROLLER-UI-R2
+    Build: TITLE-CONTROLLER-UI-R3
 
     Chức năng:
       1. Chọn/load team trước khi gọi BananaHub.
@@ -9,8 +9,13 @@
       4. Race true + chưa V3: dừng reroll để BananaHub làm V2-V3.
       5. Race false hoặc đã V3: tiếp tục reroll khi đủ 3000 fragments.
       6. Khi tất cả race true đều V3:
-         tạo <PlayerName>.txt với nội dung "Completed".
+         tạo <PlayerName>.txt theo số race được bật:
+           - 1 race: Completed-<Race>
+           - 2 race: 2racev3
+           - 3 race: 3racev3
+           - tương tự tới 6racev3.
 ]]
+
 
 -- ============================================================
 -- [ CONTROLLER ]
@@ -159,9 +164,11 @@ ChooseTeam()
 --   War Machine
 --
 -- Không dùng STT, obtainment, GUI, Wenlock hoặc scoring.
--- Cache 30 giây.
+-- 3 lần scan đầu cách nhau 5 giây; sau đó cache 30 giây.
 -- ============================================================
 
+local TITLE_FAST_SCAN_INTERVAL = 5
+local TITLE_FAST_SCAN_LIMIT = 3
 local TITLE_SCAN_INTERVAL = 30
 
 local TITLE_TARGETS = {
@@ -208,12 +215,22 @@ local titleCache = {
     initialized = false,
     scanning = false,
     lastScan = 0,
+    scanCount = 0,
+    currentInterval = TITLE_FAST_SCAN_INTERVAL,
     map = {},
     status = {},
     paths = {},
     remoteOk = false,
     remoteError = nil,
 }
+
+local function GetTitleScanInterval()
+    if titleCache.scanCount < TITLE_FAST_SCAN_LIMIT then
+        return TITLE_FAST_SCAN_INTERVAL
+    end
+
+    return TITLE_SCAN_INTERVAL
+end
 
 local function NormalizeText(value)
     return tostring(value or ""):lower():gsub("[^%w]", "")
@@ -304,9 +321,11 @@ local function ScanV3Titles(force)
         return titleCache.map
     end
 
+    local requiredInterval = GetTitleScanInterval()
+
     if not force
         and titleCache.initialized
-        and tick() - titleCache.lastScan < TITLE_SCAN_INTERVAL
+        and tick() - titleCache.lastScan < requiredInterval
     then
         return titleCache.map
     end
@@ -354,12 +373,18 @@ local function ScanV3Titles(force)
     titleCache.status = foundStatus
     titleCache.paths = foundPaths
     titleCache.lastScan = tick()
+    titleCache.scanCount = titleCache.scanCount + 1
+    titleCache.currentInterval = GetTitleScanInterval()
     titleCache.initialized = true
     titleCache.scanning = false
 
     getgenv().BananaRaceV3TitleDebug = {
         method = "EXACT_CHECKER_02_TITLE_NAME",
-        interval = TITLE_SCAN_INTERVAL,
+        fastScanInterval = TITLE_FAST_SCAN_INTERVAL,
+        fastScanLimit = TITLE_FAST_SCAN_LIMIT,
+        normalInterval = TITLE_SCAN_INTERVAL,
+        scanCount = titleCache.scanCount,
+        nextInterval = titleCache.currentInterval,
         lastScan = titleCache.lastScan,
         map = titleCache.map,
         status = titleCache.status,
@@ -750,12 +775,35 @@ end)
 
 local completionFileWritten = false
 
+local function GetCompletionFileContent()
+    local enabledRaces = GetEnabledRaces()
+    local enabledCount = #enabledRaces
+
+    if enabledCount == 1 then
+        return "Completed-" .. tostring(enabledRaces[1])
+    end
+
+    if enabledCount >= 2 then
+        return tostring(enabledCount) .. "racev3"
+    end
+
+    return nil
+end
+
 local function WriteCompletedFile()
     if completionFileWritten then
         return true
     end
 
     local fileName = LocalPlayer.Name .. ".txt"
+    local completionContent = GetCompletionFileContent()
+
+    if not completionContent then
+        SetControllerStatus(
+            "Cannot write completion file: no enabled race"
+        )
+        return false
+    end
 
     local ok, err = pcall(function()
         assert(
@@ -763,7 +811,7 @@ local function WriteCompletedFile()
             "Executor does not support writefile"
         )
 
-        writefile(fileName, "Completed")
+        writefile(fileName, completionContent)
     end)
 
     if ok then
@@ -773,10 +821,13 @@ local function WriteCompletedFile()
         SetControllerStatus(
             "ALL ENABLED RACES COMPLETED | "
             .. fileName
-            .. " = Completed"
+            .. " = "
+            .. completionContent
         )
 
         getgenv().BananaRaceV3ControllerCompleted = true
+        getgenv().BananaRaceV3ControllerCompletionContent =
+            completionContent
         return true
     end
 
