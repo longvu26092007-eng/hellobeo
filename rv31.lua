@@ -170,35 +170,24 @@ end
 
 local GetRaceTitleV3MapCached = (function()
 -- ============================================================
--- [ RACE V3 CHECK - TITLE NAME ONLY - CACHED 30s ]
+-- [ RACE V3 CHECK - EXACT CHECKER 02 TITLE NAME ]
 --
--- Chỉ dùng đúng một cách:
---   CommF_:InvokeServer("getTitles")
---   rồi tìm tên title chính xác:
---     Full Power         -> Human V3
---     Godspeed           -> Rabbit/Mink V3
---     Warrior of the Sea -> Shark/Fishman V3
---     Perfect Being      -> Angel/Skypiea V3
---     Hell Hound         -> Ghoul V3
---     War Machine        -> Cyborg V3
---     Ancient Flame      -> Draco V3
+-- Copy đúng phương pháp đã test:
+--   1. Gọi getTitles.
+--   2. Duyệt từng TABLE NODE.
+--   3. Chỉ tìm tên title tại field:
+--        title / name / titlename / displayname
+--      hoặc key đúng bằng tên title.
+--   4. Không quét mọi string/value trong toàn bộ bảng.
 --
--- Không dùng:
---   - Title Number / STT
---   - Obtainment
---   - Unlocked/Owned flags
---   - Player.Titles
---   - GUI màu/lock/equip
---   - điểm số hoặc suy luận kết hợp
---   - file lưu tiến độ V3
---
--- Nếu không tìm thấy tên title hoặc getTitles lỗi:
--- tộc đó được coi là CHƯA V3.
+-- FOUND = V3
+-- NOT_FOUND / lỗi / timeout = CHƯA V3
+-- Cache 30 giây.
 -- ============================================================
 
 local RACE_TITLE_SCAN_INTERVAL = 30
 
-local TITLE_TARGETS = {
+local TARGETS = {
     {title = "Full Power",         raceV3 = "Human V3"},
     {title = "Godspeed",           raceV3 = "Rabbit V3"},
     {title = "Warrior of the Sea", raceV3 = "Shark V3"},
@@ -208,12 +197,12 @@ local TITLE_TARGETS = {
     {title = "Ancient Flame",      raceV3 = "Draco V3"},
 }
 
-local TITLE_NAME_TO_RACE_V3 = {}
-for _, target in ipairs(TITLE_TARGETS) do
-    TITLE_NAME_TO_RACE_V3[
-        tostring(target.title):lower():gsub("[^%w]", "")
-    ] = target.raceV3
-end
+local TITLE_FIELDS = {
+    title = true,
+    name = true,
+    titlename = true,
+    displayname = true,
+}
 
 local Cache = {
     map = {},
@@ -226,29 +215,24 @@ local Cache = {
     remoteError = nil,
 }
 
-local function normalizeTitle(value)
+local remoteRequest = {
+    inFlight = false,
+    completedAt = 0,
+    ok = false,
+    data = nil,
+    error = nil,
+}
+
+local function normalize(value)
     return tostring(value or ""):lower():gsub("[^%w]", "")
 end
 
-local function scanScalar(value, path, foundMap, foundPaths)
-    if type(value) ~= "string" then
-        return
-    end
-
-    local raceV3 = TITLE_NAME_TO_RACE_V3[normalizeTitle(value)]
-    if raceV3 then
-        foundMap[raceV3] = true
-        foundPaths[raceV3] = foundPaths[raceV3] or path
-    end
+local function targetTitleMatches(target, value)
+    return normalize(value) == normalize(target.title)
 end
 
-local function walkGetTitles(value, path, depth, visited, foundMap, foundPaths)
-    if depth > 12 then
-        return
-    end
-
-    if type(value) ~= "table" then
-        scanScalar(value, path, foundMap, foundPaths)
+local function walkTables(value, path, depth, visited, callback)
+    if type(value) ~= "table" or depth > 10 then
         return
     end
 
@@ -257,30 +241,85 @@ local function walkGetTitles(value, path, depth, visited, foundMap, foundPaths)
     end
     visited[value] = true
 
+    callback(value, path)
+
     for key, child in pairs(value) do
-        local childPath = path .. "[" .. tostring(key) .. "]"
-
-        -- Tên title có thể nằm ở key hoặc value.
-        scanScalar(key, childPath .. ".key", foundMap, foundPaths)
-
         if type(child) == "table" then
-            walkGetTitles(
+            walkTables(
                 child,
-                childPath,
+                path .. "[" .. tostring(key) .. "]",
                 depth + 1,
                 visited,
-                foundMap,
-                foundPaths
+                callback
             )
-        else
-            scanScalar(child, childPath, foundMap, foundPaths)
         end
     end
 end
 
+local function nodeHasExactTitle(node, target)
+    for key, value in pairs(node) do
+        local keyName = normalize(key)
+
+        if type(value) ~= "table"
+            and TITLE_FIELDS[keyName]
+            and targetTitleMatches(target, value)
+        then
+            return true
+        end
+
+        -- Giữ đúng checker 02: key có thể chính là tên title.
+        if type(key) == "string"
+            and targetTitleMatches(target, key)
+        then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function startGetTitlesRequest()
+    if remoteRequest.inFlight then
+        return
+    end
+
+    remoteRequest.inFlight = true
+
+    task.spawn(function()
+        local ok, data = pcall(function()
+            return COMMF_:InvokeServer("getTitles")
+        end)
+
+        remoteRequest.ok = ok
+        remoteRequest.data = ok and data or nil
+        remoteRequest.error = ok and nil or tostring(data)
+        remoteRequest.completedAt = tick()
+        remoteRequest.inFlight = false
+    end)
+end
+
+local function invokeGetTitles(timeoutSeconds)
+    timeoutSeconds = tonumber(timeoutSeconds) or 2
+    local previousCompletedAt = remoteRequest.completedAt
+
+    startGetTitlesRequest()
+
+    local deadline = tick() + timeoutSeconds
+    repeat
+        task.wait(0.05)
+    until remoteRequest.completedAt ~= previousCompletedAt
+        or tick() >= deadline
+
+    if remoteRequest.completedAt ~= previousCompletedAt then
+        return remoteRequest.ok, remoteRequest.data, remoteRequest.error
+    end
+
+    return false, nil, "getTitles timeout"
+end
+
 local function publishDebug()
     getgenv().KaitunRaceTitleV3Debug = {
-        method = "TITLE_NAME_ONLY",
+        method = "EXACT_CHECKER_02_TITLE_NAME",
         interval = RACE_TITLE_SCAN_INTERVAL,
         lastScan = Cache.lastScan,
         map = Cache.map,
@@ -291,7 +330,7 @@ local function publishDebug()
     }
 end
 
-local function RunTitleNameScan(force)
+local function RunExactTitleNameScan(force)
     if Cache.scanning then
         local timeoutAt = tick() + 3
         repeat
@@ -314,30 +353,37 @@ local function RunTitleNameScan(force)
     local newStatus = {}
     local newPaths = {}
 
-    local remoteOk, remoteData = pcall(function()
-        return COMMF_:InvokeServer("getTitles")
-    end)
+    local remoteOk, remoteData, remoteError = invokeGetTitles(2)
 
     Cache.remoteOk = remoteOk
-    Cache.remoteError = remoteOk and nil or tostring(remoteData)
+    Cache.remoteError = remoteError
 
     if remoteOk and type(remoteData) == "table" then
-        walkGetTitles(
-            remoteData,
-            "getTitles",
-            0,
-            {},
-            newMap,
-            newPaths
-        )
-    end
+        for _, target in ipairs(TARGETS) do
+            local paths = {}
 
-    for _, target in ipairs(TITLE_TARGETS) do
-        if newMap[target.raceV3] == true then
-            newStatus[target.raceV3] = "FOUND"
-        else
-            -- Theo yêu cầu: chưa quét được hoặc không thấy title
-            -- đều được coi là chưa V3.
+            walkTables(
+                remoteData,
+                "getTitles",
+                0,
+                {},
+                function(node, path)
+                    if nodeHasExactTitle(node, target) then
+                        table.insert(paths, path)
+                    end
+                end
+            )
+
+            if #paths > 0 then
+                newMap[target.raceV3] = true
+                newStatus[target.raceV3] = "FOUND"
+                newPaths[target.raceV3] = paths[1]
+            else
+                newStatus[target.raceV3] = "NOT_FOUND"
+            end
+        end
+    else
+        for _, target in ipairs(TARGETS) do
             newStatus[target.raceV3] = "NOT_FOUND"
         end
     end
@@ -353,9 +399,9 @@ local function RunTitleNameScan(force)
     return Cache.map
 end
 
-local function GetTitleNameV3Map(force)
+local function GetExactTitleNameMap(force)
     if force == true or not Cache.initialized then
-        return RunTitleNameScan(true)
+        return RunExactTitleNameScan(true)
     end
 
     if tick() - Cache.lastScan >= RACE_TITLE_SCAN_INTERVAL
@@ -363,7 +409,7 @@ local function GetTitleNameV3Map(force)
     then
         task.spawn(function()
             pcall(function()
-                RunTitleNameScan(true)
+                RunExactTitleNameScan(true)
             end)
         end)
     end
@@ -376,7 +422,7 @@ task.spawn(function()
 
     while true do
         pcall(function()
-            RunTitleNameScan(true)
+            RunExactTitleNameScan(true)
         end)
 
         task.wait(RACE_TITLE_SCAN_INTERVAL)
@@ -384,12 +430,12 @@ task.spawn(function()
 end)
 
 getgenv().KaitunForceTitleNameV3Scan = function()
-    return RunTitleNameScan(true)
+    return RunExactTitleNameScan(true)
 end
 
-return GetTitleNameV3Map
+return GetExactTitleNameMap
 -- ============================================================
--- [ END RACE V3 CHECK - TITLE NAME ONLY ]
+-- [ END RACE V3 CHECK - EXACT CHECKER 02 ]
 -- ============================================================
 end)()
 
@@ -505,7 +551,7 @@ do
     Top_1.Position = UDim2.new(0.5, 0, 0.055, 0)
     Top_1.Size = UDim2.new(0.8, 0, 0, 24)
     Top_1.FontFace = Font.new("rbxasset://fonts/families/GothamSSm.json", Enum.FontWeight.Bold)
-    Top_1.Text = "Kaitun Races BF [TITLE-R10-HOP]"
+    Top_1.Text = "Kaitun Races BF [TITLE-R11-EXACT02]"
     Top_1.TextColor3 = Color3.fromRGB(255, 80, 80)
     Top_1.TextSize = 22
     Top_1.TextXAlignment = Enum.TextXAlignment.Center
@@ -851,7 +897,7 @@ local function SetText(newText)
 end
 -- Đã bỏ lưu tiến độ race bằng file.
 -- Đủ các race V3 đã bật trong config sẽ tạo PlayerName.txt.
--- Title V3 chỉ được kiểm tra bằng tên title trong getTitles, cache 30 giây.
+-- Title V3 dùng đúng logic Checker 02: exact title field/key, cache 30 giây.
 function CheckSea(v: number) return v == tonumber(workspace:GetAttribute("MAP"):match("%d+")) end
 local remoteAttack, idremote
 local seed = ReplicatedStorage.Modules.Net.seed:InvokeServer()
