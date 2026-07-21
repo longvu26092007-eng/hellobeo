@@ -855,7 +855,7 @@ task.spawn(function()
                                 .. tostring(uptimeSource)
                             )
                             task.wait(3)
-                            continue
+                            return
                         elseif not inWindow then
                             local nextText =
                                 timeInfo
@@ -873,7 +873,7 @@ task.spawn(function()
 
                             task.wait(1)
                             HopServer(8)
-                            continue
+                            return
                         end
 
                         local chests, c = {}, 0
