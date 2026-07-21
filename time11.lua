@@ -78,7 +78,7 @@ local CONFIG = {
     -- Hop
     MaxPlayers           = USER_CONFIG.MaxPlayers or 4, -- chap nhan <= 4 nguoi
     ForcedRegion         = USER_CONFIG.ForcedRegion,     -- nil, "US", "EU", "AP"...
-    MaxPages             = USER_CONFIG.MaxPages or 500,
+    MaxPages             = USER_CONFIG.MaxPages or 100,
     ConcurrentWorkers    = USER_CONFIG.ConcurrentWorkers or 6,
     CandidateTarget      = USER_CONFIG.CandidateTarget or 18,
     BrowserTimeout       = USER_CONFIG.BrowserTimeout or 8,
@@ -99,7 +99,7 @@ local CONFIG = {
     DebugAfterBoundary    = USER_CONFIG.DebugAfterBoundary or 120,
     DebugDeepScanInterval = USER_CONFIG.DebugDeepScanInterval or 1.5,
     DebugFlushInterval    = USER_CONFIG.DebugFlushInterval or 2,
-    DebugMaxLines         = USER_CONFIG.DebugMaxLines or 3500,
+    DebugMaxLines         = USER_CONFIG.DebugMaxLines or 12000,
     DebugDedupSeconds     = USER_CONFIG.DebugDedupSeconds or 0.6,
     DebugCaptureRemotes   = USER_CONFIG.DebugCaptureRemotes ~= false,
     DebugCaptureOutgoing  = USER_CONFIG.DebugCaptureOutgoing ~= false,
@@ -507,7 +507,7 @@ end)
 
 
 -- ============================================================
--- FOCUSED SPAWN DEBUGGER
+-- FULL-WINDOW SPAWN DEBUGGER
 -- Chi ghi file trong khoang gan moc 4 gio.
 -- ============================================================
 local DebugStatusLabel
@@ -1266,20 +1266,27 @@ end
 local function getDebugWindow(uptime)
     uptime = math.max(0, tonumber(uptime) or 0)
 
-    local completed = math.floor(uptime / PERIOD_SECONDS)
-    local remainder = uptime - completed * PERIOD_SECONDS
-    local secondsToNext = PERIOD_SECONDS - remainder
+    local window = evaluateWindow(uptime)
 
-    if secondsToNext <= CONFIG.DebugBeforeBoundary
-        and secondsToNext > 0 then
-        return true, (completed + 1) * PERIOD_SECONDS, "before", secondsToNext
+    if window.matched then
+        local phase = window.inPreWindow and "before-boundary"
+            or "after-boundary"
+
+        local distance
+        if window.inPreWindow then
+            distance = math.max(0, window.targetBoundary - uptime)
+        else
+            distance = math.max(0, uptime - window.targetBoundary)
+        end
+
+        return true, window.targetBoundary, phase, distance, window
     end
 
-    if completed >= 1 and remainder <= CONFIG.DebugAfterBoundary then
-        return true, completed * PERIOD_SECONDS, "after", remainder
-    end
-
-    return false, (completed + 1) * PERIOD_SECONDS, "waiting", secondsToNext
+    return false,
+        window.targetBoundary,
+        "waiting",
+        math.max(0, window.targetStart - uptime),
+        window
 end
 
 local function createDebugHeader(boundary)
@@ -1294,9 +1301,11 @@ local function createDebugHeader(boundary)
         "ServerTimeSource: " .. tostring(State.sourcePath),
         "DebugStartUptime: " .. formatDuration(State.uptime),
         "TargetBoundary: " .. formatDuration(boundary),
-        "CaptureWindow: -" .. tostring(CONFIG.DebugBeforeBoundary)
-            .. "s / +" .. tostring(CONFIG.DebugAfterBoundary) .. "s",
-        "IMPORTANT: File is only written during this focused window.",
+        "CaptureWindow: "
+            .. formatDuration(boundary - WINDOW_SECONDS)
+            .. " -> "
+            .. formatDuration(boundary + CONFIG.AfterBoundaryGrace),
+        "IMPORTANT: File is written for the entire no-hop window.",
         string.rep("=", 90),
     }
 end
@@ -1333,9 +1342,10 @@ local function startDebug(boundary, phase)
     Debug.gcHits = 0
 
     local fileName = string.format(
-        "ServerSpawnDebug_%s_Boundary-%s_Start-%s_%s.txt",
+        "ServerSpawnDebug_FULL_%s_Window-%s_to_%s_Start-%s_%s.txt",
         sanitizeFilePart(JobId),
-        formatBoundaryForFile(boundary),
+        formatBoundaryForFile(boundary - WINDOW_SECONDS),
+        formatBoundaryForFile(boundary + CONFIG.AfterBoundaryGrace),
         formatBoundaryForFile(State.uptime),
         os.date("%Y%m%d_%H%M%S")
     )
@@ -1380,13 +1390,13 @@ local function startDebug(boundary, phase)
         while Debug.active and not State.destroyed do
             task.wait(CONFIG.DebugDeepScanInterval)
 
-            scanInventory("focused-poll")
+            scanInventory("full-window-poll")
 
             for _, root in ipairs(getDebugRoots()) do
                 if not Debug.active then
                     break
                 end
-                scanRoot(root, "focused-rescan")
+                scanRoot(root, "full-window-rescan")
             end
         end
     end)
@@ -2262,49 +2272,57 @@ task.spawn(function()
 end)
 
 
--- Focused debug monitor:
--- Bat dau 120s truoc moc 4h va tiep tuc 120s sau moc.
+-- Full-window debug monitor:
+-- Bat dau ghi ngay tu 03:50 va dung sau 04:20.
+-- Lap lai tuong tu cho 07:50-08:20, 11:50-12:20...
 task.spawn(function()
     while not State.destroyed and ScreenGui.Parent do
         if CONFIG.DebugEnabled and State.serverStartedAt then
-            local active, boundary, phase, distance = getDebugWindow(State.uptime)
+            local active, boundary, phase, distance, window =
+                getDebugWindow(State.uptime)
 
             if active and State.matched then
-                if not Debug.active and State.debugLastBoundary ~= boundary then
+                if not Debug.active
+                    and State.debugLastBoundary ~= boundary then
                     startDebug(boundary, phase)
                 end
 
                 if Debug.active then
-                    if phase == "before" then
+                    if phase == "before-boundary" then
                         updateDebugLabels(
-                            "DEBUG: ĐANG GHI — CÒN "
+                            "DEBUG: ĐANG GHI TOÀN CỬA SỔ — CÒN "
                                 .. formatDuration(distance)
                                 .. " ĐẾN MỐC",
                             Color3.fromRGB(107, 221, 159)
                         )
                     else
                         updateDebugLabels(
-                            "DEBUG: ĐANG GHI — SAU MỐC "
-                                .. formatDuration(distance),
+                            "DEBUG: ĐANG GHI TOÀN CỬA SỔ — SAU MỐC "
+                                .. formatDuration(distance)
+                                .. " | CÒN "
+                                .. formatDuration(window.untilWindowEnd),
                             Color3.fromRGB(107, 221, 159)
                         )
                     end
                 end
             else
                 if Debug.active then
-                    stopDebug("Ra khỏi focused debug window")
+                    stopDebug("Đã ra khỏi cửa sổ không-hop")
                 elseif State.matched then
-                    local _, nextBoundary, _, secondsToDebug = getDebugWindow(State.uptime)
-                    local startAt = nextBoundary - CONFIG.DebugBeforeBoundary
-                    local remaining = math.max(0, startAt - State.uptime)
                     updateDebugLabels(
-                        "DEBUG: CHỜ " .. formatDuration(remaining)
-                            .. " ĐẾN LÚC KIỂM TRA DỮ",
+                        "DEBUG: ĐANG CHỜ KHỞI TẠO",
                         Color3.fromRGB(247, 198, 89)
                     )
                 else
+                    local remaining = math.max(
+                        0,
+                        window.targetStart - State.uptime
+                    )
+
                     updateDebugLabels(
-                        "DEBUG: CHƯA ĐÚNG SERVER MỤC TIÊU",
+                        "DEBUG: CHỜ "
+                            .. formatDuration(remaining)
+                            .. " ĐẾN CỬA SỔ KIỂM TRA",
                         Color3.fromRGB(143, 158, 178)
                     )
                 end
