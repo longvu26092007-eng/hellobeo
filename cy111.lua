@@ -14,8 +14,11 @@ getgenv().Settings = {
 
     -- Hop
     ["Hop Max Pages"] = 500;
-    ["Hop Scan Batch"] = 100; -- quét 50 page/server mỗi đợt
-    ["Hop Max Players"] = 5;
+    ["Hop Scan Batch"] = 150; -- quét 50 page/server mỗi đợt
+    ["Hop Max Players"] = 8;
+
+    -- Soul Guitar Instance chest bypass
+    ["Chest Instance Skip Delay"] = 2;
 }
 
 repeat task.wait(0.5) until game:IsLoaded() and game.Players.LocalPlayer and game.Players.LocalPlayer:FindFirstChildWhichIsA("PlayerGui")
@@ -858,6 +861,118 @@ hookedNotification = hookfunction(require(ReplicatedStorage.Notification).new, n
     return hookedNotification(...)
 end))
 
+-- ============================================================
+-- SOUL GUITAR INSTANCE CHEST BYPASS
+-- Dung dung cach cua source Soul Guitar:
+--   Character:SetPrimaryPartCFrame(chest.CFrame)
+--   sau 2 giay neu chest van CanTouch thi bo qua local instance
+--   ket hop Jump de game nhan va cham chest.
+-- KHONG dung TweenChest / firetouchinterest cho nhanh chest nay.
+-- ============================================================
+local ChestBypassTokens = setmetatable({}, {__mode = "k"})
+
+local function SoulGuitarInstanceChestBypass(chest, stopCondition)
+    if not chest
+        or not chest:IsA("BasePart")
+        or not chest.Parent
+        or not chest.CanTouch then
+        return false
+    end
+
+    if not Character
+        or not Character.Parent
+        or IsDied(Character)
+        or not HumanoidRootPart then
+        return false
+    end
+
+    local humanoid =
+        Character:FindFirstChildWhichIsA("Humanoid")
+
+    if not humanoid or humanoid.Health <= 0 then
+        return false
+    end
+
+    Tween(false)
+
+    local token = {}
+    ChestBypassTokens[chest] = token
+
+    local skipDelay =
+        tonumber(
+            getgenv().Settings[
+                "Chest Instance Skip Delay"
+            ]
+        ) or 2
+
+    task.delay(skipDelay, function()
+        if ChestBypassTokens[chest] ~= token then
+            return
+        end
+
+        if chest and chest.Parent and chest.CanTouch then
+            -- Dung y logic source Soul Guitar:
+            -- local-only disable de bo qua chest ghost.
+            pcall(function()
+                chest.CanTouch = false
+            end)
+        end
+    end)
+
+    repeat
+        task.wait()
+
+        if stopCondition and stopCondition() then
+            break
+        end
+
+        if not Character
+            or not Character.Parent
+            or IsDied(Character) then
+            break
+        end
+
+        humanoid =
+            Character:FindFirstChildWhichIsA("Humanoid")
+
+        if not humanoid or humanoid.Health <= 0 then
+            break
+        end
+
+        if chest and chest.Parent and chest.CanTouch then
+            pcall(function()
+                Character:SetPrimaryPartCFrame(chest.CFrame)
+            end)
+
+            pcall(function()
+                local state = humanoid:GetState()
+
+                if humanoid.FloorMaterial ~= Enum.Material.Air
+                    or not table.find(
+                        {
+                            Enum.HumanoidStateType.Jumping,
+                            Enum.HumanoidStateType.Dead,
+                        },
+                        state
+                    ) then
+                    humanoid:ChangeState(
+                        Enum.HumanoidStateType.Jumping
+                    )
+                end
+            end)
+        end
+    until
+        not chest
+        or not chest.Parent
+        or not chest.CanTouch
+
+    ChestBypassTokens[chest] = nil
+
+    return not chest
+        or not chest.Parent
+        or not chest.CanTouch
+end
+
 local all = 0
 local fragok = false;
 task.spawn(function()
@@ -1149,7 +1264,7 @@ task.spawn(function()
                                             task.wait()
 
                                             SetText(
-                                                "Collect Soul Guitar Chests"
+                                                "Collect Soul Guitar Chests | Instance Bypass"
                                                 .. "\nWindow: "
                                                 .. windowStart
                                                 .. "-"
@@ -1166,7 +1281,7 @@ task.spawn(function()
                                                 )
                                             )
 
-                                            TweenChest(
+                                            SoulGuitarInstanceChestBypass(
                                                 chest,
                                                 function()
                                                     local valid =
@@ -1180,25 +1295,6 @@ task.spawn(function()
                                                         or IsDied(Character)
                                                 end
                                             )
-
-                                            if chest
-                                                and chest.Parent
-                                                and chest.CanTouch then
-
-                                                task.wait(
-                                                    tonumber(
-                                                        getgenv().Settings[
-                                                            "Skip Chest Delay"
-                                                        ]
-                                                    ) or 1
-                                                )
-
-                                                if chest
-                                                    and chest.Parent
-                                                    and chest.CanTouch then
-                                                    chest.CanTouch = false
-                                                end
-                                            end
                                         until
                                             not chest
                                             or not chest.Parent
@@ -1342,3 +1438,4 @@ print("[CYBORG BASE OK] Soul Guitar chest replacement loaded")
 print("[CYBORG BASE OK] Windows: 04-05, 08-09, 12-13, ...")
 print("[CYBORG BASE OK] Hop max pages:", getgenv().Settings["Hop Max Pages"])
 print("[CYBORG BASE OK] Hop scan batch:", getgenv().Settings["Hop Scan Batch"])
+print("[CYBORG BASE OK] Chest method: Soul Guitar Instance Bypass")
