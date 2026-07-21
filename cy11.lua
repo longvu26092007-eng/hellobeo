@@ -15,7 +15,24 @@
       tranh JobId hien tai va JobId vua thu.
 ]]
 
-getgenv().Settings = {
+local ENV
+
+if type(getgenv) == "function" then
+    local ok, result = pcall(getgenv)
+
+    if ok and type(result) == "table" then
+        ENV = result
+    end
+end
+
+ENV = ENV
+    or (type(shared) == "table" and shared)
+    or (type(_G) == "table" and _G)
+    or {}
+
+print("[KAITUN BOOT] env-ready")
+
+ENV.Settings = {
     -- Soul Guitar chest defaults
     ["Max Chests"] = 30;
     ["Skip Chest Delay"] = 2;
@@ -34,7 +51,7 @@ getgenv().Settings = {
 
     -- Hop server cai tien.
     ["Hop Max Pages"] = 500;
-    ["Hop Workers"] = 20;
+    ["Hop Workers"] = 15;
     ["Hop Timeout"] = 15;
     ["Hop Candidate Target"] = 60;
     ["Hop Best Pool"] = 10;
@@ -44,7 +61,6 @@ getgenv().Settings = {
 -- EXECUTOR COMPATIBILITY
 -- Khong de script dung neu Volt/executor thieu mot API optional.
 -- ============================================================
-local ENV = getgenv()
 local MemoryFiles = ENV.__KaitunCyborgMemoryFiles or {}
 ENV.__KaitunCyborgMemoryFiles = MemoryFiles
 
@@ -116,18 +132,100 @@ local function BootStage(name)
     print("[KAITUN BOOT]", tostring(name))
 end
 
+local function SafeSet3DRendering(enabled)
+    local method = RunService
+        and RunService.Set3dRenderingEnabled
+
+    if type(method) == "function" then
+        local ok, err = pcall(method, RunService, enabled)
+
+        if not ok then
+            warn("[Compatibility] Set3dRenderingEnabled failed:", err)
+        end
+
+        return ok
+    end
+
+    warn("[Compatibility] Set3dRenderingEnabled unavailable")
+    return false
+end
+
+local function SafeFireSignal(signal)
+    if type(firesignal) ~= "function" or not signal then
+        return false
+    end
+
+    local ok, err = pcall(firesignal, signal)
+
+    if not ok then
+        warn("[Compatibility] firesignal failed:", err)
+    end
+
+    return ok
+end
+
+local function SafeFireClick(clickDetector)
+    if type(fireclickdetector) ~= "function"
+        or not clickDetector then
+        return false
+    end
+
+    local ok, err = pcall(fireclickdetector, clickDetector)
+
+    if not ok then
+        warn("[Compatibility] fireclickdetector failed:", err)
+    end
+
+    return ok
+end
+
+local function SafeFireTouch(part1, part2, state)
+    if type(firetouchinterest) ~= "function"
+        or not part1
+        or not part2 then
+        return false
+    end
+
+    local ok, err = pcall(
+        firetouchinterest,
+        part1,
+        part2,
+        state or 0
+    )
+
+    if not ok then
+        warn("[Compatibility] firetouchinterest failed:", err)
+    end
+
+    return ok
+end
+
 BootStage("compatibility-ready")
 
 repeat task.wait(0.5) until game:IsLoaded() and game.Players.LocalPlayer and game.Players.LocalPlayer:FindFirstChildWhichIsA("PlayerGui")
-if getgenv().WARCLOADER then game:GetService("StarterGui"):SetCore("SendNotification", {Title = "Execution Blocked", Text = "The script is already running. Please wait 10 seconds", Duration = 5}) return end getgenv().WARCLOADER = true task.delay(10, (function() getgenv().WARCLOADER = nil end))
+if ENV.WARCLOADER then
+    SafeNotify(
+        "Execution Blocked",
+        "The script is already running. Please wait 10 seconds",
+        5
+    )
+    return
+end
+
+ENV.WARCLOADER = true
+
+task.spawn(function()
+    task.wait(10)
+    ENV.WARCLOADER = nil
+end)
 
 local SafeCloneRef =
     (type(cloneref) == "function" and cloneref)
     or (type(clonereference) == "function" and clonereference)
     or function(x) return x end
 
-getgenv().cloneref = SafeCloneRef
-getgenv().isnetworkowner =
+ENV.cloneref = SafeCloneRef
+ENV.isnetworkowner =
     (type(isnetworkowner) == "function" and isnetworkowner)
     or (type(isNetworkOwner) == "function" and isNetworkOwner)
     or function() return true end
@@ -225,8 +323,26 @@ task.spawn(function()
             if LocalPlayer.PlayerGui:FindFirstChild("LoadingScreen") then
                 repeat task.wait(1) until not LocalPlayer.PlayerGui:FindFirstChild("LoadingScreen")
             end
-            xpcall(function() COMMF_:InvokeServer("SetTeam", "Pirates")
-            end, function() firesignal(LocalPlayer.PlayerGui["Main (minimal)"].ChooseTeam.Container.Pirates) end)
+            xpcall(
+                function()
+                    COMMF_:InvokeServer("SetTeam", "Pirates")
+                end,
+                function()
+                    local gui = LocalPlayer.PlayerGui
+                    local minimal = gui
+                        and gui:FindFirstChild("Main (minimal)")
+                    local chooseTeam = minimal
+                        and minimal:FindFirstChild("ChooseTeam")
+                    local container = chooseTeam
+                        and chooseTeam:FindFirstChild("Container")
+                    local pirates = container
+                        and container:FindFirstChild("Pirates")
+
+                    if pirates then
+                        SafeFireSignal(pirates.MouseButton1Click)
+                    end
+                end
+            )
             task.wait(2)
         end
     end, function(err) warn("????", err) end)
@@ -238,9 +354,9 @@ local BlankScreen = LocalPlayer.PlayerGui:FindFirstChild("Blank") or Instance.ne
 BlankScreen.Name = "Blank" BlankScreen.ResetOnSpawn = false BlankScreen.DisplayOrder = -math.huge BlankScreen.IgnoreGuiInset = true
 local Black = BlankScreen:FindFirstChild("Black Screen") or Instance.new("Frame", BlankScreen)
 Black.Name = "Black Screen" Black.Size = UDim2.new(1, 0, 1, 0) Black.BackgroundColor3 = Color3.new(0, 0, 0) Black.ZIndex = -math.huge
-Black.Visible = getgenv().Settings["Black Screen"] or false
+Black.Visible = ENV.Settings["Black Screen"] or false
 
-RunService:Set3dRenderingEnabled(not Black.Visible)
+SafeSet3DRendering(not Black.Visible)
 
 local label = Instance.new("TextLabel", BlankScreen)
 label.Name = "CenteredLabel"
@@ -260,7 +376,7 @@ label.TextColor3 = Color3.fromRGB(255, 255, 255)
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if not gameProcessed and input.KeyCode == Enum.KeyCode.F4 then
         Black.Visible = not Black.Visible
-        RunService:Set3dRenderingEnabled(not Black.Visible)
+        SafeSet3DRendering(not Black.Visible)
         StarterGui:SetCore("SendNotification", {
             Title = "Black Screen",
             Text = Black.Visible and "Đã BẬT màn hình đen (Tắt Render 3D)" or "Đã TẮT màn hình đen (Bật Render 3D)",
@@ -425,11 +541,11 @@ local function EnsureServerStartTime(timeout)
     end
 
     timeout = tonumber(timeout)
-        or tonumber(getgenv().Settings["Server Time Wait Timeout"])
+        or tonumber(ENV.Settings["Server Time Wait Timeout"])
         or 20
 
     local retryInterval =
-        tonumber(getgenv().Settings["Server Time Retry Interval"])
+        tonumber(ENV.Settings["Server Time Retry Interval"])
         or 0.5
 
     local deadline = os.clock() + math.max(0, timeout)
@@ -465,7 +581,7 @@ local function GetRealServerUptime(forceDetect)
         local waitTime = forceDetect
             and (
                 tonumber(
-                    getgenv().Settings["Server Time Wait Timeout"]
+                    ENV.Settings["Server Time Wait Timeout"]
                 ) or 20
             )
             or 0
@@ -483,8 +599,8 @@ local function GetRealServerUptime(forceDetect)
     local uptime = math.max(0, now - ServerTimeState.StartedAt)
     ServerTimeState.LastUptime = uptime
 
-    getgenv().CyborgChestServerUptime = uptime
-    getgenv().CyborgChestServerTimeSource = ServerTimeState.Source
+    ENV.CyborgChestServerUptime = uptime
+    ENV.CyborgChestServerTimeSource = ServerTimeState.Source
 
     return uptime
 end
@@ -503,7 +619,7 @@ local function CheckCyborgChestServerTime()
         math.max(
             1,
             tonumber(
-                getgenv().Settings["Chest Server Period Seconds"]
+                ENV.Settings["Chest Server Period Seconds"]
             ) or (4 * 60 * 60)
         )
 
@@ -511,7 +627,7 @@ local function CheckCyborgChestServerTime()
         math.max(
             1,
             tonumber(
-                getgenv().Settings["Chest Server Grace Seconds"]
+                ENV.Settings["Chest Server Grace Seconds"]
             ) or (1 * 60 * 60)
         )
 
@@ -535,7 +651,7 @@ local function CheckCyborgChestServerTime()
             and remainder < graceSeconds,
     }
 
-    getgenv().CyborgChestTimeWindow = info
+    ENV.CyborgChestTimeWindow = info
 
     if completedPeriods < 1 then
         return false,
@@ -568,7 +684,7 @@ end
 -- Doc truoc de lan dau vao nhanh chest khong bi cho lau.
 task.spawn(function()
     EnsureServerStartTime(
-        tonumber(getgenv().Settings["Server Time Wait Timeout"])
+        tonumber(ENV.Settings["Server Time Wait Timeout"])
         or 20
     )
 
@@ -745,7 +861,7 @@ end
 local function PruneCyborgVisitedServers()
     local now = os.time()
     local expire =
-        tonumber(getgenv().Settings["Hop Visited Expire"])
+        tonumber(ENV.Settings["Hop Visited Expire"])
         or 1800
 
     for id, timestamp in pairs(CyborgVisitedServers) do
@@ -794,7 +910,7 @@ function GetServers(MaxPlayers, ForcedRegion)
     local maxPages =
         math.max(
             1,
-            tonumber(getgenv().Settings["Hop Max Pages"])
+            tonumber(ENV.Settings["Hop Max Pages"])
                 or 500
         )
 
@@ -802,7 +918,7 @@ function GetServers(MaxPlayers, ForcedRegion)
         math.max(
             1,
             math.min(
-                tonumber(getgenv().Settings["Hop Workers"])
+                tonumber(ENV.Settings["Hop Workers"])
                     or 10,
                 maxPages
             )
@@ -811,7 +927,7 @@ function GetServers(MaxPlayers, ForcedRegion)
     local timeout =
         math.max(
             3,
-            tonumber(getgenv().Settings["Hop Timeout"])
+            tonumber(ENV.Settings["Hop Timeout"])
                 or 15
         )
 
@@ -819,7 +935,7 @@ function GetServers(MaxPlayers, ForcedRegion)
         math.max(
             1,
             tonumber(
-                getgenv().Settings["Hop Candidate Target"]
+                ENV.Settings["Hop Candidate Target"]
             ) or 60
         )
 
@@ -957,7 +1073,7 @@ HopServer = function(MaxPlayers, ForcedRegion, Reason)
             .. Reason
             .. "\nScanning up to "
             .. tostring(
-                getgenv().Settings["Hop Max Pages"] or 500
+                ENV.Settings["Hop Max Pages"] or 500
             )
             .. " pages..."
     )
@@ -988,7 +1104,7 @@ HopServer = function(MaxPlayers, ForcedRegion, Reason)
         math.max(
             1,
             math.min(
-                tonumber(getgenv().Settings["Hop Best Pool"])
+                tonumber(ENV.Settings["Hop Best Pool"])
                     or 10,
                 #servers
             )
@@ -1311,7 +1427,7 @@ task.spawn(function()
         xpcall(function()
             if LocalPlayer.Data.Race.Value ~= "Cyborg" and LocalPlayer.Data.Fragments.Value >= 2500 then COMMF_:InvokeServer("CyborgTrainer", "Buy") end
             CyborgBlockPartUnlocked = SafeReadFile(mainfile) or "NaN"
-            pcall(function() fireclickdetector(workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector) end)
+            SafeFireClick(workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector)
             if LocalPlayer.Data.Race.Value == "Cyborg" then
                 if COMMF_:InvokeServer("Wenlocktoad") == nil then
                     if CheckSea(2) then
@@ -1371,7 +1487,7 @@ task.spawn(function()
                     end
                 end
             elseif CyborgBlockPartUnlocked == "unlock" or game:GetService("ReplicatedStorage").Remotes.CommF_:InvokeServer("CyborgTrainer", "Check") == true then
-                local have, need = LocalPlayer.Data.Fragments.Value, getgenv().Settings.Fragments
+                local have, need = LocalPlayer.Data.Fragments.Value, ENV.Settings.Fragments
                 if fragok then
                     if have < 2500 then fragok = false
                     end
@@ -1381,7 +1497,7 @@ task.spawn(function()
                 end
                 if fragok or CheckMonster("Order") or CheckTool("Microchip") then print("CC")
                     if CheckSea(2) then
-                        if fragok == false and LocalPlayer.Data.Fragments.Value >= getgenv().Settings.Fragments then
+                        if fragok == false and LocalPlayer.Data.Fragments.Value >= ENV.Settings.Fragments then
                             fragok = true
                         end
                         if CheckMonster("Order") then
@@ -1397,12 +1513,7 @@ task.spawn(function()
                             pcall(function() Tween(ReplicatedStorage.Order:GetPivot()) end)
                         else
                             if not CheckTool("Microchip") and not CheckTool("Core Brain") then COMMF_:InvokeServer("BlackbeardReward", "Microchip", "2") task.wait(1) end
-                            if type(fireclickdetector) == "function" then
-                        pcall(
-                            fireclickdetector,
-                            workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector
-                        )
-                    end
+                            SafeFireClick(workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector)
                             game:GetService("ReplicatedStorage").Remotes.CommF_:InvokeServer("CyborgTrainer", "Buy")
                         end
                     else SetText("Travel to Dressrosa") task.wait(3) COMMF_:InvokeServer("TravelDressrosa")
@@ -1413,7 +1524,7 @@ task.spawn(function()
                             for _, v2 in next, {workspace.Enemies, ReplicatedStorage} do
                                 for _, v in next, v2:GetChildren() do
                                     if v.Name == "Dough King" or v.Name == "Cake Prince" or v.Name:find("rip_indra") then
-                                        if v.Name ~= "rip_indra" then if not CheckLocation("Dimensional Shift") then firetouchinterest(LocalPlayer.Character.HumanoidRootPart, workspace.Map.CakeLoaf.BigMirror.Main, 0) task.wait(3) end end
+                                        if v.Name ~= "rip_indra" then if not CheckLocation("Dimensional Shift") then SafeFireTouch(LocalPlayer.Character.HumanoidRootPart, workspace.Map.CakeLoaf.BigMirror.Main, 0) task.wait(3) end end
                                         if v:FindFirstChildWhichIsA("Humanoid") and v.Humanoid.Health > 0 and v.HumanoidRootPart then
                                             repeat task.wait() KillMonster(v.Name)
                                             until not v or not v:FindFirstChildWhichIsA("Humanoid") or v.Humanoid.Health <= 0 or not v.HumanoidRootPart
@@ -1422,7 +1533,7 @@ task.spawn(function()
                                 end
                             end
                         else currentProgress = tonumber(COMMF_:InvokeServer("CakePrinceSpawner"):match("%d+") or 500) print(currentProgress)
-                            if currentProgress <= getgenv().Settings["Katakuri Progress"] then
+                            if currentProgress <= ENV.Settings["Katakuri Progress"] then
                                 if LocalPlayer.Data.Level.Value >= 2200 and (LocalPlayer.PlayerGui.Main.Quest.Visible and (function(q)
                                     for _, n in next, {"Cookie Crafter", "Cake Guard", "Baking Staff", "Head Baker"} do
                                         if q:find(n) then return true end
@@ -1468,9 +1579,7 @@ task.spawn(function()
                 if CheckSea(2) then
                     if CheckTool("Fist of Darkness") then
                         EquipWeapon("Fist of Darkness")
-                        fireclickdetector(
-                            workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector
-                        )
+                        SafeFireClick(workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector)
                     else
                         -- ====================================================
                         -- SOUL GUITAR CHEST ROUTINE + SERVER TIME GATE
@@ -1556,7 +1665,7 @@ Windows: 04-05, 08-09, 12-13..."
 
                         if #chests > 0
                             and all
-                                < getgenv().Settings["Max Chests"]
+                                < ENV.Settings["Max Chests"]
                             and not CheckTool("Fist of Darkness") then
 
                             for index, entry in ipairs(chests) do
@@ -1594,7 +1703,7 @@ Windows: 04-05, 08-09, 12-13..."
                                             .. tostring(all)
                                             .. "/"
                                             .. tostring(
-                                                getgenv().Settings["Max Chests"]
+                                                ENV.Settings["Max Chests"]
                                             )
                                             .. "\nServer: "
                                             .. FormatServerUptime(
@@ -1630,13 +1739,14 @@ Windows: 04-05, 08-09, 12-13..."
                                         if not skipScheduled then
                                             skipScheduled = true
 
-                                            task.delay(
-                                                tonumber(
-                                                    getgenv().Settings[
-                                                        "Skip Chest Delay"
-                                                    ]
-                                                ) or 2,
-                                                function()
+                                            task.spawn(function()
+                                                task.wait(
+                                                    tonumber(
+                                                        ENV.Settings[
+                                                            "Skip Chest Delay"
+                                                        ]
+                                                    ) or 2
+                                                )
                                                     if chest
                                                         and chest.Parent
                                                         and chest.CanTouch
@@ -1645,8 +1755,7 @@ Windows: 04-05, 08-09, 12-13..."
                                                         ) then
                                                         chest.CanTouch = false
                                                     end
-                                                end
-                                            )
+                                            end)
                                         end
                                     end
 
@@ -1705,7 +1814,7 @@ Windows: 04-05, 08-09, 12-13..."
                                 end
 
                                 if all
-                                    >= getgenv().Settings["Max Chests"] then
+                                    >= ENV.Settings["Max Chests"] then
                                     SetText(
                                         "Soul Guitar Chest | Max chests reached"
                                     )
@@ -1713,7 +1822,7 @@ Windows: 04-05, 08-09, 12-13..."
                                 end
 
                                 if c
-                                    >= getgenv().Settings[
+                                    >= ENV.Settings[
                                         "Reset After Collect Chests"
                                     ]
                                     and not CheckTool(
@@ -1775,12 +1884,7 @@ Windows: 04-05, 08-09, 12-13..."
                 end
             else
                 if CheckSea(2) then
-                    if type(fireclickdetector) == "function" then
-                        pcall(
-                            fireclickdetector,
-                            workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector
-                        )
-                    end
+                    SafeFireClick(workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector)
                 else SetText("Travel to sea 2") task.wait(3) COMMF_:InvokeServer("TravelDressrosa")
                 end
             end
@@ -1821,14 +1925,20 @@ GuiService.ErrorMessageChanged:Connect(function()
 end)
 
 print("[Cyborg SoulGuitar Chest] Windows: 04-05, 08-09, 12-13, ...")
-print("[Cyborg SoulGuitar Chest] Hop max pages:", getgenv().Settings["Hop Max Pages"])
+print("[Cyborg SoulGuitar Chest] Hop max pages:", ENV.Settings["Hop Max Pages"])
 print(
     "[Cyborg SoulGuitar Chest] Time windows: every",
-    (getgenv().Settings["Chest Server Period Seconds"] or 14400) / 3600,
+    (ENV.Settings["Chest Server Period Seconds"] or 14400) / 3600,
     "hours, grace",
-    (getgenv().Settings["Chest Server Grace Seconds"] or 3600) / 3600,
+    (ENV.Settings["Chest Server Grace Seconds"] or 3600) / 3600,
     "hour"
 )
 
 BootStage("script-loaded")
 print("[Compatibility] Nil-call protection active")
+
+print("[FULL FIX] ENV source:", type(ENV))
+print("[FULL FIX] getgenv available:", type(getgenv) == "function")
+print("[FULL FIX] fireclickdetector:", type(fireclickdetector))
+print("[FULL FIX] firetouchinterest:", type(firetouchinterest))
+print("[FULL FIX] firesignal:", type(firesignal))
