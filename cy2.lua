@@ -34,24 +34,123 @@ getgenv().Settings = {
 
     -- Hop server cai tien.
     ["Hop Max Pages"] = 500;
-    ["Hop Workers"] = 10;
+    ["Hop Workers"] = 20;
     ["Hop Timeout"] = 15;
     ["Hop Candidate Target"] = 60;
     ["Hop Best Pool"] = 10;
     ["Hop Visited Expire"] = 1800;
 }
+-- ============================================================
+-- EXECUTOR COMPATIBILITY
+-- Khong de script dung neu Volt/executor thieu mot API optional.
+-- ============================================================
+local ENV = getgenv()
+local MemoryFiles = ENV.__KaitunCyborgMemoryFiles or {}
+ENV.__KaitunCyborgMemoryFiles = MemoryFiles
+
+local RawIsFile = type(isfile) == "function" and isfile or nil
+local RawReadFile = type(readfile) == "function" and readfile or nil
+local RawWriteFile = type(writefile) == "function" and writefile or nil
+
+local function SafeIsFile(path)
+    if MemoryFiles[path] ~= nil then
+        return true
+    end
+
+    if RawIsFile then
+        local ok, result = pcall(RawIsFile, path)
+        return ok and result == true
+    end
+
+    return false
+end
+
+local function SafeReadFile(path)
+    if RawReadFile then
+        local ok, result = pcall(RawReadFile, path)
+
+        if ok and result ~= nil then
+            MemoryFiles[path] = result
+            return result
+        end
+    end
+
+    return MemoryFiles[path]
+end
+
+local function SafeWriteFile(path, content)
+    content = tostring(content or "")
+    MemoryFiles[path] = content
+
+    if RawWriteFile then
+        local ok, err = pcall(RawWriteFile, path, content)
+
+        if not ok then
+            warn("[Compatibility] writefile failed:", err)
+        end
+
+        return ok
+    end
+
+    warn(
+        "[Compatibility] Executor has no writefile; using memory only:",
+        path
+    )
+    return false
+end
+
+local function SafeNotify(title, text, duration)
+    pcall(function()
+        game:GetService("StarterGui"):SetCore(
+            "SendNotification",
+            {
+                Title = tostring(title or "Kaitun"),
+                Text = tostring(text or ""),
+                Duration = tonumber(duration) or 5,
+            }
+        )
+    end)
+end
+
+local function BootStage(name)
+    print("[KAITUN BOOT]", tostring(name))
+end
+
+BootStage("compatibility-ready")
 
 repeat task.wait(0.5) until game:IsLoaded() and game.Players.LocalPlayer and game.Players.LocalPlayer:FindFirstChildWhichIsA("PlayerGui")
 if getgenv().WARCLOADER then game:GetService("StarterGui"):SetCore("SendNotification", {Title = "Execution Blocked", Text = "The script is already running. Please wait 10 seconds", Duration = 5}) return end getgenv().WARCLOADER = true task.delay(10, (function() getgenv().WARCLOADER = nil end))
 
-getgenv().cloneref = cloneref or clonereference or function(x) return x end
-getgenv().isnetworkowner = isnetworkowner or isNetworkOwner or function() return true end
-workspace = cloneref(workspace) or cloneref(Workspace) or (getrenv and (getrenv().workspace or getrenv().Workspace)) or cloneref(game:GetService("Workspace"))
+local SafeCloneRef =
+    (type(cloneref) == "function" and cloneref)
+    or (type(clonereference) == "function" and clonereference)
+    or function(x) return x end
+
+getgenv().cloneref = SafeCloneRef
+getgenv().isnetworkowner =
+    (type(isnetworkowner) == "function" and isnetworkowner)
+    or (type(isNetworkOwner) == "function" and isNetworkOwner)
+    or function() return true end
+
+local EnvWorkspace
+if type(getrenv) == "function" then
+    local ok, env = pcall(getrenv)
+    if ok and type(env) == "table" then
+        EnvWorkspace = env.workspace or env.Workspace
+    end
+end
+
+workspace = SafeCloneRef(
+    workspace
+    or Workspace
+    or EnvWorkspace
+    or game:GetService("Workspace")
+)
 PlaceId, JobId = game.PlaceId, game.JobId
 getfenv = getfenv or _G or _ENV or shared or function() return {} end
 IsOnMobile = false
 Services = setmetatable({}, {__index = function(self, name)
-    local s, c = pcall(function() return cloneref(game:GetService(name)) end)
+    local s, c = pcall(function() return SafeCloneRef(game:GetService(name)) end)
     if s then rawset(self, name, c) return c
     else error("Invalid Roblox Service: " .. tostring(name))
     end
@@ -83,7 +182,8 @@ if LocalPlayer.Character then
     HumanoidRootPart = Character:FindFirstChild("HumanoidRootPart") or Character:WaitForChild("HumanoidRootPart")
 end
 
-StarterGui:SetCore("SendNotification", {Title = "Executed", Text = "Loading… Please wait", Duration = 5})
+BootStage("services-ready")
+SafeNotify("Executed", "Loading... Please wait", 5)
 if not game:IsLoaded() or workspace.DistributedGameTime <= 10 then
     local WFGTL = COREGUI:FindFirstChild("WFGTL") or Instance.new("Hint", COREGUI)
     WFGTL.Text = "Just a moment... Waiting while the game loads - This won't take long!"
@@ -92,19 +192,32 @@ if not game:IsLoaded() or workspace.DistributedGameTime <= 10 then
 end
 if not COMMF_ then repeat task.wait(1) until COMMF_ end
 
-local gmod = require(ReplicatedStorage.GuideModule) and ReplicatedStorage:FindFirstChild("GuideModule") and gmod ~= (nil and {}) and gmod.Data ~= (nil and {}) and gmod.Data.NPCList ~= (nil and {})
-task.spawn((function()
-    xpcall(function()
-        gethui().IgnoreGuiInset = true
-    end, (function(err)
-        xpcall((function()
-            local g = COREGUI:FindFirstChild("ScreenGUI") or Instance.new("ScreenGui", COREGUI)
-            g.Name = "ScreenGUI" g.IgnoreGuiInset = true
-            hookfunction(gethui, function() return g end)
-            task.delay(5, (function()StarterGui:SetCore("SendNotification", {Title = "Incompatible Executor", Text = "This executor may cause errors while running the script\n[ERROR CODE: UIGE]", Duration = 20})end))
-        end), (function() warn("???") end))
-    end))
-end))
+local GuideModuleInstance =
+    ReplicatedStorage:FindFirstChild("GuideModule")
+local gmod
+
+if GuideModuleInstance then
+    local ok, result = pcall(require, GuideModuleInstance)
+    if ok and type(result) == "table" then
+        gmod = result
+    else
+        warn("[Compatibility] GuideModule require failed:", result)
+    end
+end
+
+task.spawn(function()
+    if type(gethui) == "function" then
+        local ok, hui = pcall(gethui)
+
+        if ok and hui then
+            pcall(function()
+                hui.IgnoreGuiInset = true
+            end)
+        end
+    else
+        warn("[Compatibility] gethui unavailable; using normal GUI parent")
+    end
+end)
 
 task.spawn(function()
     xpcall(function()
@@ -467,8 +580,12 @@ task.spawn(function()
         )
     end
 end)
+BootStage("server-time-ready")
 local mainfile = LocalPlayer.Name .. ".txt"
-if not isfile(mainfile) then writefile(mainfile, "NaN") end
+if not SafeIsFile(mainfile) then
+    SafeWriteFile(mainfile, "NaN")
+end
+BootStage("state-file-ready")
 function CheckSea(v: number) return v == tonumber(workspace:GetAttribute("MAP"):match("%d+")) end
 
 local canPress = true
@@ -592,7 +709,7 @@ FastAttack = (function(x)
     end
     n:FindFirstChild("RE/RegisterAttack"):FireServer()
     n:FindFirstChild("RE/RegisterHit"):FireServer(unpack(h))
-    cloneref(remoteAttack):FireServer(string.gsub("RE/RegisterHit", ".",function(c)
+    SafeCloneRef(remoteAttack):FireServer(string.gsub("RE/RegisterHit", ".",function(c)
         return string.char(bit32.bxor(string.byte(c), math.floor(workspace:GetServerTimeNow()/10%10)+1))
     end), bit32.bxor(idremote+909090, seed*2), unpack(h))
     lastCallFA = tick()
@@ -610,15 +727,13 @@ local CyborgHopLock = false
 local CyborgLastHopArgs = nil
 
 local function LoadCyborgVisitedServers()
-    if type(isfile) ~= "function"
-        or type(readfile) ~= "function"
-        or not isfile(CYBORG_VISITED_FILE) then
+    if not SafeIsFile(CYBORG_VISITED_FILE) then
         return
     end
 
     local ok, decoded = pcall(function()
         return HttpService:JSONDecode(
-            readfile(CYBORG_VISITED_FILE)
+            SafeReadFile(CYBORG_VISITED_FILE)
         )
     end)
 
@@ -642,14 +757,10 @@ local function PruneCyborgVisitedServers()
 end
 
 local function SaveCyborgVisitedServers()
-    if type(writefile) ~= "function" then
-        return
-    end
-
     PruneCyborgVisitedServers()
 
     pcall(function()
-        writefile(
+        SafeWriteFile(
             CYBORG_VISITED_FILE,
             HttpService:JSONEncode(CyborgVisitedServers)
         )
@@ -1077,7 +1188,13 @@ end)
 
 TableQuests = setmetatable({}, {__index = function(_, k)
     local p, d, m, raw = HumanoidRootPart.Position
-    for _, x in next, require(ReplicatedStorage.GuideModule).Data.NPCList do
+    local npcList =
+        gmod
+        and gmod.Data
+        and gmod.Data.NPCList
+        or {}
+
+    for _, x in next, npcList do
         if x.InternalQuestName == k then
             local pos = x.Position
             if typeof(pos) == "Vector3" then
@@ -1096,28 +1213,104 @@ TableQuests = setmetatable({}, {__index = function(_, k)
     return m and {Position = m, Meters = d, RawNPCName = raw} or nil
 end})
 
-local hookedNotification;
-hookedNotification = hookfunction(require(ReplicatedStorage.Notification).new, newcclosure(function(...)
-    local args = ({...})[1]
-    if CheckSea(2) then
-        if args:lower():find("supply a <core brain>") or args:find("<Fist of Darkness> has been") then
-            CyborgBlockPartUnlocked = "unlock"
-            writefile(mainfile, "unlock")
-        elseif args:find("Microchip not found") then
-            CyborgBlockPartUnlocked = "chest"
-            writefile(mainfile, "chest")
-        end
-    end
-    return hookedNotification(...)
-end))
+local function HandleCyborgNotification(message)
+    local args = tostring(message or "")
+    local lowered = string.lower(args)
 
+    if not CheckSea(2) then
+        return
+    end
+
+    if lowered:find("supply a <core brain>", 1, true)
+        or lowered:find(
+            "<fist of darkness> has been",
+            1,
+            true
+        ) then
+        CyborgBlockPartUnlocked = "unlock"
+        SafeWriteFile(mainfile, "unlock")
+    elseif lowered:find("microchip not found", 1, true) then
+        CyborgBlockPartUnlocked = "chest"
+        SafeWriteFile(mainfile, "chest")
+    end
+end
+
+-- Cach an toan: bat Notify tu server gui xuong.
+local CommERemote =
+    ReplicatedStorage:FindFirstChild("Remotes")
+    and ReplicatedStorage.Remotes:FindFirstChild("CommE")
+
+if CommERemote and CommERemote:IsA("RemoteEvent") then
+    CommERemote.OnClientEvent:Connect(function(...)
+        local args = {...}
+
+        if args[1] == "Notify" then
+            HandleCyborgNotification(args[2])
+        else
+            for _, value in ipairs(args) do
+                if type(value) == "string" then
+                    HandleCyborgNotification(value)
+                end
+            end
+        end
+    end)
+end
+
+-- Fallback hook chi bat khi executor thuc su ho tro.
+local NotificationInstance =
+    ReplicatedStorage:FindFirstChild("Notification")
+local NotificationModule
+local OriginalNotificationNew
+
+if NotificationInstance then
+    local ok, result = pcall(require, NotificationInstance)
+    if ok and type(result) == "table" then
+        NotificationModule = result
+    end
+end
+
+if NotificationModule
+    and type(NotificationModule.new) == "function"
+    and type(hookfunction) == "function"
+    and type(newcclosure) == "function" then
+
+    local ok, originalOrError = pcall(function()
+        OriginalNotificationNew = hookfunction(
+            NotificationModule.new,
+            newcclosure(function(...)
+                local first = ({...})[1]
+                HandleCyborgNotification(first)
+                return OriginalNotificationNew(...)
+            end)
+        )
+
+        return OriginalNotificationNew
+    end)
+
+    if ok then
+        print("[Compatibility] Notification hook enabled")
+    else
+        warn(
+            "[Compatibility] Notification hook failed; "
+                .. "RemoteEvent detector remains active:",
+            originalOrError
+        )
+    end
+else
+    print(
+        "[Compatibility] hookfunction/newcclosure unavailable; "
+            .. "using RemoteEvent notification detector"
+    )
+end
+
+BootStage("notification-detector-ready")
 local all = 0
 local fragok = false;
 task.spawn(function()
     while task.wait(0.5) do
         xpcall(function()
             if LocalPlayer.Data.Race.Value ~= "Cyborg" and LocalPlayer.Data.Fragments.Value >= 2500 then COMMF_:InvokeServer("CyborgTrainer", "Buy") end
-            CyborgBlockPartUnlocked = readfile(mainfile) or "NaN"
+            CyborgBlockPartUnlocked = SafeReadFile(mainfile) or "NaN"
             pcall(function() fireclickdetector(workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector) end)
             if LocalPlayer.Data.Race.Value == "Cyborg" then
                 if COMMF_:InvokeServer("Wenlocktoad") == nil then
@@ -1172,7 +1365,7 @@ task.spawn(function()
                     end
                 else
                     if CheckSea(3) then
-                        writefile(mainfile, "Completed-Cyborg")
+                        SafeWriteFile(mainfile, "Completed-Cyborg")
                         SetText("DONE V3")
                     else SetText("Teleport to Sea 3") task.wait(3) COMMF_:InvokeServer("TravelZou") task.wait(10)
                     end
@@ -1204,7 +1397,12 @@ task.spawn(function()
                             pcall(function() Tween(ReplicatedStorage.Order:GetPivot()) end)
                         else
                             if not CheckTool("Microchip") and not CheckTool("Core Brain") then COMMF_:InvokeServer("BlackbeardReward", "Microchip", "2") task.wait(1) end
-                            fireclickdetector(workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector)
+                            if type(fireclickdetector) == "function" then
+                        pcall(
+                            fireclickdetector,
+                            workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector
+                        )
+                    end
                             game:GetService("ReplicatedStorage").Remotes.CommF_:InvokeServer("CyborgTrainer", "Buy")
                         end
                     else SetText("Travel to Dressrosa") task.wait(3) COMMF_:InvokeServer("TravelDressrosa")
@@ -1555,7 +1753,7 @@ Windows: 04-05, 08-09, 12-13..."
 
                             local hopReason = serverTimeExpired
                                 and (
-                                    "Server reached 5h | Uptime "
+                                    "Server left current 1h chest window | Uptime "
                                     .. FormatServerUptime(latestUptime)
                                 )
                                 or (
@@ -1577,7 +1775,12 @@ Windows: 04-05, 08-09, 12-13..."
                 end
             else
                 if CheckSea(2) then
-                    fireclickdetector(workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector)
+                    if type(fireclickdetector) == "function" then
+                        pcall(
+                            fireclickdetector,
+                            workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector
+                        )
+                    end
                 else SetText("Travel to sea 2") task.wait(3) COMMF_:InvokeServer("TravelDressrosa")
                 end
             end
@@ -1617,7 +1820,7 @@ GuiService.ErrorMessageChanged:Connect(function()
     end
 end)
 
-print("[Cyborg SoulGuitar Chest] Server window: 04:00:00-04:59:59")
+print("[Cyborg SoulGuitar Chest] Windows: 04-05, 08-09, 12-13, ...")
 print("[Cyborg SoulGuitar Chest] Hop max pages:", getgenv().Settings["Hop Max Pages"])
 print(
     "[Cyborg SoulGuitar Chest] Time windows: every",
@@ -1626,3 +1829,6 @@ print(
     (getgenv().Settings["Chest Server Grace Seconds"] or 3600) / 3600,
     "hour"
 )
+
+BootStage("script-loaded")
+print("[Compatibility] Nil-call protection active")
