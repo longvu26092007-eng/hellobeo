@@ -14,7 +14,8 @@ getgenv().Settings = {
 
     -- Hop
     ["Hop Max Pages"] = 500;
-    ["Hop Max Players"] = 8;
+    ["Hop Scan Batch"] = 100; -- quét 50 page/server mỗi đợt
+    ["Hop Max Players"] = 5;
 }
 
 repeat task.wait(0.5) until game:IsLoaded() and game.Players.LocalPlayer and game.Players.LocalPlayer:FindFirstChildWhichIsA("PlayerGui")
@@ -432,38 +433,86 @@ function GetServers()
         tonumber(getgenv().Settings["Hop Max Pages"])
         or 500
 
+    local batchSize =
+        tonumber(getgenv().Settings["Hop Scan Batch"])
+        or 50
+
+    batchSize = math.max(1, math.min(batchSize, maxPages))
+
+    local scanned = 0
+    local activeWorkers = 0
+    local batchDone = Instance.new("BindableEvent")
+
+    local function scanPage(page)
+        activeWorkers += 1
+
+        task.spawn(function()
+            local ok, data = pcall(function()
+                return ReplicatedStorage
+                    :WaitForChild("__ServerBrowser")
+                    :InvokeServer(page)
+            end)
+
+            if ok and type(data) == "table" then
+                for jobId, info in pairs(data) do
+                    if type(info) == "table" then
+                        merged[jobId] = info
+                    end
+                end
+            end
+
+            scanned += 1
+            activeWorkers -= 1
+
+            if activeWorkers <= 0 then
+                batchDone:Fire()
+            end
+        end)
+    end
+
     SetText(
         "Fetching Servers | 0/"
         .. tostring(maxPages)
-        .. " pages"
+        .. " | Batch "
+        .. tostring(batchSize)
     )
 
-    for page = 1, maxPages do
-        local ok, data = pcall(function()
-            return ReplicatedStorage
-                :WaitForChild("__ServerBrowser")
-                :InvokeServer(page)
-        end)
-
-        if ok and type(data) == "table" then
-            for jobId, info in pairs(data) do
-                if type(info) == "table" then
-                    merged[jobId] = info
-                end
-            end
-        end
-
-        if page % 10 == 0 then
-            SetText(
-                "Fetching Servers | "
-                .. tostring(page)
-                .. "/"
-                .. tostring(maxPages)
-                .. " pages"
+    for batchStart = 1, maxPages, batchSize do
+        local batchEnd =
+            math.min(
+                batchStart + batchSize - 1,
+                maxPages
             )
-            task.wait()
+
+        for page = batchStart, batchEnd do
+            scanPage(page)
         end
+
+        if activeWorkers > 0 then
+            batchDone.Event:Wait()
+        end
+
+        SetText(
+            "Fetching Servers | "
+            .. tostring(scanned)
+            .. "/"
+            .. tostring(maxPages)
+            .. " | Found "
+            .. tostring(
+                (function()
+                    local count = 0
+                    for _ in pairs(merged) do
+                        count += 1
+                    end
+                    return count
+                end)()
+            )
+        )
+
+        task.wait(0.05)
     end
+
+    batchDone:Destroy()
 
     LastServersDataPulled = os.time()
     CachedServers = merged
@@ -1292,3 +1341,4 @@ end))
 print("[CYBORG BASE OK] Soul Guitar chest replacement loaded")
 print("[CYBORG BASE OK] Windows: 04-05, 08-09, 12-13, ...")
 print("[CYBORG BASE OK] Hop max pages:", getgenv().Settings["Hop Max Pages"])
+print("[CYBORG BASE OK] Hop scan batch:", getgenv().Settings["Hop Scan Batch"])
