@@ -1,5 +1,5 @@
 getgenv().Settings = {
-    ["Max Chests"] = 30;
+    ["Max Chests"] = 50;
     ["Skip Chest Delay"] = 1;
     ["Reset After Collect Chests"] = 7;
     ["Katakuri Progress"] = 100;
@@ -8,14 +8,9 @@ getgenv().Settings = {
     ["Chest Tween Speed"] = 325;
     ["Chest Touch Radius"] = 8;
 
-    -- Server uptime window: 04-06, 08-10, 12-14...
+    -- Server uptime chest window: every 4 hours, active for 2 hours
     ["Chest Server Period"] = 4 * 60 * 60;
     ["Chest Server Grace"] = 2 * 60 * 60;
-
-    -- Hop
-    ["Hop Max Pages"] = 500;
-    ["Hop Scan Batch"] = 50; -- quét 50 page/server mỗi đợt
-    ["Hop Max Players"] = 8;
 }
 
 repeat task.wait(0.5) until game:IsLoaded() and game.Players.LocalPlayer and game.Players.LocalPlayer:FindFirstChildWhichIsA("PlayerGui")
@@ -136,6 +131,107 @@ end)
 local function SetText(newText) label.Text = newText end
 local mainfile = LocalPlayer.Name .. ".txt"
 if not isfile(mainfile) then writefile(mainfile, "NaN") end
+
+-- ============================================================
+-- REAL SERVER UPTIME + 4H PERIOD / 2H ACTIVE WINDOW
+-- Uses:
+-- workspace:GetServerTimeNow() - Workspace._WorldOrigin.Locations.<Location>:GetAttribute("TimeIn")
+-- ============================================================
+local function GetRealServerUptime()
+    local ok, uptime, locationName = pcall(function()
+        local worldOrigin = workspace:FindFirstChild("_WorldOrigin")
+        local locations = worldOrigin and worldOrigin:FindFirstChild("Locations")
+        if not locations then
+            return nil, "Locations not found"
+        end
+
+        local currentLocation = LocalPlayer:GetAttribute("CurrentLocation")
+        local location = currentLocation and locations:FindFirstChild(currentLocation)
+
+        if not location then
+            for _, obj in next, locations:GetChildren() do
+                local timeIn = obj:GetAttribute("TimeIn")
+                if type(timeIn) == "number" then
+                    location = obj
+                    break
+                end
+            end
+        end
+
+        if not location then
+            return nil, "Location with TimeIn not found"
+        end
+
+        local timeIn = location:GetAttribute("TimeIn")
+        if type(timeIn) ~= "number" then
+            return nil, "TimeIn not found"
+        end
+
+        return math.max(0, workspace:GetServerTimeNow() - timeIn), location.Name
+    end)
+
+    if not ok then
+        return nil, tostring(uptime)
+    end
+
+    return uptime, locationName
+end
+
+local function FormatUptime(seconds)
+    seconds = math.max(0, math.floor(tonumber(seconds) or 0))
+    local hours = math.floor(seconds / 3600)
+    local minutes = math.floor((seconds % 3600) / 60)
+    local secs = seconds % 60
+    return string.format("%02d:%02d:%02d", hours, minutes, secs)
+end
+
+local function CheckChestTimeWindow()
+    local uptime, source = GetRealServerUptime()
+    if not uptime then
+        return false, nil, source, nil
+    end
+
+    local period =
+        tonumber(getgenv().Settings["Chest Server Period"])
+        or (4 * 60 * 60)
+
+    local grace =
+        tonumber(getgenv().Settings["Chest Server Grace"])
+        or (2 * 60 * 60)
+
+    local offset = uptime % period
+    local inWindow = offset < grace
+    local cycleStart = uptime - offset
+    local cycleEnd = cycleStart + grace
+    local nextBoundary = inWindow and cycleEnd or (cycleStart + period)
+
+    return inWindow, uptime, source, {
+        Offset = offset,
+        CycleStart = cycleStart,
+        CycleEnd = cycleEnd,
+        NextBoundary = nextBoundary,
+    }
+end
+
+local completedCyborgWritten = false
+local function WriteCompletedCyborg()
+    if completedCyborgWritten then
+        return
+    end
+
+    local race =
+        LocalPlayer
+        and LocalPlayer:FindFirstChild("Data")
+        and LocalPlayer.Data:FindFirstChild("Race")
+
+    if race and tostring(race.Value):lower() == "cyborg" then
+        pcall(function()
+            writefile(mainfile, "Completed-cyborg")
+        end)
+        completedCyborgWritten = true
+    end
+end
+
 function CheckSea(v: number) return v == tonumber(workspace:GetAttribute("MAP"):match("%d+")) end
 
 local canPress = true
@@ -272,326 +368,57 @@ function IfTableHaveIndex(j)
     end
 end
 
-local function FormatUptime(seconds)
-    seconds = math.max(0, math.floor(tonumber(seconds) or 0))
-    local h = math.floor(seconds / 3600)
-    local m = math.floor((seconds % 3600) / 60)
-    local s = seconds % 60
-    return string.format("%02dh %02dm %02ds", h, m, s)
-end
-
-local PRIORITY_TIME_LOCATIONS = {
-    "Ancient Clock",
-    "Castle on the Sea",
-    "Temple of Time",
-    "Floating Turtle",
-    "Mansion",
-    "Port Town",
-    "Sea",
-}
-
-local CachedServerStart
-local CachedServerStartSource
-local LastServerStartCheck = 0
-
-local function IsValidTimeIn(value)
-    if type(value) ~= "number" or value < 1000000000 then
-        return false
-    end
-
-    local now = workspace:GetServerTimeNow()
-    local age = now - value
-    return age >= -10 and age < 31536000
-end
-
-local function DetectServerStart()
-    if CachedServerStart and tick() - LastServerStartCheck < 5 then
-        return CachedServerStart, CachedServerStartSource
-    end
-
-    LastServerStartCheck = tick()
-
-    local worldOrigin = workspace:FindFirstChild("_WorldOrigin")
-    local locations = worldOrigin and worldOrigin:FindFirstChild("Locations")
-    if not locations then
-        return nil, "Locations not found"
-    end
-
-    for _, name in ipairs(PRIORITY_TIME_LOCATIONS) do
-        local location = locations:FindFirstChild(name)
-        if location then
-            local timeIn = location:GetAttribute("TimeIn")
-            if IsValidTimeIn(timeIn) then
-                CachedServerStart = timeIn
-                CachedServerStartSource =
-                    "Workspace._WorldOrigin.Locations."
-                    .. name
-                    .. ".@TimeIn"
-                return CachedServerStart, CachedServerStartSource
-            end
-        end
-    end
-
-    local groups = {}
-
-    for _, location in ipairs(locations:GetChildren()) do
-        local value = location:GetAttribute("TimeIn")
-
-        if IsValidTimeIn(value) then
-            local rounded = math.floor(value + 0.5)
-            groups[rounded] = groups[rounded] or {
-                count = 0,
-                total = 0,
-                example = location.Name,
-            }
-
-            groups[rounded].count = groups[rounded].count + 1
-            groups[rounded].total = groups[rounded].total + value
-        end
-    end
-
-    local best
-
-    for _, group in pairs(groups) do
-        if not best or group.count > best.count then
-            best = group
-        end
-    end
-
-    if best then
-        CachedServerStart = best.total / best.count
-        CachedServerStartSource =
-            "Workspace._WorldOrigin.Locations."
-            .. best.example
-            .. ".@TimeIn"
-        return CachedServerStart, CachedServerStartSource
-    end
-
-    return nil, "TimeIn not found"
-end
-
-local function GetServerUptime()
-    local startedAt, source = DetectServerStart()
-    if not startedAt then
-        return nil, source
-    end
-
-    return math.max(
-        0,
-        workspace:GetServerTimeNow() - startedAt
-    ), source
-end
-
-local function CheckChestTimeWindow()
-    local uptime, source = GetServerUptime()
-
-    if not uptime then
-        return false, nil, source, nil
-    end
-
-    local period =
-        tonumber(getgenv().Settings["Chest Server Period"])
-        or (4 * 60 * 60)
-
-    local grace =
-        tonumber(getgenv().Settings["Chest Server Grace"])
-        or (1 * 60 * 60)
-
-    local completed = math.floor(uptime / period)
-    local remainder = uptime - completed * period
-    local boundary = completed * period
-    local nextBoundary = (completed + 1) * period
-
-    local inWindow =
-        completed >= 1
-        and remainder < grace
-
-    local info = {
-        Uptime = uptime,
-        Source = source,
-        Completed = completed,
-        Remainder = remainder,
-        Boundary = boundary,
-        WindowEnd = boundary + grace,
-        NextBoundary = nextBoundary,
-        InWindow = inWindow,
-    }
-
-    return inWindow, uptime, source, info
-end
-
 local LastServersDataPulled, CachedServers
 function GetServers()
     if LastServersDataPulled then
-        if os.time() - LastServersDataPulled < 30 then
+        if os.time() - LastServersDataPulled < 60 then
             return CachedServers
         end
     end
 
-    local merged = {}
-    local maxPages =
-        tonumber(getgenv().Settings["Hop Max Pages"])
-        or 500
-
-    local batchSize =
-        tonumber(getgenv().Settings["Hop Scan Batch"])
-        or 50
-
-    batchSize = math.max(1, math.min(batchSize, maxPages))
-
-    local scanned = 0
-    local activeWorkers = 0
-    local batchDone = Instance.new("BindableEvent")
-
-    local function scanPage(page)
-        activeWorkers += 1
-
-        task.spawn(function()
-            local ok, data = pcall(function()
-                return ReplicatedStorage
-                    :WaitForChild("__ServerBrowser")
-                    :InvokeServer(page)
-            end)
-
-            if ok and type(data) == "table" then
-                for jobId, info in pairs(data) do
-                    if type(info) == "table" then
-                        merged[jobId] = info
-                    end
-                end
-            end
-
-            scanned += 1
-            activeWorkers -= 1
-
-            if activeWorkers <= 0 then
-                batchDone:Fire()
-            end
-        end)
-    end
-
-    SetText(
-        "Fetching Servers | 0/"
-        .. tostring(maxPages)
-        .. " | Batch "
-        .. tostring(batchSize)
-    )
-
-    for batchStart = 1, maxPages, batchSize do
-        local batchEnd =
-            math.min(
-                batchStart + batchSize - 1,
-                maxPages
-            )
-
-        for page = batchStart, batchEnd do
-            scanPage(page)
+    for i = 1, 100, 1 do
+        local data = game:GetService("ReplicatedStorage"):WaitForChild("__ServerBrowser"):InvokeServer(i)
+        if IfTableHaveIndex(data) then
+            LastServersDataPulled = os.time()
+            CachedServers = data
+            return data
         end
-
-        if activeWorkers > 0 then
-            batchDone.Event:Wait()
-        end
-
-        SetText(
-            "Fetching Servers | "
-            .. tostring(scanned)
-            .. "/"
-            .. tostring(maxPages)
-            .. " | Found "
-            .. tostring(
-                (function()
-                    local count = 0
-                    for _ in pairs(merged) do
-                        count += 1
-                    end
-                    return count
-                end)()
-            )
-        )
-
-        task.wait(0.05)
     end
-
-    batchDone:Destroy()
-
-    LastServersDataPulled = os.time()
-    CachedServers = merged
-    return merged
 end
 
 HopServer = function(MaxPlayers, ForcedRegion)
-    MaxPlayers =
-        MaxPlayers
-        or tonumber(getgenv().Settings["Hop Max Players"])
-        or 8
-
+    MaxPlayers = MaxPlayers or 8
     SetText("Fetching Server...")
     local Servers = GetServers()
     local ArrayServers = {}
 
-    for jobId, server in pairs(Servers or {}) do
-        if jobId ~= JobId
-            and type(server) == "table"
-            and tonumber(server.Count)
-            and server.Count <= MaxPlayers
-            and (
-                not ForcedRegion
-                or server.Region == ForcedRegion
-            ) then
-
+    for i, v in next, Servers do
+        if v.Count <= MaxPlayers then
             table.insert(ArrayServers, {
-                JobId = jobId,
-                Players = server.Count,
-                LastUpdate = server.__LastUpdate,
-                Region = server.Region,
+                JobId = i,
+                Players = v.Count,
+                LastUpdate = v.__LastUpdate,
+                Region = v.Region
             })
         end
     end
-
-    table.sort(ArrayServers, function(a, b)
-        if a.Players == b.Players then
-            return tostring(a.JobId) < tostring(b.JobId)
+    SetText(#ArrayServers, 'servers received')
+    local ServerData
+    for i = 1, #ArrayServers do
+        while task.wait(1) do
+            local Index = math.random(1, #ArrayServers)
+            ServerData = ArrayServers[Index]
+            if ServerData then
+                if not ForcedRegion or ServerData.Regoin == ForcedRegion then
+                    SetText("Found Server:", ServerData.JobId, 'Player Count:', ServerData.Players, "Region:", ServerData.Region)
+                    break
+                end
+            end
         end
 
-        return a.Players < b.Players
-    end)
-
-    SetText(
-        "Found "
-        .. tostring(#ArrayServers)
-        .. " candidate servers"
-    )
-
-    if #ArrayServers == 0 then
-        LastServersDataPulled = nil
-        CachedServers = nil
-        task.wait(2)
-        return HopServer(MaxPlayers, ForcedRegion)
+        print('Teleporting to', ServerData.JobId, '...')
+        game:GetService("ReplicatedStorage"):WaitForChild("__ServerBrowser"):InvokeServer('teleport', ServerData.JobId)
     end
-
-    local bestPool = math.min(10, #ArrayServers)
-    local chosen =
-        ArrayServers[math.random(1, bestPool)]
-
-    SetText(
-        "Teleporting | Players: "
-        .. tostring(chosen.Players)
-        .. " | Region: "
-        .. tostring(chosen.Region or "Unknown")
-    )
-
-    print(
-        "Teleporting to",
-        chosen.JobId,
-        "Players:",
-        chosen.Players,
-        "Region:",
-        chosen.Region
-    )
-
-    ReplicatedStorage
-        :WaitForChild("__ServerBrowser")
-        :InvokeServer("teleport", chosen.JobId)
 end
 
 local connection, tween, pathPart, isTweening = nil, nil, nil, false
@@ -858,56 +685,12 @@ hookedNotification = hookfunction(require(ReplicatedStorage.Notification).new, n
     return hookedNotification(...)
 end))
 
--- ============================================================
--- EXACT CHEST METHOD FROM USER SOURCE
--- Y nguyen cach trong FarmBeli:
---   task.delay(2, function() v.CanTouch = false end)
---   Character:SetPrimaryPartCFrame(v.CFrame)
---   PressKeyEvent("Space")
---   repeat cho den khi v.CanTouch = false
--- ============================================================
-local function SoulGuitarExactChestMethod(v, stopCondition)
-    if not v
-        or not v:IsA("BasePart")
-        or not v.Parent
-        or not v.CanTouch then
-        return false
-    end
-
-    repeat
-        task.wait()
-
-        task.delay(2, function()
-            if v and v.Parent then
-                v.CanTouch = false
-            end
-        end)
-
-        if Character
-            and Character:FindFirstChildWhichIsA("Humanoid")
-            and Character:FindFirstChildWhichIsA("Humanoid").Health > 0 then
-
-            Character:SetPrimaryPartCFrame(v.CFrame)
-        end
-
-        PressKeyEvent("Space")
-    until
-        not v
-        or not v.Parent
-        or not v.CanTouch
-        or (stopCondition and stopCondition())
-
-    return
-        not v
-        or not v.Parent
-        or not v.CanTouch
-end
-
 local all = 0
 local fragok = false;
 task.spawn(function()
     while task.wait(0.5) do
         xpcall(function()
+            WriteCompletedCyborg()
             if LocalPlayer.Data.Race.Value ~= "Cyborg" and LocalPlayer.Data.Fragments.Value >= 2500 then COMMF_:InvokeServer("CyborgTrainer", "Buy") end
             CyborgBlockPartUnlocked = readfile(mainfile) or "NaN"
             pcall(function() fireclickdetector(workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector) end)
@@ -964,7 +747,7 @@ task.spawn(function()
                     end
                 else
                     if CheckSea(3) then
-                        writefile(mainfile, "Completed-Cyborg")
+                        writefile(mainfile, "Completed-cyborg")
                         SetText("DONE V3")
                     else SetText("Teleport to Sea 3") task.wait(3) COMMF_:InvokeServer("TravelZou") task.wait(10)
                     end
@@ -1062,20 +845,17 @@ task.spawn(function()
                 if CheckSea(2) then
                     if CheckTool("Fist of Darkness") then
                         EquipWeapon("Fist of Darkness")
-                        fireclickdetector(
-                            workspace.Map.CircleIsland
-                                .RaidSummon.Button.Main.ClickDetector
-                        )
+                        fireclickdetector(workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector)
                     else
-                        local inWindow, uptime, source, timeInfo =
-                            CheckChestTimeWindow()
+                        local inWindow, uptime, uptimeSource, timeInfo = CheckChestTimeWindow()
 
                         if not uptime then
                             SetText(
                                 "Cyborg Chest | Cannot read server uptime\n"
-                                .. tostring(source)
+                                .. tostring(uptimeSource)
                             )
                             task.wait(3)
+                            continue
                         elseif not inWindow then
                             local nextText =
                                 timeInfo
@@ -1083,7 +863,7 @@ task.spawn(function()
                                 or "unknown"
 
                             SetText(
-                                "Cyborg Chest | Outside chest window\n"
+                                "Cyborg Chest | Outside 4h + 2h window\n"
                                 .. "Uptime: "
                                 .. FormatUptime(uptime)
                                 .. " | Next: "
@@ -1092,235 +872,72 @@ task.spawn(function()
                             )
 
                             task.wait(1)
-                            HopServer(
-                                tonumber(
-                                    getgenv().Settings[
-                                        "Hop Max Players"
-                                    ]
-                                ) or 8
-                            )
-                        else
-                            local windowStart =
-                                FormatUptime(timeInfo.Boundary)
-                            local windowEnd =
-                                FormatUptime(timeInfo.WindowEnd)
+                            HopServer(8)
+                            continue
+                        end
 
-                            SetText(
-                                "Soul Guitar Chest | "
-                                .. windowStart
-                                .. "-"
-                                .. windowEnd
-                                .. "\nUptime: "
-                                .. FormatUptime(uptime)
-                            )
-
-                            local chests, c = {}, 0
-
-                            if not Character
-                                or IsDied(Character)
-                                or not HumanoidRootPart then
-                                print("Not found character")
-                                task.wait(3)
-                                return
+                        local chests, c = {}, 0
+                        if not Character or IsDied(Character) then
+                            print("Not found character")
+                            task.wait(3)
+                            return
+                        end
+                        Tween(false)
+                        for _, v in next, CollectionService:GetTagged("_ChestTagged") do
+                            if v and v.CanTouch then
+                                local dist = (v.Position - HumanoidRootPart.Position).Magnitude
+                                table.insert(chests, {obj = v, dist = dist})
                             end
-
-                            Tween(false)
-
-                            for _, chest in next,
-                                CollectionService:GetTagged(
-                                    "_ChestTagged"
-                                ) do
-
-                                if chest
-                                    and chest:IsA("BasePart")
-                                    and chest.Parent
-                                    and chest.CanTouch
-                                    and chest.Name:find("Chest") then
-
-                                    local dist =
-                                        (
-                                            chest.Position
-                                            - HumanoidRootPart.Position
-                                        ).Magnitude
-
-                                    table.insert(chests, {
-                                        obj = chest,
-                                        dist = dist,
-                                    })
-                                end
-                            end
-
-                            table.sort(chests, function(a, b)
-                                return a.dist < b.dist
-                            end)
-
-                            if #chests > 0
-                                and all
-                                    < getgenv().Settings["Max Chests"]
-                                and not CheckTool(
-                                    "Fist of Darkness"
-                                ) then
-
-                                for _, data in next, chests do
-                                    local chest = data.obj
-
-                                    local stillValid, nowUptime =
-                                        CheckChestTimeWindow()
-
-                                    if not stillValid then
-                                        SetText(
-                                            "Chest window ended | Uptime "
-                                            .. FormatUptime(
-                                                nowUptime or 0
-                                            )
-                                            .. "\nHop server..."
-                                        )
-                                        task.wait(1)
-                                        HopServer(
-                                            tonumber(
-                                                getgenv().Settings[
-                                                    "Hop Max Players"
-                                                ]
-                                            ) or 8
-                                        )
-                                        break
-                                    end
-
-                                    if chest
-                                        and chest.Parent
-                                        and chest.CanTouch then
-
-                                        repeat
-                                            task.wait()
-
-                                            SetText(
-                                                "Collect Soul Guitar Chests | Exact Source Method"
-                                                .. "\nWindow: "
-                                                .. windowStart
-                                                .. "-"
-                                                .. windowEnd
-                                                .. "\nCollected: "
-                                                .. tostring(c)
-                                                .. "/"
-                                                .. tostring(all)
-                                                .. "/"
-                                                .. tostring(
-                                                    getgenv().Settings[
-                                                        "Max Chests"
-                                                    ]
-                                                )
-                                            )
-
-                                            SoulGuitarExactChestMethod(
-                                                chest,
-                                                function()
-                                                    local valid =
-                                                        CheckChestTimeWindow()
-
-                                                    return
-                                                        not valid
-                                                        or CheckTool(
-                                                            "Fist of Darkness"
-                                                        )
-                                                        or IsDied(Character)
+                        end
+                        
+                        if #chests > 0 and all < getgenv().Settings["Max Chests"] and not CheckTool("Fist of Darkness") then
+                            table.sort(chests, function(a, b) return a.dist < b.dist end)
+                            for i, t in next, chests do local v = t.obj
+                                if v:IsA("BasePart") and v.Name:find("Chest") then
+                                    if v.CanTouch then
+                                        repeat task.wait()
+                                            SetText("Collect Chests | Collected: " .. c.."/"..all .. "/"..getgenv().Settings["Max Chests"].." Chests")
+                                            TweenChest(v, function()
+                                                return CheckTool("Fist of Darkness") or IsDied(Character)
+                                            end)
+                                            -- Chest VAN con ton tai sau khi da cham = ghost/khong an duoc -> moi ep bo qua
+                                            if v and v.Parent and v.CanTouch then
+                                                task.wait(tonumber(getgenv().Settings["Skip Chest Delay"]) or 1)
+                                                if v and v.Parent and v.CanTouch then
+                                                    v.CanTouch = false
                                                 end
-                                            )
-                                        until
-                                            not chest
-                                            or not chest.Parent
-                                            or not chest.CanTouch
-                                            or CheckTool(
-                                                "Fist of Darkness"
-                                            )
-                                            or IsDied(Character)
-
-                                        if CheckTool(
-                                            "Fist of Darkness"
-                                        ) then
-                                            SetText(
-                                                "Stopped: Fist of Darkness detected"
-                                            )
-                                            break
-                                        elseif CheckMonster(
-                                            "Darkbeard"
-                                        ) then
+                                            end
+                                        until not v.Parent or not v.CanTouch or CheckTool("Fist of Darkness") or IsDied(Character)
+                                        
+                                        if all >= getgenv().Settings["Max Chests"] then 
+                                            SetText("Stopped: Max Chests reached") HopServer(8) break
+                                        elseif CheckTool("Fist of Darkness") then 
+                                            SetText("Stopped: Fist of Darkness detected") break
+                                        elseif CheckMonster("Darkbeard") then 
                                             break
                                         end
-
+                                        
                                         if not IsDied(Character) then
-                                            c += 1
-                                            all += 1
-
-                                            if all
-                                                >= getgenv().Settings[
-                                                    "Max Chests"
-                                                ] then
-
-                                                SetText(
-                                                    "Max Chests reached | Hop"
-                                                )
-                                                HopServer(
-                                                    tonumber(
-                                                        getgenv().Settings[
-                                                            "Hop Max Players"
-                                                        ]
-                                                    ) or 8
-                                                )
-                                                break
-                                            end
-
-                                            if c
-                                                >= getgenv().Settings[
-                                                    "Reset After Collect Chests"
-                                                ]
-                                                and not CheckTool(
-                                                    "Fist of Darkness"
-                                                ) then
-
-                                                local humanoid =
-                                                    Character
-                                                    and Character:
-                                                        FindFirstChildWhichIsA(
-                                                            "Humanoid"
-                                                        )
-
-                                                if humanoid then
-                                                    humanoid:ChangeState(
-                                                        Enum.HumanoidStateType.Dead
-                                                    )
+                                            c += 1 all += 1
+                                            if c >= getgenv().Settings["Reset After Collect Chests"] and not CheckTool("Fist of Darkness") then
+                                                if Character and Character:FindFirstChildWhichIsA("Humanoid") then
+                                                    Character:FindFirstChildWhichIsA("Humanoid"):ChangeState(Enum.HumanoidStateType.Dead)
+                                                    SetText("Collect Chests | Reset: Collected: "..tostring(getgenv().Settings["Reset After Collect Chests"]) .." Chests")
                                                 end
-
-                                                c = 0
-                                                task.wait(1)
+                                                c = 0 task.wait(1)
                                             end
                                         else
                                             break
                                         end
                                     end
-                                end
-                            else
-                                if not CheckTool("Fist of Darkness")
-                                    and not CheckMonster("Darkbeard") then
-
-                                    SetText(
-                                        "No chest found in valid window | Hop"
-                                    )
-
-                                    HopServer(
-                                        tonumber(
-                                            getgenv().Settings[
-                                                "Hop Max Players"
-                                            ]
-                                        ) or 8
-                                    )
+                                    if i % 250 == 0 then task.wait(0.1) end
                                 end
                             end
+                        else
+                            if not CheckTool("Fist of Darkness") and not CheckMonster("Darkbeard") then HopServer(10) end
                         end
                     end
-                else
-                    SetText("Travel to sea 2")
-                    task.wait(3)
-                    COMMF_:InvokeServer("TravelDressrosa")
+                else SetText("Travel to sea 2") task.wait(3) COMMF_:InvokeServer("TravelDressrosa")
                 end
             else
                 if CheckSea(2) then
@@ -1364,8 +981,3 @@ GuiService.ErrorMessageChanged:Connect(newcclosure(function()
         while true do ReplicatedStorage:WaitForChild("__ServerBrowser"):InvokeServer('teleport', JobId) task.wait(5) end
     end
 end))
-print("[CYBORG BASE OK] Soul Guitar chest replacement loaded")
-print("[CYBORG BASE OK] Windows: 04-06, 08-10, 12-14, ...")
-print("[CYBORG BASE OK] Hop max pages:", getgenv().Settings["Hop Max Pages"])
-print("[CYBORG BASE OK] Hop scan batch:", getgenv().Settings["Hop Scan Batch"])
-print("[CYBORG BASE OK] Chest method: Exact uploaded source method")
