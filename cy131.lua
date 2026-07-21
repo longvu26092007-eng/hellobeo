@@ -978,8 +978,7 @@ task.spawn(function()
 
                         if not uptime then
                             SetText(
-                                "Cyborg Chest | Cannot read server uptime
-"
+                                "Cyborg Chest | Cannot read server uptime\n"
                                 .. tostring(source)
                             )
                             task.wait(3)
@@ -990,14 +989,12 @@ task.spawn(function()
                                 or "unknown"
 
                             SetText(
-                                "Cyborg Chest | Outside chest window
-"
+                                "Cyborg Chest | Outside chest window\n"
                                 .. "Uptime: "
                                 .. FormatUptime(uptime)
                                 .. " | Next: "
                                 .. nextText
-                                .. "
-Hop server..."
+                                .. "\nHop server..."
                             )
 
                             task.wait(1)
@@ -1019,8 +1016,7 @@ Hop server..."
                                 .. windowStart
                                 .. "-"
                                 .. windowEnd
-                                .. "
-Uptime: "
+                                .. "\nUptime: "
                                 .. FormatUptime(uptime)
                             )
 
@@ -1083,8 +1079,7 @@ Uptime: "
                                             .. FormatUptime(
                                                 nowUptime or 0
                                             )
-                                            .. "
-Hop server..."
+                                            .. "\nHop server..."
                                         )
                                         task.wait(1)
                                         HopServer(
@@ -1106,13 +1101,11 @@ Hop server..."
 
                                             SetText(
                                                 "Collect Soul Guitar Chests"
-                                                .. "
-Window: "
+                                                .. "\nWindow: "
                                                 .. windowStart
                                                 .. "-"
                                                 .. windowEnd
-                                                .. "
-Collected: "
+                                                .. "\nCollected: "
                                                 .. tostring(c)
                                                 .. "/"
                                                 .. tostring(all)
