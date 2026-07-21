@@ -27,13 +27,16 @@
                   (khong ghi text tinh ban dau, khong quet CoreGui,
                    khong tu ghi UI debugger)
 
-      5) Pickup Transition Probe:
-           - Giu bo nho cac thay doi truoc luc nhat.
-           - Tu kich hoat khi co strange item / Chalice / Fist,
-             Tool lien quan duoc them hoac chest/object lien quan bien mat.
-           - Ghi ro ready/enabled/visible/active true -> false,
-             prompt bi tat, UI bi an, object bi xoa va Value/Attribute doi.
-           - Co nut kich hoat thu cong de bam ngay truoc khi nhat.
+      5) Manual Pickup Debug:
+           - Bam nut thu cong o BAT KY server time nao.
+           - Tu khoi dong debugger, khong can nam trong 03:50-04:20.
+           - Chup snapshot truoc khi nhat.
+           - Theo doi trong 3 phut de du thoi gian di mo chest.
+           - Khi het gio hoac bam dung, so sanh:
+               CHANGED / DISABLED / HIDDEN / REMOVED / ADDED
+               va UNCHANGED de biet bien nao khong doi.
+           - Ghi ro Ready/Enabled/Visible/Active true -> false,
+             Prompt bi tat, UI bi an, object bi xoa va Value/Attribute doi.
 
       6) Log tu chia Part001, Part002...; khong dung vi cham gioi han.
 
@@ -145,9 +148,11 @@ local CONFIG = {
 
     -- Pickup transition probe
     PickupProbeSeconds = USER_CONFIG.PickupProbeSeconds or 20,
+    ManualProbeSeconds = USER_CONFIG.ManualProbeSeconds or 180,
     PickupHistorySeconds = USER_CONFIG.PickupHistorySeconds or 8,
     PickupHistoryMax = USER_CONFIG.PickupHistoryMax or 350,
     PickupPromptDistance = USER_CONFIG.PickupPromptDistance or 250,
+    PickupSnapshotMax = USER_CONFIG.PickupSnapshotMax or 2500,
 
     -- Files/UI
     GuiName = "ServerTimeChestDebugLite_UI",
@@ -182,6 +187,7 @@ local State = {
 local Debug = {
     active = false,
     deep = CONFIG.DeepDefault,
+    manualSession = false,
     boundary = nil,
 
     baseFile = nil,
@@ -213,6 +219,8 @@ local Debug = {
         watched = setmetatable({}, { __mode = "k" }),
         propertyBaseline = setmetatable({}, { __mode = "k" }),
         attributeBaseline = setmetatable({}, { __mode = "k" }),
+        startSnapshot = nil,
+        snapshotCount = 0,
     },
 }
 
@@ -934,6 +942,9 @@ end
 --   PICKUP_REMOVED / PICKUP_BECAME_FALSE / PICKUP_NOT_READY
 -- ============================================================
 local triggerPickupProbe
+local capturePickupSnapshot
+local comparePickupSnapshots
+local finishPickupProbe
 
 local function pickupValue(value)
     if value == nil then
@@ -1132,17 +1143,22 @@ local function flushPickupPreHistory(triggerReason)
     end
 end
 
-triggerPickupProbe = function(reason, details)
+triggerPickupProbe = function(reason, details, durationSeconds)
     if not Debug.active then
         return
     end
+
+    local duration = math.max(
+        1,
+        tonumber(durationSeconds) or CONFIG.PickupProbeSeconds
+    )
 
     local now = os.clock()
 
     if Debug.pickup.active then
         Debug.pickup.untilClock = math.max(
             Debug.pickup.untilClock,
-            now + CONFIG.PickupProbeSeconds
+            now + duration
         )
 
         logEvent(
@@ -1152,7 +1168,7 @@ triggerPickupProbe = function(reason, details)
                 Debug.pickup.id,
                 tostring(reason),
                 tostring(details or ""),
-                tostring(CONFIG.PickupProbeSeconds)
+                tostring(duration)
             ),
             nil,
             true
@@ -1163,8 +1179,17 @@ triggerPickupProbe = function(reason, details)
 
     Debug.pickup.id = Debug.pickup.id + 1
     Debug.pickup.active = true
-    Debug.pickup.untilClock = now + CONFIG.PickupProbeSeconds
+    Debug.pickup.untilClock = now + duration
     Debug.pickup.trigger = tostring(reason or "unknown")
+
+    if capturePickupSnapshot then
+        Debug.pickup.startSnapshot =
+            capturePickupSnapshot("BEFORE_PICKUP")
+        Debug.pickup.snapshotCount =
+            Debug.pickup.startSnapshot
+            and Debug.pickup.startSnapshot.__count
+            or 0
+    end
 
     flushPickupPreHistory(reason)
 
@@ -1175,7 +1200,18 @@ triggerPickupProbe = function(reason, details)
             Debug.pickup.id,
             tostring(reason),
             tostring(details or ""),
-            tostring(CONFIG.PickupProbeSeconds)
+            tostring(duration)
+        ),
+        nil,
+        true
+    )
+
+    logEvent(
+        "PICKUP_SNAPSHOT_BEFORE",
+        string.format(
+            "Probe#%d | captured=%d states",
+            Debug.pickup.id,
+            Debug.pickup.snapshotCount or 0
         ),
         nil,
         true
@@ -1183,7 +1219,7 @@ triggerPickupProbe = function(reason, details)
 
     updateDebugInfo(
         "PICKUP PROBE ACTIVE — "
-            .. tostring(CONFIG.PickupProbeSeconds)
+            .. tostring(duration)
             .. " GIÂY",
         Color3.fromRGB(255, 186, 73)
     )
@@ -1471,6 +1507,399 @@ local function attachPickupTransitionWatchers()
         nil,
         true
     )
+end
+
+-- ============================================================
+-- PICKUP SNAPSHOT / DIFF
+-- Ghi ca bien thay doi va bien khong thay doi.
+-- ============================================================
+local function snapshotAdd(snapshot, key, value)
+    if snapshot.__count >= CONFIG.PickupSnapshotMax then
+        snapshot.__truncated = true
+        return false
+    end
+
+    if snapshot[key] == nil then
+        snapshot.__count = snapshot.__count + 1
+    end
+
+    snapshot[key] = tostring(value)
+    return true
+end
+
+local function snapshotValueBases(snapshot, root, prefix)
+    if not root then
+        return
+    end
+
+    for _, instance in ipairs(root:GetDescendants()) do
+        if instance:IsA("ValueBase") then
+            snapshotAdd(
+                snapshot,
+                prefix .. "|" .. safeFullName(instance) .. "|Value",
+                serialize(instance.Value)
+            )
+        end
+    end
+end
+
+local function snapshotInventory(snapshot)
+    local roots = {
+        LocalPlayer:FindFirstChild("Backpack"),
+        LocalPlayer.Character,
+    }
+
+    for _, root in ipairs(roots) do
+        if root then
+            for _, item in ipairs(root:GetChildren()) do
+                if item:IsA("Tool") then
+                    snapshotAdd(
+                        snapshot,
+                        "TOOL|" .. item.Name,
+                        safeFullName(item)
+                    )
+                end
+            end
+        end
+    end
+end
+
+local function snapshotPlayerGui(snapshot)
+    local playerGui =
+        LocalPlayer:FindFirstChildOfClass("PlayerGui")
+
+    if not playerGui then
+        return
+    end
+
+    for _, instance in ipairs(playerGui:GetDescendants()) do
+        if instance:IsA("TextLabel")
+            or instance:IsA("TextButton")
+            or instance:IsA("TextBox") then
+            local path = safeFullName(instance)
+
+            if not string.find(path, CONFIG.GuiName, 1, true) then
+                local text = trimText(instance.Text)
+
+                if Debug.deep
+                    or isRelevantText(text)
+                    or isSpecialText(text)
+                    or isStatusPath(path) then
+                    snapshotAdd(
+                        snapshot,
+                        "GUI|" .. path .. "|Text",
+                        string.format("%q", text)
+                    )
+
+                    snapshotAdd(
+                        snapshot,
+                        "GUI|" .. path .. "|Visible",
+                        tostring(instance.Visible)
+                    )
+                end
+            end
+        end
+    end
+end
+
+local function snapshotWorldCandidates(snapshot, root)
+    if not root then
+        return
+    end
+
+    local descendants = root:GetDescendants()
+
+    for index, instance in ipairs(descendants) do
+        if snapshot.__count >= CONFIG.PickupSnapshotMax then
+            snapshot.__truncated = true
+            break
+        end
+
+        local path = safeFullName(instance)
+        local relevantPath = isRelevantText(path)
+            or isSpecialText(path)
+            or isStatusPath(path)
+
+        if instance:IsA("ProximityPrompt")
+            and (relevantPath or instanceNearPlayer(instance)) then
+            snapshotAdd(
+                snapshot,
+                "PROMPT|" .. path .. "|Enabled",
+                tostring(instance.Enabled)
+            )
+            snapshotAdd(
+                snapshot,
+                "PROMPT|" .. path .. "|ActionText",
+                string.format("%q", instance.ActionText)
+            )
+            snapshotAdd(
+                snapshot,
+                "PROMPT|" .. path .. "|ObjectText",
+                string.format("%q", instance.ObjectText)
+            )
+        end
+
+        if instance:IsA("ValueBase")
+            and (
+                relevantPath
+                or isPickupStateName(instance.Name)
+            ) then
+            snapshotAdd(
+                snapshot,
+                "VALUE|" .. path,
+                serialize(instance.Value)
+            )
+        end
+
+        local ok, attributes = pcall(function()
+            return instance:GetAttributes()
+        end)
+
+        if ok and type(attributes) == "table" then
+            for attributeName, value in pairs(attributes) do
+                if relevantPath
+                    or isRelevantAttribute(attributeName)
+                    or isPickupStateName(attributeName) then
+                    snapshotAdd(
+                        snapshot,
+                        "ATTR|" .. path .. "|@" .. attributeName,
+                        serialize(value)
+                    )
+                end
+            end
+        end
+
+        if relevantPath and instance:IsA("GuiObject") then
+            snapshotAdd(
+                snapshot,
+                "GUIOBJ|" .. path .. "|Visible",
+                tostring(instance.Visible)
+            )
+            snapshotAdd(
+                snapshot,
+                "GUIOBJ|" .. path .. "|Active",
+                tostring(instance.Active)
+            )
+        end
+
+        if relevantPath and instance:IsA("BasePart") then
+            snapshotAdd(
+                snapshot,
+                "PART|" .. path .. "|Transparency",
+                tostring(instance.Transparency)
+            )
+            snapshotAdd(
+                snapshot,
+                "PART|" .. path .. "|CanTouch",
+                tostring(instance.CanTouch)
+            )
+            snapshotAdd(
+                snapshot,
+                "PART|" .. path .. "|CanQuery",
+                tostring(instance.CanQuery)
+            )
+        end
+
+        if index % 1200 == 0 then
+            task.wait()
+        end
+    end
+end
+
+capturePickupSnapshot = function(reason)
+    local snapshot = {
+        __count = 0,
+        __reason = tostring(reason or "unknown"),
+        __uptime = State.uptime,
+        __clock = os.clock(),
+        __truncated = false,
+    }
+
+    snapshotValueBases(
+        snapshot,
+        LocalPlayer:FindFirstChild("Data"),
+        "PLAYER_DATA"
+    )
+
+    snapshotValueBases(
+        snapshot,
+        LocalPlayer:FindFirstChild("leaderstats"),
+        "LEADERSTATS"
+    )
+
+    snapshotInventory(snapshot)
+    snapshotPlayerGui(snapshot)
+    snapshotWorldCandidates(snapshot, Workspace)
+    snapshotWorldCandidates(snapshot, ReplicatedStorage)
+
+    return snapshot
+end
+
+comparePickupSnapshots = function(before, after, probeId)
+    before = before or { __count = 0 }
+    after = after or { __count = 0 }
+
+    local changed = 0
+    local removed = 0
+    local added = 0
+    local unchanged = 0
+
+    local keys = {}
+
+    for key in pairs(before) do
+        if type(key) == "string"
+            and not key:match("^__") then
+            keys[key] = true
+        end
+    end
+
+    for key in pairs(after) do
+        if type(key) == "string"
+            and not key:match("^__") then
+            keys[key] = true
+        end
+    end
+
+    local ordered = {}
+
+    for key in pairs(keys) do
+        table.insert(ordered, key)
+    end
+
+    table.sort(ordered)
+
+    logEvent(
+        "PICKUP_DIFF_BEGIN",
+        string.format(
+            "Probe#%d | before=%d | after=%d | beforeTruncated=%s | afterTruncated=%s",
+            probeId,
+            tonumber(before.__count) or 0,
+            tonumber(after.__count) or 0,
+            tostring(before.__truncated == true),
+            tostring(after.__truncated == true)
+        ),
+        nil,
+        true
+    )
+
+    for _, key in ipairs(ordered) do
+        local oldValue = before[key]
+        local newValue = after[key]
+
+        if oldValue == nil and newValue ~= nil then
+            added = added + 1
+
+            logEvent(
+                "PICKUP_DIFF_ADDED",
+                key .. " | nil -> " .. tostring(newValue),
+                "diff-added|" .. tostring(probeId) .. "|" .. key
+            )
+        elseif oldValue ~= nil and newValue == nil then
+            removed = removed + 1
+
+            logEvent(
+                "PICKUP_DIFF_REMOVED",
+                key .. " | " .. tostring(oldValue) .. " -> nil",
+                "diff-removed|" .. tostring(probeId) .. "|" .. key,
+                true
+            )
+        elseif oldValue ~= newValue then
+            changed = changed + 1
+
+            local changeType = classifyPickupChange(
+                key,
+                oldValue,
+                newValue
+            )
+
+            local category = changeType == "CHANGED"
+                and "PICKUP_DIFF_CHANGED"
+                or ("PICKUP_DIFF_" .. changeType)
+
+            logEvent(
+                category,
+                key
+                    .. " | "
+                    .. tostring(oldValue)
+                    .. " -> "
+                    .. tostring(newValue)
+                    .. " | subtype="
+                    .. tostring(changeType),
+                "diff-changed|" .. tostring(probeId) .. "|" .. key,
+                changeType ~= "CHANGED"
+            )
+        else
+            unchanged = unchanged + 1
+
+            logEvent(
+                "PICKUP_DIFF_UNCHANGED",
+                key .. " | stayed " .. tostring(oldValue),
+                "diff-unchanged|" .. tostring(probeId) .. "|" .. key
+            )
+        end
+    end
+
+    logEvent(
+        "PICKUP_DIFF_SUMMARY",
+        string.format(
+            "Probe#%d | changed=%d | removed=%d | added=%d | unchanged=%d",
+            probeId,
+            changed,
+            removed,
+            added,
+            unchanged
+        ),
+        nil,
+        true
+    )
+
+    return {
+        changed = changed,
+        removed = removed,
+        added = added,
+        unchanged = unchanged,
+    }
+end
+
+finishPickupProbe = function(reason)
+    if not Debug.active or not Debug.pickup.active then
+        return nil
+    end
+
+    local probeId = Debug.pickup.id
+    local after = capturePickupSnapshot("AFTER_PICKUP")
+    local summary = comparePickupSnapshots(
+        Debug.pickup.startSnapshot,
+        after,
+        probeId
+    )
+
+    logEvent(
+        "PICKUP_PROBE_STOP",
+        string.format(
+            "Probe#%d | reason=%s | trigger=%s | finalUptime=%s",
+            probeId,
+            tostring(reason),
+            tostring(Debug.pickup.trigger),
+            formatDuration(State.uptime)
+        ),
+        nil,
+        true
+    )
+
+    Debug.pickup.active = false
+    Debug.pickup.untilClock = 0
+    Debug.pickup.startSnapshot = nil
+    Debug.pickup.snapshotCount = 0
+
+    if UI.ProbeStatus then
+        UI.ProbeStatus.Text =
+            "PICKUP PROBE: HOÀN TẤT — XEM FILE LOG"
+        UI.ProbeStatus.TextColor3 =
+            Color3.fromRGB(107, 221, 159)
+    end
+
+    return summary
 end
 
 -- ============================================================
@@ -2145,12 +2574,13 @@ local function buildBaseFile(boundary)
     )
 end
 
-local function startDebug(boundary)
+local function startDebug(boundary, mode)
     if Debug.active or not CONFIG.DebugEnabled then
-        return
+        return false
     end
 
     Debug.active = true
+    Debug.manualSession = mode == "manual"
     Debug.boundary = boundary
     Debug.baseFile = buildBaseFile(boundary)
     Debug.part = 1
@@ -2168,12 +2598,19 @@ local function startDebug(boundary)
             .. " -> "
             .. formatDuration(boundary + AFTER_SECONDS),
         "AutoHop: " .. tostring(HOP_ENABLED),
+        "Mode: " .. (
+            Debug.manualSession
+                and "MANUAL"
+                or "TIME_WINDOW"
+        ),
         "DeepAtStart: " .. tostring(Debug.deep),
         "PartLines: " .. tostring(CONFIG.PartLines),
         "PickupHistorySeconds: "
             .. tostring(CONFIG.PickupHistorySeconds),
         "PickupProbeSeconds: "
             .. tostring(CONFIG.PickupProbeSeconds),
+        "ManualProbeSeconds: "
+            .. tostring(CONFIG.ManualProbeSeconds),
         "PickupPromptDistance: "
             .. tostring(CONFIG.PickupPromptDistance),
         string.rep("=", 88),
@@ -2193,6 +2630,8 @@ local function startDebug(boundary)
     Debug.pickup.watched = setmetatable({}, { __mode = "k" })
     Debug.pickup.propertyBaseline = setmetatable({}, { __mode = "k" })
     Debug.pickup.attributeBaseline = setmetatable({}, { __mode = "k" })
+    Debug.pickup.startSnapshot = nil
+    Debug.pickup.snapshotCount = 0
 
     attachPlayerGuiWatchers()
     attachPlayerDataWatchers()
@@ -2212,15 +2651,32 @@ local function startDebug(boundary)
         true
     )
 
+    if UI.ProbeButton and Debug.manualSession then
+        UI.ProbeButton.Text =
+            "DỪNG DEBUG THỦ CÔNG + SO SÁNH"
+        UI.ProbeButton.BackgroundColor3 =
+            Color3.fromRGB(139, 55, 55)
+    end
+
     updateDebugInfo(
-        "DEBUG ĐÃ BẮT ĐẦU",
+        Debug.manualSession
+            and "MANUAL DEBUG ĐÃ BẮT ĐẦU"
+            or "DEBUG ĐÃ BẮT ĐẦU",
         Color3.fromRGB(107, 221, 159)
     )
+
+    return true
 end
 
 local function stopDebug(reason)
     if not Debug.active then
         return
+    end
+
+    if Debug.pickup.active and finishPickupProbe then
+        finishPickupProbe(
+            "Debug stopped: " .. tostring(reason)
+        )
     end
 
     logEvent(
@@ -2238,7 +2694,16 @@ local function stopDebug(reason)
 
     Debug.pickup.active = false
     Debug.pickup.untilClock = 0
+    Debug.pickup.startSnapshot = nil
+    Debug.manualSession = false
     Debug.active = false
+
+    if UI.ProbeButton then
+        UI.ProbeButton.Text =
+            "BẬT DEBUG THỦ CÔNG + CHỤP TRẠNG THÁI"
+        UI.ProbeButton.BackgroundColor3 =
+            Color3.fromRGB(137, 83, 42)
+    end
 
     updateDebugInfo(
         "DEBUG ĐÃ DỪNG — " .. tostring(reason),
@@ -2920,7 +3385,7 @@ UI.ProbeButton.Position = UDim2.fromOffset(0, 319)
 UI.ProbeButton.BackgroundColor3 = Color3.fromRGB(137, 83, 42)
 UI.ProbeButton.BorderSizePixel = 0
 UI.ProbeButton.Font = Enum.Font.GothamBold
-UI.ProbeButton.Text = "KÍCH HOẠT PICKUP PROBE THỦ CÔNG"
+UI.ProbeButton.Text = "BẬT DEBUG THỦ CÔNG + CHỤP TRẠNG THÁI"
 UI.ProbeButton.TextColor3 = Color3.fromRGB(255, 244, 230)
 UI.ProbeButton.TextSize = 11
 UI.ProbeButton.Parent = Content
@@ -3037,17 +3502,73 @@ UI.DeepButton.MouseButton1Click:Connect(function()
 end)
 
 UI.ProbeButton.MouseButton1Click:Connect(function()
-    if not Debug.active then
+    -- Lan bam thu hai: dung va so sanh ngay.
+    if Debug.active and Debug.manualSession then
+        stopDebug("Người dùng dừng manual debug")
+        notify(
+            "Manual Debug",
+            "Đã dừng và ghi so sánh trước/sau vào file."
+        )
+        return
+    end
+
+    -- Neu debug cua cua so thoi gian dang chay,
+    -- chi kich hoat probe thu cong dai hon.
+    if Debug.active then
+        triggerPickupProbe(
+            "Manual button trong time-window debug",
+            "User armed probe before pickup",
+            CONFIG.ManualProbeSeconds
+        )
+
         notify(
             "Pickup Probe",
-            "Debug chưa hoạt động vì server chưa nằm trong cửa sổ."
+            "Đã chụp trạng thái trước. Hãy nhặt chest trong 3 phút."
+        )
+        return
+    end
+
+    if not State.startedAt then
+        notify(
+            "Manual Debug",
+            "Server time chưa đọc xong, chờ vài giây rồi bấm lại."
+        )
+        return
+    end
+
+    -- Manual debug luon bat Deep de ghi moi Text thay doi.
+    setDeepMode(true)
+
+    local window = evaluateWindow(State.uptime)
+    local started = startDebug(
+        window.boundary,
+        "manual"
+    )
+
+    if not started then
+        notify(
+            "Manual Debug",
+            "Không thể khởi động debugger."
         )
         return
     end
 
     triggerPickupProbe(
-        "Manual button",
-        "User armed probe before/after pickup"
+        "Manual debug button",
+        "Baseline captured before pickup",
+        CONFIG.ManualProbeSeconds
+    )
+
+    if UI.Status then
+        UI.Status.Text =
+            "MANUAL DEBUG ACTIVE — HÃY NHẶT CHEST"
+        UI.Status.TextColor3 =
+            Color3.fromRGB(107, 221, 159)
+    end
+
+    notify(
+        "Manual Debug",
+        "Đã bật. Hãy nhặt chest; script sẽ ghi biến đổi và biến không đổi."
     )
 end)
 
@@ -3153,7 +3674,8 @@ task.spawn(function()
 
                     releaseHold()
 
-                    if Debug.active then
+                    if Debug.active
+                        and not Debug.manualSession then
                         stopDebug("Ra khỏi cửa sổ")
                     end
                 end
@@ -3163,7 +3685,12 @@ task.spawn(function()
                     .. formatDuration(window.untilStart)
                     .. " đến cửa sổ gần nhất"
 
-                if HOP_ENABLED and not State.hopping then
+                if Debug.active and Debug.manualSession then
+                    UI.Status.Text =
+                        "MANUAL DEBUG ACTIVE — KHÔNG HOP"
+                    UI.Status.TextColor3 =
+                        Color3.fromRGB(107, 221, 159)
+                elseif HOP_ENABLED and not State.hopping then
                     UI.Status.Text =
                         "SAI CỬA SỔ — ĐANG TÌM SERVER"
                     UI.Status.TextColor3 =
@@ -3183,9 +3710,13 @@ task.spawn(function()
 
             if Debug.active then
                 updateDebugInfo(
-                    Debug.deep
-                        and "DEBUG ACTIVE — DEEP ON"
-                        or "DEBUG ACTIVE — FILTERED",
+                    Debug.manualSession
+                        and "MANUAL DEBUG ACTIVE — ĐANG THEO DÕI"
+                        or (
+                            Debug.deep
+                                and "DEBUG ACTIVE — DEEP ON"
+                                or "DEBUG ACTIVE — FILTERED"
+                        ),
                     Debug.deep
                         and Color3.fromRGB(107, 221, 159)
                         or Color3.fromRGB(129, 175, 224)
@@ -3221,26 +3752,22 @@ task.spawn(function()
                 end
 
                 if remaining <= 0 then
-                    logEvent(
-                        "PICKUP_PROBE_STOP",
-                        string.format(
-                            "Probe#%d | trigger=%s | finalUptime=%s",
-                            Debug.pickup.id,
-                            Debug.pickup.trigger,
-                            formatDuration(State.uptime)
-                        ),
-                        nil,
-                        true
-                    )
+                    if finishPickupProbe then
+                        local summary =
+                            finishPickupProbe("Hết thời gian theo dõi")
 
-                    Debug.pickup.active = false
-                    Debug.pickup.untilClock = 0
-
-                    if UI.ProbeStatus then
-                        UI.ProbeStatus.Text =
-                            "PICKUP PROBE: ARMED — AUTO"
-                        UI.ProbeStatus.TextColor3 =
-                            Color3.fromRGB(255, 186, 73)
+                        if summary then
+                            notify(
+                                "Pickup Diff hoàn tất",
+                                string.format(
+                                    "Đổi: %d | Xóa: %d | Thêm: %d | Không đổi: %d",
+                                    summary.changed,
+                                    summary.removed,
+                                    summary.added,
+                                    summary.unchanged
+                                )
+                            )
+                        end
                     end
                 end
             elseif UI.ProbeStatus then
@@ -3252,7 +3779,7 @@ task.spawn(function()
             end
         elseif UI.ProbeStatus then
             UI.ProbeStatus.Text =
-                "PICKUP PROBE: CHỜ DEBUG BẮT ĐẦU"
+                "PICKUP PROBE: SẴN SÀNG — BẤM NÚT THỦ CÔNG"
             UI.ProbeStatus.TextColor3 =
                 Color3.fromRGB(143, 158, 178)
         end
@@ -3292,5 +3819,11 @@ print(
     CONFIG.PickupHistorySeconds,
     "seconds | After trigger:",
     CONFIG.PickupProbeSeconds,
+    "seconds"
+)
+
+print(
+    "[MANUAL DEBUG] Button works outside time window | duration:",
+    CONFIG.ManualProbeSeconds,
     "seconds"
 )
