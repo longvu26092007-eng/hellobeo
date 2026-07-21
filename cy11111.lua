@@ -1,7 +1,7 @@
 getgenv().Settings = {
-    ["Max Chests"] = 50;
+    ["Max Chests"] = 20;
     ["Skip Chest Delay"] = 1;
-    ["Reset After Collect Chests"] = 7;
+    ["Reset After Collect Chests"] = 15;
     ["Katakuri Progress"] = 100;
     ["Fragments"] = 1000;
     ["Black Screen"] = false;
@@ -13,12 +13,9 @@ getgenv().Settings = {
     ["Chest Server Grace"] = 2 * 60 * 60;
 
     -- Hop
-    ["Hop Max Pages"] = 500;
-    ["Hop Scan Batch"] = 50; -- quét 50 page/server mỗi đợt
+    ["Hop Max Pages"] = 200;
+    ["Hop Scan Batch"] = 150; -- quét 50 page/server mỗi đợt
     ["Hop Max Players"] = 8;
-
-    -- Soul Guitar Instance chest bypass
-    ["Chest Instance Skip Delay"] = 2;
 }
 
 repeat task.wait(0.5) until game:IsLoaded() and game.Players.LocalPlayer and game.Players.LocalPlayer:FindFirstChildWhichIsA("PlayerGui")
@@ -862,115 +859,48 @@ hookedNotification = hookfunction(require(ReplicatedStorage.Notification).new, n
 end))
 
 -- ============================================================
--- SOUL GUITAR INSTANCE CHEST BYPASS
--- Dung dung cach cua source Soul Guitar:
---   Character:SetPrimaryPartCFrame(chest.CFrame)
---   sau 2 giay neu chest van CanTouch thi bo qua local instance
---   ket hop Jump de game nhan va cham chest.
--- KHONG dung TweenChest / firetouchinterest cho nhanh chest nay.
+-- EXACT CHEST METHOD FROM USER SOURCE
+-- Y nguyen cach trong FarmBeli:
+--   task.delay(2, function() v.CanTouch = false end)
+--   Character:SetPrimaryPartCFrame(v.CFrame)
+--   PressKeyEvent("Space")
+--   repeat cho den khi v.CanTouch = false
 -- ============================================================
-local ChestBypassTokens = setmetatable({}, {__mode = "k"})
-
-local function SoulGuitarInstanceChestBypass(chest, stopCondition)
-    if not chest
-        or not chest:IsA("BasePart")
-        or not chest.Parent
-        or not chest.CanTouch then
+local function SoulGuitarExactChestMethod(v, stopCondition)
+    if not v
+        or not v:IsA("BasePart")
+        or not v.Parent
+        or not v.CanTouch then
         return false
     end
-
-    if not Character
-        or not Character.Parent
-        or IsDied(Character)
-        or not HumanoidRootPart then
-        return false
-    end
-
-    local humanoid =
-        Character:FindFirstChildWhichIsA("Humanoid")
-
-    if not humanoid or humanoid.Health <= 0 then
-        return false
-    end
-
-    Tween(false)
-
-    local token = {}
-    ChestBypassTokens[chest] = token
-
-    local skipDelay =
-        tonumber(
-            getgenv().Settings[
-                "Chest Instance Skip Delay"
-            ]
-        ) or 2
-
-    task.delay(skipDelay, function()
-        if ChestBypassTokens[chest] ~= token then
-            return
-        end
-
-        if chest and chest.Parent and chest.CanTouch then
-            -- Dung y logic source Soul Guitar:
-            -- local-only disable de bo qua chest ghost.
-            pcall(function()
-                chest.CanTouch = false
-            end)
-        end
-    end)
 
     repeat
         task.wait()
 
-        if stopCondition and stopCondition() then
-            break
+        task.delay(2, function()
+            if v and v.Parent then
+                v.CanTouch = false
+            end
+        end)
+
+        if Character
+            and Character:FindFirstChildWhichIsA("Humanoid")
+            and Character:FindFirstChildWhichIsA("Humanoid").Health > 0 then
+
+            Character:SetPrimaryPartCFrame(v.CFrame)
         end
 
-        if not Character
-            or not Character.Parent
-            or IsDied(Character) then
-            break
-        end
-
-        humanoid =
-            Character:FindFirstChildWhichIsA("Humanoid")
-
-        if not humanoid or humanoid.Health <= 0 then
-            break
-        end
-
-        if chest and chest.Parent and chest.CanTouch then
-            pcall(function()
-                Character:SetPrimaryPartCFrame(chest.CFrame)
-            end)
-
-            pcall(function()
-                local state = humanoid:GetState()
-
-                if humanoid.FloorMaterial ~= Enum.Material.Air
-                    or not table.find(
-                        {
-                            Enum.HumanoidStateType.Jumping,
-                            Enum.HumanoidStateType.Dead,
-                        },
-                        state
-                    ) then
-                    humanoid:ChangeState(
-                        Enum.HumanoidStateType.Jumping
-                    )
-                end
-            end)
-        end
+        PressKeyEvent("Space")
     until
-        not chest
-        or not chest.Parent
-        or not chest.CanTouch
+        not v
+        or not v.Parent
+        or not v.CanTouch
+        or (stopCondition and stopCondition())
 
-    ChestBypassTokens[chest] = nil
-
-    return not chest
-        or not chest.Parent
-        or not chest.CanTouch
+    return
+        not v
+        or not v.Parent
+        or not v.CanTouch
 end
 
 local all = 0
@@ -1264,7 +1194,7 @@ task.spawn(function()
                                             task.wait()
 
                                             SetText(
-                                                "Collect Soul Guitar Chests | Instance Bypass"
+                                                "Collect Soul Guitar Chests | Exact Source Method"
                                                 .. "\nWindow: "
                                                 .. windowStart
                                                 .. "-"
@@ -1281,7 +1211,7 @@ task.spawn(function()
                                                 )
                                             )
 
-                                            SoulGuitarInstanceChestBypass(
+                                            SoulGuitarExactChestMethod(
                                                 chest,
                                                 function()
                                                     local valid =
@@ -1438,4 +1368,4 @@ print("[CYBORG BASE OK] Soul Guitar chest replacement loaded")
 print("[CYBORG BASE OK] Windows: 04-06, 08-10, 12-14, ...")
 print("[CYBORG BASE OK] Hop max pages:", getgenv().Settings["Hop Max Pages"])
 print("[CYBORG BASE OK] Hop scan batch:", getgenv().Settings["Hop Scan Batch"])
-print("[CYBORG BASE OK] Chest method: Soul Guitar Instance Bypass")
+print("[CYBORG BASE OK] Chest method: Exact uploaded source method")
