@@ -6,11 +6,14 @@
           Workspace._WorldOrigin.Locations.<Location>.@TimeIn
           Workspace:GetServerTimeNow() - TimeIn
 
-      - Giu server neu uptime nam trong 5 phut truoc moi moc 4 gio:
-          03:55:00 -> 04:00:00
-          07:55:00 -> 08:00:00
-          11:55:00 -> 12:00:00
+      - Giu server trong cua so 10 phut truoc va 20 phut sau moi moc 4 gio:
+          03:50:00 -> 04:20:00
+          07:50:00 -> 08:20:00
+          11:50:00 -> 12:20:00
           ...
+
+      - Khi qua cuoi cua so (VD: sau 04:20:00):
+          Tu dong bo giu nhan vat va hop tim server khac.
 
       - Neu khong nam trong cua so:
           Tim server it nguoi va hop nhanh bang __ServerBrowser.
@@ -63,11 +66,11 @@ local USER_CONFIG = getgenv().ServerTimeHunterConfig
 local CONFIG = {
     -- Cua so thoi gian
     PeriodHours          = USER_CONFIG.PeriodHours or 4,
-    WindowMinutes        = USER_CONFIG.WindowMinutes or 5,
+    WindowMinutes        = USER_CONFIG.WindowMinutes or 10,
 
-    -- 0 = chi chap nhan truoc dung moc.
-    -- VD dat 10 se chap nhan them 10 giay sau 04:00:00, 08:00:00...
-    AfterBoundaryGrace   = USER_CONFIG.AfterBoundaryGrace or 0,
+    -- So giay khong hop sau moi moc 4 gio.
+    -- Mac dinh 20 phut: 04:00 -> 04:20, 08:00 -> 08:20...
+    AfterBoundaryGrace   = USER_CONFIG.AfterBoundaryGrace or (20 * 60),
 
     -- Dung im khi tim dung server
     HoldCharacter        = USER_CONFIG.HoldCharacter ~= false,
@@ -211,38 +214,45 @@ local function evaluateWindow(uptime)
     local remainder = uptime - completedPeriods * PERIOD_SECONDS
 
     local nextBoundary = (completedPeriods + 1) * PERIOD_SECONDS
-    local windowStart = nextBoundary - WINDOW_SECONDS
 
     local inPreWindow =
         remainder >= (PERIOD_SECONDS - WINDOW_SECONDS)
         and remainder < PERIOD_SECONDS
 
-    local inGrace = false
+    local inPostWindow = false
     if CONFIG.AfterBoundaryGrace > 0 and uptime >= PERIOD_SECONDS then
-        inGrace = remainder <= CONFIG.AfterBoundaryGrace
+        inPostWindow = remainder <= CONFIG.AfterBoundaryGrace
     end
 
-    local matched = inPreWindow or inGrace
+    local matched = inPreWindow or inPostWindow
 
     local targetBoundary
-    if inGrace then
+    if inPostWindow then
         targetBoundary = completedPeriods * PERIOD_SECONDS
     else
         targetBoundary = nextBoundary
     end
 
     local targetStart = targetBoundary - WINDOW_SECONDS
+    local targetEnd = targetBoundary + CONFIG.AfterBoundaryGrace
+
     local untilWindow = math.max(0, targetStart - uptime)
     local untilBoundary = math.max(0, targetBoundary - uptime)
+    local untilWindowEnd = math.max(0, targetEnd - uptime)
 
     return {
         matched = matched,
         remainder = remainder,
         targetBoundary = targetBoundary,
         targetStart = targetStart,
+        targetEnd = targetEnd,
         untilWindow = untilWindow,
         untilBoundary = untilBoundary,
-        inGrace = inGrace,
+        untilWindowEnd = untilWindowEnd,
+        inPreWindow = inPreWindow,
+        inPostWindow = inPostWindow,
+        -- Giu alias cu de khong pha code/debug neu co tham chieu.
+        inGrace = inPostWindow,
     }
 end
 
@@ -1593,7 +1603,7 @@ WindowInfo.Size = UDim2.new(1, 0, 0, 38)
 WindowInfo.Position = UDim2.fromOffset(0, 72)
 WindowInfo.BackgroundTransparency = 1
 WindowInfo.Font = Enum.Font.Gotham
-WindowInfo.Text = "Cửa sổ mục tiêu: --:--:-- → --:--:--"
+WindowInfo.Text = "Không hop: --:--:-- → --:--:--"
 WindowInfo.TextColor3 = Color3.fromRGB(177, 188, 202)
 WindowInfo.TextSize = 12
 WindowInfo.TextXAlignment = Enum.TextXAlignment.Left
@@ -2139,8 +2149,9 @@ task.spawn(function()
 
     Timer.Text = "Server Timer: " .. formatDuration(State.uptime)
     WindowInfo.Text = string.format(
-        "Cửa sổ mục tiêu: %s → %s (mỗi %d giờ)",
+        "Không hop: %s → %s (mốc %s, mỗi %d giờ)",
         formatClock(window.targetStart),
+        formatClock(window.targetEnd),
         formatClock(window.targetBoundary),
         CONFIG.PeriodHours
     )
@@ -2181,7 +2192,7 @@ task.spawn(function()
                     .. " không thuộc cửa sổ "
                     .. formatClock(window.targetStart)
                     .. "-"
-                    .. formatClock(window.targetBoundary)
+                    .. formatClock(window.targetEnd)
             )
         end
     end
@@ -2202,19 +2213,39 @@ task.spawn(function()
                 Timer.Text = "Server Timer: " .. formatDuration(State.uptime)
 
                 WindowInfo.Text = string.format(
-                    "Cửa sổ mục tiêu: %s → %s (mỗi %d giờ)",
+                    "Không hop: %s → %s (mốc %s, mỗi %d giờ)",
                     formatClock(window.targetStart),
+                    formatClock(window.targetEnd),
                     formatClock(window.targetBoundary),
                     CONFIG.PeriodHours
                 )
 
                 if State.matched then
-                    Countdown.Text =
-                        "Đang giữ server | Qua mốc sau: "
-                        .. formatDuration(window.untilBoundary)
+                    if window.matched then
+                        Countdown.Text =
+                            "Đang giữ server | Còn "
+                            .. formatDuration(window.untilWindowEnd)
+                            .. " đến hết cửa sổ"
 
-                    if CONFIG.HoldCharacter then
-                        applyHold()
+                        if CONFIG.HoldCharacter then
+                            applyHold()
+                        end
+                    elseif not State.hopping then
+                        -- Da qua moc VD 04:20 / 08:20: bo giu va hop tiep.
+                        State.matched = false
+                        getgenv().ServerTimeTargetFound = false
+                        releaseHold()
+
+                        Status.Text = "ĐÃ HẾT CỬA SỔ — CHUẨN BỊ HOP"
+                        Status.TextColor3 = Color3.fromRGB(247, 198, 89)
+                        Countdown.Text = "Đã qua cuối cửa sổ, đang tìm server khác..."
+
+                        task.spawn(function()
+                            HopServer(
+                                "Đã qua cuối cửa sổ không-hop tại "
+                                    .. formatClock(window.targetEnd)
+                            )
+                        end)
                     end
                 elseif not State.hopping then
                     Countdown.Text =
@@ -2301,9 +2332,11 @@ end)
 print("[SERVER TIME HUNTER] Started")
 print("[SERVER TIME HUNTER] JobId:", JobId)
 print(
-    "[SERVER TIME HUNTER] Target windows:",
+    "[SERVER TIME HUNTER] No-hop windows:",
     CONFIG.WindowMinutes,
-    "minutes before every",
+    "minutes before and",
+    math.floor(CONFIG.AfterBoundaryGrace / 60),
+    "minutes after every",
     CONFIG.PeriodHours,
     "hours"
 )
