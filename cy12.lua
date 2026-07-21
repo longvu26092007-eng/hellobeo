@@ -51,7 +51,7 @@ ENV.Settings = {
 
     -- Hop server cai tien.
     ["Hop Max Pages"] = 500;
-    ["Hop Workers"] = 15;
+    ["Hop Workers"] = 10;
     ["Hop Timeout"] = 15;
     ["Hop Candidate Target"] = 60;
     ["Hop Best Pool"] = 10;
@@ -483,7 +483,7 @@ local function DetectServerStartTime()
 
                     if type(otherValue) == "number"
                         and math.floor(otherValue + 0.5) == rounded then
-                        count += 1
+                        count = count + 1
                     end
                 end
 
@@ -511,8 +511,8 @@ local function DetectServerStartTime()
                 Example = location.Name,
             }
 
-            groups[rounded].Count += 1
-            groups[rounded].Total += value
+            groups[rounded].Count = groups[rounded].Count + 1
+            groups[rounded].Total = groups[rounded].Total + value
         end
     end
 
@@ -702,7 +702,7 @@ if not SafeIsFile(mainfile) then
     SafeWriteFile(mainfile, "NaN")
 end
 BootStage("state-file-ready")
-function CheckSea(v: number) return v == tonumber(workspace:GetAttribute("MAP"):match("%d+")) end
+function CheckSea(v) return v == tonumber(workspace:GetAttribute("MAP"):match("%d+")) end
 
 local canPress = true
 PressKeyEvent = (function(k, d)
@@ -994,7 +994,7 @@ function GetServers(MaxPlayers, ForcedRegion)
             while not stop
                 and os.clock() < deadline do
                 local index = nextIndex
-                nextIndex += 1
+                nextIndex = nextIndex + 1
 
                 local page = pages[index]
                 if not page then
@@ -1005,7 +1005,7 @@ function GetServers(MaxPlayers, ForcedRegion)
                     return ServerBrowser:InvokeServer(page)
                 end)
 
-                pagesScanned += 1
+                pagesScanned = pagesScanned + 1
 
                 if ok and type(data) == "table" then
                     for id, serverData in pairs(data) do
@@ -1014,7 +1014,7 @@ function GetServers(MaxPlayers, ForcedRegion)
                 end
             end
 
-            workersDone += 1
+            workersDone = workersDone + 1
         end)
     end
 
@@ -1187,7 +1187,7 @@ TeleportService.TeleportInitFailed:Connect(function(
 end)
 
 local connection, tween, pathPart, isTweening = nil, nil, nil, false
-function Tween(targetCFrame: CFrame | boolean, target: CFrame)
+function Tween(targetCFrame, target)
     pcall(function() Character.Humanoid.Sit = false end)
     if not Character.Humanoid or Character.Humanoid.Health <= 0 then pcall(function() workspace.TweenGhost:Destroy() end) connection, tween, pathPart, isTweening = nil, nil, nil, false return end
     if targetCFrame == false then
@@ -1253,10 +1253,19 @@ BringMonster = (function(name, count) count = count or 3
             local hrp = v:FindFirstChild("HumanoidRootPart")
             if h and hrp and h.Health > 0 and (not name or v.Name == name)
                 and (HumanoidRootPart.Position - hrp.Position).Magnitude <= ((count or 3) * 250) then
-                if not table.find(mob, function(chosen)
-                    local chrp = chosen:FindFirstChild("HumanoidRootPart")
-                    return chrp and (hrp.Position - chrp.Position).Magnitude <= 5
-                end) then mob[#mob+1], t = v, t or hrp.CFrame
+                local duplicatePosition = false
+                for _, chosen in ipairs(mob) do
+                    local chosenRoot = chosen:FindFirstChild("HumanoidRootPart")
+                    if chosenRoot
+                        and (hrp.Position - chosenRoot.Position).Magnitude <= 5 then
+                        duplicatePosition = true
+                        break
+                    end
+                end
+
+                if not duplicatePosition then
+                    mob[#mob + 1] = v
+                    t = t or hrp.CFrame
                 end
                 if #mob >= (count or 3) then break end
             end
@@ -1671,12 +1680,10 @@ Windows: 04-05, 08-09, 12-13..."
                             for index, entry in ipairs(chests) do
                                 local chest = entry.obj
 
-                                if not chest
-                                    or not chest.Parent
-                                    or not chest.CanTouch
-                                    or CheckTool("Fist of Darkness") then
-                                    continue
-                                end
+                                if chest
+                                    and chest.Parent
+                                    and chest.CanTouch
+                                    and not CheckTool("Fist of Darkness") then
 
                                 local skipScheduled = false
 
@@ -1747,7 +1754,7 @@ Windows: 04-05, 08-09, 12-13..."
                                                         ]
                                                     ) or 2
                                                 )
-                                                    if chest
+                                                if chest
                                                         and chest.Parent
                                                         and chest.CanTouch
                                                         and not CheckTool(
@@ -1807,8 +1814,8 @@ Windows: 04-05, 08-09, 12-13..."
                                 end
 
                                 if not IsDied(Character) then
-                                    c += 1
-                                    all += 1
+                                    c = c + 1
+                                    all = all + 1
                                 else
                                     break
                                 end
@@ -1853,6 +1860,7 @@ Windows: 04-05, 08-09, 12-13..."
                                 if index % 250 == 0 then
                                     task.wait(0.01)
                                 end
+                                end -- valid chest
                             end
                         end
 
