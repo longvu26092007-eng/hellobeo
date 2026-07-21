@@ -31,7 +31,9 @@
 
     Luu y:
       - Script KHONG dung workspace.DistributedGameTime.
-      - Nen cho file vao auto-execute de no tu chay lai sau moi lan hop.
+      - Hop mac dinh OFF de test an toan.
+      - Bat hop bang: getgenv().turn = "on" hoac true
+      - Tat hop bang: getgenv().turn = "off" hoac false
 ]]
 
 repeat task.wait() until game:IsLoaded()
@@ -63,6 +65,36 @@ getgenv().ServerTimeHunterConfig = getgenv().ServerTimeHunterConfig or {}
 
 local USER_CONFIG = getgenv().ServerTimeHunterConfig
 
+local function parseOnOff(value, defaultValue)
+    if value == nil then
+        return defaultValue
+    end
+
+    if value == true or value == 1 then
+        return true
+    end
+
+    if value == false or value == 0 then
+        return false
+    end
+
+    local text = string.lower(tostring(value))
+    if text == "on" or text == "true" or text == "1"
+        or text == "yes" or text == "enable" or text == "enabled" then
+        return true
+    end
+
+    if text == "off" or text == "false" or text == "0"
+        or text == "no" or text == "disable" or text == "disabled" then
+        return false
+    end
+
+    return defaultValue
+end
+
+-- QUAN TRONG: khong khai bao thi mac dinh OFF, khong tu hop.
+local HOP_ENABLED = parseOnOff(getgenv().turn, false)
+
 local CONFIG = {
     -- Cua so thoi gian
     PeriodHours          = USER_CONFIG.PeriodHours or 4,
@@ -78,7 +110,7 @@ local CONFIG = {
     -- Hop
     MaxPlayers           = USER_CONFIG.MaxPlayers or 4, -- chap nhan <= 4 nguoi
     ForcedRegion         = USER_CONFIG.ForcedRegion,     -- nil, "US", "EU", "AP"...
-    MaxPages             = USER_CONFIG.MaxPages or 500,
+    MaxPages             = USER_CONFIG.MaxPages or 100,
     ConcurrentWorkers    = USER_CONFIG.ConcurrentWorkers or 6,
     CandidateTarget      = USER_CONFIG.CandidateTarget or 18,
     BrowserTimeout       = USER_CONFIG.BrowserTimeout or 8,
@@ -105,6 +137,13 @@ local CONFIG = {
     DebugCaptureOutgoing  = USER_CONFIG.DebugCaptureOutgoing ~= false,
     DebugScanGC           = USER_CONFIG.DebugScanGC ~= false,
     DebugMaxGCHits        = USER_CONFIG.DebugMaxGCHits or 250,
+
+    -- Deep status/chest scan: mac dinh OFF, bat bang nut tren UI.
+    DeepStatusDefault      = USER_CONFIG.DeepStatusDefault == true,
+    DeepStatusCaptureAllUI = USER_CONFIG.DeepStatusCaptureAllUI ~= false,
+    DeepStatusCaptureData  = USER_CONFIG.DeepStatusCaptureData ~= false,
+    DeepStatusPollInterval = USER_CONFIG.DeepStatusPollInterval or 0.25,
+    DeepStatusMaxText      = USER_CONFIG.DeepStatusMaxText or 700,
 
     -- UI / log
     GuiName              = "ServerTimeHunter_Debug_UI",
@@ -508,7 +547,7 @@ end)
 
 -- ============================================================
 -- FULL-WINDOW SPAWN DEBUGGER
--- Chi ghi file trong khoang gan moc 4 gio.
+-- Ghi trong cua so 03:50-04:20; deep status bat/tat bang nut.
 -- ============================================================
 local DebugStatusLabel
 local DebugInfoLabel
@@ -522,7 +561,11 @@ local DEBUG_KEYWORDS = {
     "itemspawn", "item spawn", "spawn item", "spawned", "spawn",
     "hallow essence", "fire essence", "hidden key", "hiddenkey",
     "library key", "librarykey", "water key", "waterkey",
-    "holy torch", "reward", "treasure"
+    "holy torch", "reward", "treasure",
+    "strange item", "found a strange item",
+    "you have found a strange item in the chest",
+    "new title unlocked", "title color unlocked", "chosen one",
+    "earned", "notification", "message", "status"
 }
 
 local DEBUG_ATTRIBUTE_KEYWORDS = {
@@ -549,6 +592,12 @@ local Debug = {
     lastSnapshot = {},
     objectSeen = setmetatable({}, { __mode = "k" }),
     gcHits = 0,
+
+    deepStatus = CONFIG.DeepStatusDefault,
+    statusWatched = setmetatable({}, { __mode = "k" }),
+    dataSnapshot = {},
+    specialEvents = 0,
+    lastSpecialText = "none",
 }
 
 local function lower(value)
@@ -726,9 +775,10 @@ local function updateDebugLabels(statusText, statusColor)
         end
 
         DebugInfoLabel.Text = string.format(
-            "Events: %d | Dropped: %d | File: %s",
+            "Events: %d | Special: %d | Deep: %s | File: %s",
             Debug.eventCount,
-            Debug.droppedLines,
+            Debug.specialEvents,
+            Debug.deepStatus and "ON" or "OFF",
             fileText
         )
     end
@@ -947,6 +997,217 @@ end
 
 local watchInstance
 
+local function isTextGui(instance)
+    return instance:IsA("TextLabel")
+        or instance:IsA("TextButton")
+        or instance:IsA("TextBox")
+end
+
+local function trimStatusText(value)
+    local text = tostring(value or "")
+    text = text:gsub("[%c\r\n\t]+", " ")
+    text = text:gsub("%s+", " ")
+    text = text:match("^%s*(.-)%s*$") or ""
+
+    if #text > CONFIG.DeepStatusMaxText then
+        text = text:sub(1, CONFIG.DeepStatusMaxText) .. "...[truncated]"
+    end
+
+    return text
+end
+
+local function isSpecialChestText(text)
+    local lowered = lower(text)
+    return lowered:find("strange item", 1, true) ~= nil
+        or lowered:find("god's chalice", 1, true) ~= nil
+        or lowered:find("gods chalice", 1, true) ~= nil
+        or lowered:find("fist of darkness", 1, true) ~= nil
+        or lowered:find("new title unlocked", 1, true) ~= nil
+        or lowered:find("chosen one", 1, true) ~= nil
+end
+
+local function logStatusText(instance, reason)
+    if not Debug.active or not isTextGui(instance) then
+        return
+    end
+
+    local ok, rawText = pcall(function()
+        return instance.Text
+    end)
+    if not ok then
+        return
+    end
+
+    local text = trimStatusText(rawText)
+    if text == "" then
+        return
+    end
+
+    local relevant = isRelevantName(text)
+        or isRelevantName(safeFullName(instance))
+        or isSpecialChestText(text)
+
+    if Debug.deepStatus and CONFIG.DeepStatusCaptureAllUI then
+        relevant = true
+    end
+
+    if not relevant then
+        return
+    end
+
+    local category = isSpecialChestText(text)
+        and "SPECIAL_CHEST_STATUS"
+        or "UI_STATUS_TEXT"
+
+    if category == "SPECIAL_CHEST_STATUS" then
+        Debug.specialEvents += 1
+        Debug.lastSpecialText = text
+        flushDebug(true)
+    end
+
+    debugLog(
+        category,
+        string.format(
+            "%s | text=%q | visible=%s | reason=%s",
+            safeFullName(instance),
+            text,
+            tostring(instance.Visible),
+            tostring(reason)
+        ),
+        "ui-text|" .. safeFullName(instance) .. "|" .. text
+    )
+end
+
+local function watchStatusGui(instance, reason)
+    if not Debug.active or not isTextGui(instance)
+        or Debug.statusWatched[instance] then
+        return
+    end
+
+    Debug.statusWatched[instance] = true
+    logStatusText(instance, reason or "watch-start")
+
+    addConnection(instance:GetPropertyChangedSignal("Text"):Connect(function()
+        logStatusText(instance, "TextChanged")
+    end))
+
+    addConnection(instance:GetPropertyChangedSignal("Visible"):Connect(function()
+        if instance.Visible then
+            logStatusText(instance, "Visible=true")
+        end
+    end))
+end
+
+local function valueHasAnyString(value, depth, seen)
+    depth = depth or 0
+    seen = seen or {}
+
+    if depth > 4 then
+        return false
+    end
+
+    local t = typeof(value)
+    if t == "string" then
+        return trimStatusText(value) ~= ""
+    elseif t == "table" then
+        if seen[value] then
+            return false
+        end
+        seen[value] = true
+        local count = 0
+        for k, v in pairs(value) do
+            count += 1
+            if count > 100 then break end
+            if valueHasAnyString(k, depth + 1, seen)
+                or valueHasAnyString(v, depth + 1, seen) then
+                seen[value] = nil
+                return true
+            end
+        end
+        seen[value] = nil
+    end
+
+    return false
+end
+
+local function scanPlayerData(reason)
+    if not Debug.active or not Debug.deepStatus
+        or not CONFIG.DeepStatusCaptureData then
+        return
+    end
+
+    local roots = {
+        LocalPlayer:FindFirstChild("Data"),
+        LocalPlayer:FindFirstChild("leaderstats"),
+    }
+
+    for _, root in ipairs(roots) do
+        if root then
+            for _, obj in ipairs(root:GetDescendants()) do
+                if obj:IsA("ValueBase") then
+                    local key = safeFullName(obj)
+                    local serialized = serializeValue(obj.Value)
+
+                    if Debug.dataSnapshot[key] ~= serialized then
+                        local old = Debug.dataSnapshot[key]
+                        Debug.dataSnapshot[key] = serialized
+
+                        if old ~= nil then
+                            debugLog(
+                                "PLAYER_DATA_CHANGED",
+                                string.format(
+                                    "%s | old=%s | new=%s | reason=%s",
+                                    key,
+                                    old,
+                                    serialized,
+                                    tostring(reason)
+                                ),
+                                "data|" .. key .. "|" .. serialized
+                            )
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function attachDeepStatusScan(reason)
+    if not Debug.active or not Debug.deepStatus then
+        return
+    end
+
+    local roots = {
+        LocalPlayer:FindFirstChildOfClass("PlayerGui"),
+        CoreGui,
+    }
+
+    for _, root in ipairs(roots) do
+        if root then
+            if isTextGui(root) then
+                watchStatusGui(root, reason)
+            end
+
+            for index, instance in ipairs(root:GetDescendants()) do
+                if isTextGui(instance) then
+                    watchStatusGui(instance, reason)
+                end
+
+                if index % 500 == 0 then
+                    task.wait()
+                end
+            end
+        end
+    end
+
+    scanPlayerData(reason)
+    debugLog(
+        "DEEP_STATUS_SCAN",
+        "Attached UI Text/Visible + Player.Data watchers | reason="
+            .. tostring(reason)
+    )
+end
+
 local function watchRemoteEvent(remote)
     if not CONFIG.DebugCaptureRemotes
         or Debug.remoteWatched[remote]
@@ -963,7 +1224,7 @@ local function watchRemoteEvent(remote)
 
         local args = table.pack(...)
 
-        if remoteArgsRelevant(remote, args) then
+        if remoteArgsRelevant(remote, args) or (Debug.deepStatus and valueHasAnyString(args)) then
             debugLog(
                 "REMOTE_IN",
                 safeFullName(remote) .. " | " .. formatPackedArgs(args),
@@ -979,6 +1240,11 @@ watchInstance = function(instance, reason)
     end
 
     local fullName = safeFullName(instance)
+
+    if isTextGui(instance) then
+        watchStatusGui(instance, reason)
+    end
+
     local nameRelevant = isRelevantName(fullName)
     local attrRelevant = inspectAttributes(instance, reason)
     local valueRelevant = inspectValueBase(instance, reason)
@@ -1126,7 +1392,8 @@ local function attachRootSignals(root)
         end
 
         local fullName = safeFullName(instance)
-        if isRelevantName(fullName) then
+        if isRelevantName(fullName)
+            or (Debug.deepStatus and isTextGui(instance)) then
             debugLog(
                 "DESCENDANT_ADDED",
                 string.format("%s | class=%s", fullName, instance.ClassName),
@@ -1167,7 +1434,7 @@ local function scanInventory(reason)
     for _, container in ipairs(containers) do
         if container then
             for _, item in ipairs(container:GetChildren()) do
-                if isRelevantName(item.Name) then
+                if isRelevantName(item.Name) or (Debug.deepStatus and item:IsA("Tool")) then
                     local key = container.Name .. "|" .. item.Name
                     current[key] = true
 
@@ -1292,7 +1559,9 @@ end
 local function createDebugHeader(boundary)
     return {
         "BLOX FRUITS SPAWN DEBUG",
-        "Purpose: detect Chalice / Fist of Darkness / Chest / Key / spawn signals",
+        "Purpose: detect chest special reward, strange-item status, Chalice/Fist/Key/spawn signals",
+        "AutoHop: " .. tostring(HOP_ENABLED),
+        "DeepStatusAtStart: " .. tostring(Debug.deepStatus),
         "Generated: " .. os.date("%Y-%m-%d %H:%M:%S"),
         "PlaceId: " .. tostring(PlaceId),
         "JobId: " .. tostring(JobId),
@@ -1340,6 +1609,10 @@ local function startDebug(boundary, phase)
     Debug.lastSnapshot = {}
     Debug.objectSeen = setmetatable({}, { __mode = "k" })
     Debug.gcHits = 0
+    Debug.statusWatched = setmetatable({}, { __mode = "k" })
+    Debug.dataSnapshot = {}
+    Debug.specialEvents = 0
+    Debug.lastSpecialText = "none"
 
     local fileName = string.format(
         "ServerSpawnDebug_FULL_%s_Window-%s_to_%s_Start-%s_%s.txt",
@@ -1379,6 +1652,10 @@ local function startDebug(boundary, phase)
     scanInventory("debug-start")
     scanGetGC()
 
+    if Debug.deepStatus then
+        task.spawn(attachDeepStatusScan, "debug-start")
+    end
+
     task.spawn(function()
         while Debug.active and not State.destroyed do
             task.wait(CONFIG.DebugFlushInterval)
@@ -1391,6 +1668,11 @@ local function startDebug(boundary, phase)
             task.wait(CONFIG.DebugDeepScanInterval)
 
             scanInventory("full-window-poll")
+            scanPlayerData("full-window-poll")
+
+            if Debug.deepStatus then
+                task.spawn(attachDeepStatusScan, "deep-rescan")
+            end
 
             for _, root in ipairs(getDebugRoots()) do
                 if not Debug.active then
@@ -1451,7 +1733,7 @@ if CONFIG.DebugCaptureOutgoing
             and typeof(self) == "Instance"
             and (method == "FireServer" or method == "InvokeServer")
             and (self:IsA("RemoteEvent") or self:IsA("RemoteFunction"))
-            and remoteArgsRelevant(self, args) then
+            and (remoteArgsRelevant(self, args) or (Debug.deepStatus and valueHasAnyString(args))) then
 
             task.defer(function()
                 debugLog(
@@ -1508,8 +1790,8 @@ if not parented then
 end
 
 local Main = Instance.new("Frame")
-Main.Size = UDim2.fromOffset(480, 370)
-Main.Position = UDim2.new(0.5, -240, 0.12, 0)
+Main.Size = UDim2.fromOffset(520, 435)
+Main.Position = UDim2.new(0.5, -260, 0.08, 0)
 Main.BackgroundColor3 = Color3.fromRGB(18, 24, 32)
 Main.BorderSizePixel = 0
 Main.Parent = ScreenGui
@@ -1545,7 +1827,7 @@ Title.Size = UDim2.new(1, -86, 1, 0)
 Title.Position = UDim2.fromOffset(14, 0)
 Title.BackgroundTransparency = 1
 Title.Font = Enum.Font.GothamBold
-Title.Text = "SERVER TIME HUNTER"
+Title.Text = "CHEST / STATUS DEBUGGER"
 Title.TextColor3 = Color3.fromRGB(107, 221, 159)
 Title.TextSize = 14
 Title.TextXAlignment = Enum.TextXAlignment.Left
@@ -1662,7 +1944,7 @@ DebugStatusLabel.Size = UDim2.new(1, 0, 0, 22)
 DebugStatusLabel.Position = UDim2.fromOffset(0, 220)
 DebugStatusLabel.BackgroundTransparency = 1
 DebugStatusLabel.Font = Enum.Font.GothamBold
-DebugStatusLabel.Text = "DEBUG: chờ còn 2 phút trước mốc 4 giờ"
+DebugStatusLabel.Text = "DEBUG: chờ cửa sổ 03:50→04:20"
 DebugStatusLabel.TextColor3 = Color3.fromRGB(247, 198, 89)
 DebugStatusLabel.TextSize = 12
 DebugStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
@@ -1681,13 +1963,45 @@ DebugInfoLabel.TextXAlignment = Enum.TextXAlignment.Left
 DebugInfoLabel.TextYAlignment = Enum.TextYAlignment.Top
 DebugInfoLabel.Parent = Content
 
+local ModeLabel = Instance.new("TextLabel")
+ModeLabel.Size = UDim2.new(1, 0, 0, 20)
+ModeLabel.Position = UDim2.fromOffset(0, 280)
+ModeLabel.BackgroundTransparency = 1
+ModeLabel.Font = Enum.Font.GothamBold
+ModeLabel.Text = "AUTO HOP: " .. (HOP_ENABLED and "ON" or "OFF (TEST MODE)")
+ModeLabel.TextColor3 = HOP_ENABLED
+    and Color3.fromRGB(107, 221, 159)
+    or Color3.fromRGB(247, 198, 89)
+ModeLabel.TextSize = 11
+ModeLabel.TextXAlignment = Enum.TextXAlignment.Left
+ModeLabel.Parent = Content
+
+local DeepScanButton = Instance.new("TextButton")
+DeepScanButton.Size = UDim2.new(1, 0, 0, 34)
+DeepScanButton.Position = UDim2.fromOffset(0, 304)
+DeepScanButton.BackgroundColor3 = Debug.deepStatus
+    and Color3.fromRGB(42, 126, 83)
+    or Color3.fromRGB(91, 63, 126)
+DeepScanButton.BorderSizePixel = 0
+DeepScanButton.Font = Enum.Font.GothamBold
+DeepScanButton.Text = Debug.deepStatus
+    and "DEEP STATUS SCAN: ON"
+    or "DEEP STATUS SCAN: OFF"
+DeepScanButton.TextColor3 = Color3.fromRGB(245, 240, 255)
+DeepScanButton.TextSize = 12
+DeepScanButton.Parent = Content
+
+local DeepCorner = Instance.new("UICorner")
+DeepCorner.CornerRadius = UDim.new(0, 7)
+DeepCorner.Parent = DeepScanButton
+
 local HopNow = Instance.new("TextButton")
 HopNow.Size = UDim2.new(0.5, -5, 0, 32)
 HopNow.Position = UDim2.new(0, 0, 1, -35)
 HopNow.BackgroundColor3 = Color3.fromRGB(46, 94, 139)
 HopNow.BorderSizePixel = 0
 HopNow.Font = Enum.Font.GothamBold
-HopNow.Text = "HOP SERVER NGAY"
+HopNow.Text = HOP_ENABLED and "HOP SERVER NGAY" or "HOP OFF (getgenv().turn)"
 HopNow.TextColor3 = Color3.fromRGB(240, 247, 255)
 HopNow.TextSize = 12
 HopNow.Parent = Content
@@ -1759,8 +2073,8 @@ local minimized = false
 Minimize.MouseButton1Click:Connect(function()
     minimized = not minimized
     Content.Visible = not minimized
-    Main.Size = minimized and UDim2.fromOffset(480, 42)
-        or UDim2.fromOffset(480, 370)
+    Main.Size = minimized and UDim2.fromOffset(520, 42)
+        or UDim2.fromOffset(520, 435)
     Minimize.Text = minimized and "+" or "—"
 end)
 
@@ -1771,6 +2085,42 @@ Close.MouseButton1Click:Connect(function()
     State.destroyed = true
     releaseHold()
     ScreenGui:Destroy()
+end)
+
+DeepScanButton.MouseButton1Click:Connect(function()
+    Debug.deepStatus = not Debug.deepStatus
+
+    DeepScanButton.Text = Debug.deepStatus
+        and "DEEP STATUS SCAN: ON"
+        or "DEEP STATUS SCAN: OFF"
+
+    DeepScanButton.BackgroundColor3 = Debug.deepStatus
+        and Color3.fromRGB(42, 126, 83)
+        or Color3.fromRGB(91, 63, 126)
+
+    if Debug.active then
+        debugLog(
+            "DEEP_STATUS_TOGGLE",
+            "deepStatus=" .. tostring(Debug.deepStatus)
+        )
+
+        if Debug.deepStatus then
+            task.spawn(attachDeepStatusScan, "button-enabled")
+            scanInventory("button-enabled")
+            scanPlayerData("button-enabled")
+        end
+
+        flushDebug(true)
+    else
+        updateDebugLabels(
+            Debug.deepStatus
+                and "DEEP STATUS: ON — SẼ QUÉT KHI DEBUG BẮT ĐẦU"
+                or "DEEP STATUS: OFF",
+            Debug.deepStatus
+                and Color3.fromRGB(107, 221, 159)
+                or Color3.fromRGB(143, 158, 178)
+        )
+    end
 end)
 
 Release.MouseButton1Click:Connect(function()
@@ -1937,6 +2287,14 @@ end
 local HopServer
 
 HopServer = function(reason)
+    if not HOP_ENABLED then
+        State.hopping = false
+        Status.Text = "AUTO HOP ĐANG OFF — GIỮ SERVER ĐỂ TEST"
+        Status.TextColor3 = Color3.fromRGB(247, 198, 89)
+        Countdown.Text = "Bật bằng getgenv().turn = \"on\" trước khi chạy script"
+        return
+    end
+
     if State.hopping or State.destroyed then
         return
     end
@@ -2030,7 +2388,7 @@ TeleportService.TeleportInitFailed:Connect(function(
     teleportResult,
     message
 )
-    if player ~= LocalPlayer then
+    if player ~= LocalPlayer or not HOP_ENABLED then
         return
     end
 
@@ -2065,7 +2423,9 @@ GuiService.ErrorMessageChanged:Connect(function()
         return GuiService:GetErrorType()
     end)
 
-    if ok and errorType == Enum.ConnectionError.DisconnectErrors then
+    if HOP_ENABLED
+        and ok
+        and errorType == Enum.ConnectionError.DisconnectErrors then
         task.spawn(function()
             while not State.destroyed do
                 pcall(function()
@@ -2358,3 +2718,5 @@ print(
     CONFIG.PeriodHours,
     "hours"
 )
+
+print("[CHEST DEBUG] Auto Hop:", HOP_ENABLED and "ON" or "OFF")
