@@ -27,7 +27,15 @@
                   (khong ghi text tinh ban dau, khong quet CoreGui,
                    khong tu ghi UI debugger)
 
-      5) Log tu chia Part001, Part002...; khong dung vi cham gioi han.
+      5) Pickup Transition Probe:
+           - Giu bo nho cac thay doi truoc luc nhat.
+           - Tu kich hoat khi co strange item / Chalice / Fist,
+             Tool lien quan duoc them hoac chest/object lien quan bien mat.
+           - Ghi ro ready/enabled/visible/active true -> false,
+             prompt bi tat, UI bi an, object bi xoa va Value/Attribute doi.
+           - Co nut kich hoat thu cong de bam ngay truoc khi nhat.
+
+      6) Log tu chia Part001, Part002...; khong dung vi cham gioi han.
 
     DA BO:
       - Quet CoreGui
@@ -135,6 +143,12 @@ local CONFIG = {
     TargetScanInterval = USER_CONFIG.TargetScanInterval or 2,
     MaxTextLength = USER_CONFIG.MaxTextLength or 700,
 
+    -- Pickup transition probe
+    PickupProbeSeconds = USER_CONFIG.PickupProbeSeconds or 20,
+    PickupHistorySeconds = USER_CONFIG.PickupHistorySeconds or 8,
+    PickupHistoryMax = USER_CONFIG.PickupHistoryMax or 350,
+    PickupPromptDistance = USER_CONFIG.PickupPromptDistance or 250,
+
     -- Files/UI
     GuiName = "ServerTimeChestDebugLite_UI",
     VisitedFile = "ServerTimeChestDebug_Visited.json",
@@ -189,6 +203,17 @@ local Debug = {
     valueBaseline = setmetatable({}, { __mode = "k" }),
     inventory = {},
     lastLog = {},
+
+    pickup = {
+        active = false,
+        id = 0,
+        untilClock = 0,
+        trigger = "none",
+        history = {},
+        watched = setmetatable({}, { __mode = "k" }),
+        propertyBaseline = setmetatable({}, { __mode = "k" }),
+        attributeBaseline = setmetatable({}, { __mode = "k" }),
+    },
 }
 
 getgenv().ServerTimeTargetFound = false
@@ -360,6 +385,9 @@ local function disconnectDebugConnections()
     Debug.watchedGui = setmetatable({}, { __mode = "k" })
     Debug.watchedValues = setmetatable({}, { __mode = "k" })
     Debug.watchedRemotes = setmetatable({}, { __mode = "k" })
+    Debug.pickup.watched = setmetatable({}, { __mode = "k" })
+    Debug.pickup.propertyBaseline = setmetatable({}, { __mode = "k" })
+    Debug.pickup.attributeBaseline = setmetatable({}, { __mode = "k" })
 end
 
 -- ============================================================
@@ -419,6 +447,27 @@ local STATUS_PATH_WORDS = {
     "chest",
 }
 
+local PICKUP_STATE_WORDS = {
+    "ready",
+    "available",
+    "enabled",
+    "active",
+    "spawned",
+    "claimed",
+    "collected",
+    "picked",
+    "pickup",
+    "opened",
+    "open",
+    "used",
+    "cooldown",
+    "next",
+    "expire",
+    "disabled",
+    "unavailable",
+    "not ready",
+}
+
 local ATTRIBUTE_WORDS = {
     "chalice",
     "chest",
@@ -434,6 +483,15 @@ local ATTRIBUTE_WORDS = {
     "nextspawn",
     "expires",
     "expiretime",
+    "ready",
+    "available",
+    "enabled",
+    "active",
+    "claimed",
+    "collected",
+    "opened",
+    "used",
+    "cooldown",
 }
 
 local function containsPhrase(text, phrases)
@@ -462,6 +520,10 @@ end
 
 local function isRelevantAttribute(name)
     return containsPhrase(name, ATTRIBUTE_WORDS)
+end
+
+local function isPickupStateName(name)
+    return containsPhrase(name, PICKUP_STATE_WORDS)
 end
 
 local function valueIsRelevant(value, depth, seen)
@@ -864,6 +926,554 @@ local function logEvent(category, message, dedupKey, immediate)
 end
 
 -- ============================================================
+-- PICKUP TRANSITION PROBE
+-- Luu thay doi gan nhat trong RAM. Khi phat hien nhat vat pham,
+-- ghi lai ca thay doi truoc va sau su kien.
+-- Category co the xuat hien:
+--   PICKUP_DISABLED / PICKUP_HIDDEN / PICKUP_INACTIVE
+--   PICKUP_REMOVED / PICKUP_BECAME_FALSE / PICKUP_NOT_READY
+-- ============================================================
+local triggerPickupProbe
+
+local function pickupValue(value)
+    if value == nil then
+        return "nil"
+    end
+
+    return serialize(value)
+end
+
+local function classifyPickupChange(propertyName, oldValue, newValue)
+    local property = string.lower(tostring(propertyName or ""))
+    local oldText = string.lower(tostring(oldValue or ""))
+    local newText = string.lower(tostring(newValue or ""))
+
+    if property == "enabled"
+        and oldText == "true"
+        and newText == "false" then
+        return "DISABLED"
+    end
+
+    if property == "visible"
+        and oldText == "true"
+        and newText == "false" then
+        return "HIDDEN"
+    end
+
+    if property == "active"
+        and oldText == "true"
+        and newText == "false" then
+        return "INACTIVE"
+    end
+
+    if property == "parent"
+        and oldText ~= "nil"
+        and newText == "nil" then
+        return "REMOVED"
+    end
+
+    if (property:find("ready", 1, true)
+            or property:find("available", 1, true)
+            or property:find("active", 1, true)
+            or property:find("enabled", 1, true))
+        and oldText == "true"
+        and newText == "false" then
+        return "BECAME_FALSE"
+    end
+
+    if newText:find("not ready", 1, true)
+        or newText:find("unavailable", 1, true)
+        or newText:find("cooldown", 1, true)
+        or newText:find("disabled", 1, true) then
+        return "NOT_READY"
+    end
+
+    return "CHANGED"
+end
+
+local function prunePickupHistory()
+    local now = os.clock()
+    local history = Debug.pickup.history
+    local firstValid = 1
+
+    while firstValid <= #history do
+        if now - history[firstValid].clock
+            <= CONFIG.PickupHistorySeconds then
+            break
+        end
+        firstValid = firstValid + 1
+    end
+
+    if firstValid > 1 then
+        local compact = {}
+
+        for index = firstValid, #history do
+            table.insert(compact, history[index])
+        end
+
+        Debug.pickup.history = compact
+        history = compact
+    end
+
+    while #history > CONFIG.PickupHistoryMax do
+        table.remove(history, 1)
+    end
+end
+
+local function recordPickupTransition(
+    instance,
+    propertyName,
+    oldValue,
+    newValue,
+    source
+)
+    if not Debug.active then
+        return
+    end
+
+    local oldSerialized = pickupValue(oldValue)
+    local newSerialized = pickupValue(newValue)
+
+    if oldSerialized == newSerialized then
+        return
+    end
+
+    local path = safeFullName(instance)
+    local changeType = classifyPickupChange(
+        propertyName,
+        oldSerialized,
+        newSerialized
+    )
+
+    local entry = {
+        clock = os.clock(),
+        uptime = State.uptime,
+        changeType = changeType,
+        path = path,
+        className = instance.ClassName,
+        property = tostring(propertyName),
+        oldValue = oldSerialized,
+        newValue = newSerialized,
+        source = tostring(source or "watcher"),
+    }
+
+    table.insert(Debug.pickup.history, entry)
+    prunePickupHistory()
+
+    if Debug.pickup.active then
+        local immediate = changeType == "DISABLED"
+            or changeType == "HIDDEN"
+            or changeType == "INACTIVE"
+            or changeType == "REMOVED"
+            or changeType == "BECAME_FALSE"
+            or changeType == "NOT_READY"
+
+        logEvent(
+            "PICKUP_" .. changeType,
+            string.format(
+                "Probe#%d | %s (%s) | %s: %s -> %s | source=%s",
+                Debug.pickup.id,
+                path,
+                instance.ClassName,
+                tostring(propertyName),
+                oldSerialized,
+                newSerialized,
+                tostring(source)
+            ),
+            "pickup|" .. tostring(Debug.pickup.id)
+                .. "|" .. path
+                .. "|" .. tostring(propertyName)
+                .. "|" .. newSerialized,
+            immediate
+        )
+    end
+end
+
+local function flushPickupPreHistory(triggerReason)
+    prunePickupHistory()
+
+    local history = Debug.pickup.history
+
+    logEvent(
+        "PICKUP_PREHISTORY",
+        string.format(
+            "Probe#%d | trigger=%s | bufferedChanges=%d | history=%ss",
+            Debug.pickup.id,
+            tostring(triggerReason),
+            #history,
+            tostring(CONFIG.PickupHistorySeconds)
+        ),
+        nil,
+        true
+    )
+
+    for index, entry in ipairs(history) do
+        local age = math.max(0, os.clock() - entry.clock)
+
+        logEvent(
+            "PICKUP_BEFORE_" .. entry.changeType,
+            string.format(
+                "Probe#%d | %.2fs before trigger | uptime=%s | %s (%s) | %s: %s -> %s | source=%s",
+                Debug.pickup.id,
+                age,
+                formatDuration(entry.uptime),
+                entry.path,
+                entry.className,
+                entry.property,
+                entry.oldValue,
+                entry.newValue,
+                entry.source
+            ),
+            "pickup-pre|" .. tostring(Debug.pickup.id)
+                .. "|" .. tostring(index)
+                .. "|" .. entry.path
+                .. "|" .. entry.property
+        )
+    end
+end
+
+triggerPickupProbe = function(reason, details)
+    if not Debug.active then
+        return
+    end
+
+    local now = os.clock()
+
+    if Debug.pickup.active then
+        Debug.pickup.untilClock = math.max(
+            Debug.pickup.untilClock,
+            now + CONFIG.PickupProbeSeconds
+        )
+
+        logEvent(
+            "PICKUP_PROBE_EXTENDED",
+            string.format(
+                "Probe#%d | reason=%s | details=%s | +%ss",
+                Debug.pickup.id,
+                tostring(reason),
+                tostring(details or ""),
+                tostring(CONFIG.PickupProbeSeconds)
+            ),
+            nil,
+            true
+        )
+
+        return
+    end
+
+    Debug.pickup.id = Debug.pickup.id + 1
+    Debug.pickup.active = true
+    Debug.pickup.untilClock = now + CONFIG.PickupProbeSeconds
+    Debug.pickup.trigger = tostring(reason or "unknown")
+
+    flushPickupPreHistory(reason)
+
+    logEvent(
+        "PICKUP_PROBE_START",
+        string.format(
+            "Probe#%d | trigger=%s | details=%s | watchAfter=%ss",
+            Debug.pickup.id,
+            tostring(reason),
+            tostring(details or ""),
+            tostring(CONFIG.PickupProbeSeconds)
+        ),
+        nil,
+        true
+    )
+
+    updateDebugInfo(
+        "PICKUP PROBE ACTIVE — "
+            .. tostring(CONFIG.PickupProbeSeconds)
+            .. " GIÂY",
+        Color3.fromRGB(255, 186, 73)
+    )
+end
+
+local function watchPickupAttribute(instance, attributeName)
+    local baselineTable = Debug.pickup.attributeBaseline[instance]
+
+    if not baselineTable then
+        baselineTable = {}
+        Debug.pickup.attributeBaseline[instance] = baselineTable
+    end
+
+    baselineTable[attributeName] = instance:GetAttribute(attributeName)
+
+    addConnection(
+        instance:GetAttributeChangedSignal(attributeName):Connect(function()
+            if not Debug.active then
+                return
+            end
+
+            local oldValue = baselineTable[attributeName]
+            local newValue = instance:GetAttribute(attributeName)
+            baselineTable[attributeName] = newValue
+
+            recordPickupTransition(
+                instance,
+                "Attribute@" .. tostring(attributeName),
+                oldValue,
+                newValue,
+                "AttributeChanged"
+            )
+        end)
+    )
+end
+
+local function watchPickupProperty(instance, propertyName)
+    local baselineTable = Debug.pickup.propertyBaseline[instance]
+
+    if not baselineTable then
+        baselineTable = {}
+        Debug.pickup.propertyBaseline[instance] = baselineTable
+    end
+
+    local ok, initial = pcall(function()
+        return instance[propertyName]
+    end)
+
+    if not ok then
+        return
+    end
+
+    baselineTable[propertyName] = initial
+
+    addConnection(
+        instance:GetPropertyChangedSignal(propertyName):Connect(function()
+            if not Debug.active then
+                return
+            end
+
+            local success, newValue = pcall(function()
+                return instance[propertyName]
+            end)
+
+            if not success then
+                return
+            end
+
+            local oldValue = baselineTable[propertyName]
+            baselineTable[propertyName] = newValue
+
+            recordPickupTransition(
+                instance,
+                propertyName,
+                oldValue,
+                newValue,
+                "PropertyChanged"
+            )
+        end)
+    )
+end
+
+local function instanceNearPlayer(instance)
+    local character = LocalPlayer.Character
+    local root = character
+        and character:FindFirstChild("HumanoidRootPart")
+
+    if not root then
+        return false
+    end
+
+    local parent = instance.Parent
+    local position
+
+    while parent and parent ~= Workspace do
+        if parent:IsA("BasePart") then
+            position = parent.Position
+            break
+        end
+
+        if parent:IsA("Model") and parent.PrimaryPart then
+            position = parent.PrimaryPart.Position
+            break
+        end
+
+        parent = parent.Parent
+    end
+
+    if not position then
+        return false
+    end
+
+    return (root.Position - position).Magnitude
+        <= CONFIG.PickupPromptDistance
+end
+
+local function watchPickupInstance(instance)
+    if not Debug.active
+        or Debug.pickup.watched[instance] then
+        return
+    end
+
+    local path = safeFullName(instance)
+
+    -- Khong theo doi chinh UI debugger. Dung truc tiep CONFIG.GuiName
+    -- vi ham nay duoc khai bao truoc shouldIgnoreGui().
+    if string.find(path, CONFIG.GuiName, 1, true) then
+        return
+    end
+
+    local relevantPath = isRelevantText(path)
+        or isSpecialText(path)
+        or isStatusPath(path)
+
+    local relevantValue = instance:IsA("ValueBase")
+        and (
+            relevantPath
+            or isPickupStateName(instance.Name)
+        )
+
+    local shouldWatch = relevantPath
+        or instance:IsA("ProximityPrompt")
+        or relevantValue
+
+    if instance:IsA("ProximityPrompt")
+        and not relevantPath
+        and not instanceNearPlayer(instance) then
+        shouldWatch = false
+    end
+
+    if not shouldWatch then
+        return
+    end
+
+    Debug.pickup.watched[instance] = true
+
+    if instance:IsA("ProximityPrompt") then
+        watchPickupProperty(instance, "Enabled")
+        watchPickupProperty(instance, "ActionText")
+        watchPickupProperty(instance, "ObjectText")
+        watchPickupProperty(instance, "HoldDuration")
+    end
+
+    if instance:IsA("GuiObject")
+        and (relevantPath or Debug.deep) then
+        watchPickupProperty(instance, "Visible")
+        watchPickupProperty(instance, "Active")
+    end
+
+    if instance:IsA("BasePart") and relevantPath then
+        watchPickupProperty(instance, "Transparency")
+        watchPickupProperty(instance, "CanTouch")
+        watchPickupProperty(instance, "CanQuery")
+    end
+
+    if instance:IsA("ValueBase")
+        and (relevantPath or isPickupStateName(instance.Name)) then
+        local baselineTable = Debug.pickup.propertyBaseline[instance]
+
+        if not baselineTable then
+            baselineTable = {}
+            Debug.pickup.propertyBaseline[instance] = baselineTable
+        end
+
+        baselineTable.Value = instance.Value
+
+        addConnection(instance.Changed:Connect(function()
+            if not Debug.active then
+                return
+            end
+
+            local oldValue = baselineTable.Value
+            local newValue = instance.Value
+            baselineTable.Value = newValue
+
+            recordPickupTransition(
+                instance,
+                "Value",
+                oldValue,
+                newValue,
+                "ValueBase.Changed"
+            )
+        end))
+    end
+
+    local ok, attributes = pcall(function()
+        return instance:GetAttributes()
+    end)
+
+    if ok and type(attributes) == "table" then
+        for attributeName in pairs(attributes) do
+            if relevantPath
+                or isRelevantAttribute(attributeName)
+                or isPickupStateName(attributeName) then
+                watchPickupAttribute(instance, attributeName)
+            end
+        end
+    end
+
+    local previousParent = instance.Parent
+
+    addConnection(instance.AncestryChanged:Connect(function()
+        if not Debug.active then
+            return
+        end
+
+        local newParent = instance.Parent
+
+        if previousParent ~= newParent then
+            recordPickupTransition(
+                instance,
+                "Parent",
+                previousParent and safeFullName(previousParent) or nil,
+                newParent and safeFullName(newParent) or nil,
+                "AncestryChanged"
+            )
+
+            if newParent == nil and relevantPath then
+                triggerPickupProbe(
+                    "Relevant object removed",
+                    path
+                )
+            end
+
+            previousParent = newParent
+        end
+    end))
+end
+
+local function attachPickupTransitionWatchers()
+    local roots = {
+        LocalPlayer:FindFirstChildOfClass("PlayerGui"),
+        LocalPlayer:FindFirstChild("Data"),
+        LocalPlayer:FindFirstChild("leaderstats"),
+        LocalPlayer:FindFirstChild("Backpack"),
+        LocalPlayer.Character,
+        Workspace,
+        ReplicatedStorage,
+    }
+
+    for _, root in ipairs(roots) do
+        if root then
+            for index, instance in ipairs(root:GetDescendants()) do
+                watchPickupInstance(instance)
+
+                if index % 1000 == 0 then
+                    task.wait()
+                end
+            end
+
+            addConnection(root.DescendantAdded:Connect(function(instance)
+                task.defer(watchPickupInstance, instance)
+            end))
+        end
+    end
+
+    logEvent(
+        "PICKUP_WATCHERS_READY",
+        "Transition watchers attached | history="
+            .. tostring(CONFIG.PickupHistorySeconds)
+            .. "s | after="
+            .. tostring(CONFIG.PickupProbeSeconds)
+            .. "s | nearbyPromptDistance="
+            .. tostring(CONFIG.PickupPromptDistance),
+        nil,
+        true
+    )
+end
+
+-- ============================================================
 -- GUI STATUS WATCH
 -- ============================================================
 local function isTextGui(instance)
@@ -899,6 +1509,16 @@ local function processGuiText(instance, reason)
     local text = trimText(rawText)
     local previous = Debug.guiBaseline[instance]
     Debug.guiBaseline[instance] = text
+
+    if reason ~= "baseline" and text ~= previous then
+        recordPickupTransition(
+            instance,
+            "Text",
+            previous,
+            text,
+            "PlayerGui." .. tostring(reason)
+        )
+    end
 
     -- Khi moi gan watcher, chi tao baseline; khong spam text tinh.
     if reason == "baseline" then
@@ -946,6 +1566,27 @@ local function processGuiText(instance, reason)
         "gui|" .. path .. "|" .. text,
         special
     )
+
+    if special then
+        triggerPickupProbe(
+            "Special chest/status text",
+            text
+        )
+    elseif Debug.pickup.active then
+        local lowered = string.lower(text)
+
+        if lowered:find("not ready", 1, true)
+            or lowered:find("unavailable", 1, true)
+            or lowered:find("cooldown", 1, true)
+            or lowered:find("disabled", 1, true) then
+            logEvent(
+                "PICKUP_NOT_READY_TEXT",
+                path .. " | text=" .. string.format("%q", text),
+                "pickup-not-ready|" .. path .. "|" .. text,
+                true
+            )
+        end
+    end
 end
 
 local function watchGui(instance)
@@ -965,9 +1606,23 @@ local function watchGui(instance)
         end)
     )
 
+    local previousVisible = instance.Visible
+
     addConnection(
         instance:GetPropertyChangedSignal("Visible"):Connect(function()
-            if instance.Visible then
+            local newVisible = instance.Visible
+
+            recordPickupTransition(
+                instance,
+                "Visible",
+                previousVisible,
+                newVisible,
+                "PlayerGui.Visible"
+            )
+
+            previousVisible = newVisible
+
+            if newVisible then
                 processGuiText(instance, "Visible=true")
             end
         end)
@@ -1024,6 +1679,14 @@ local function watchValueBase(instance, category)
         end
 
         Debug.valueBaseline[instance] = newValue
+
+        recordPickupTransition(
+            instance,
+            "Value",
+            oldValue,
+            newValue,
+            tostring(category or "VALUE_CHANGED")
+        )
 
         logEvent(
             category or "VALUE_CHANGED",
@@ -1099,7 +1762,21 @@ local function inventorySnapshot(reason)
                 logEvent(
                     "TOOL_ADDED",
                     path .. " | reason=" .. tostring(reason),
-                    "tool-add|" .. tostring(item)
+                    "tool-add|" .. tostring(item),
+                    true
+                )
+
+                recordPickupTransition(
+                    item,
+                    "Inventory",
+                    "absent",
+                    path,
+                    tostring(reason)
+                )
+
+                triggerPickupProbe(
+                    "Relevant Tool added",
+                    item.Name .. " | " .. path
                 )
             end
         end
@@ -1115,7 +1792,16 @@ local function inventorySnapshot(reason)
                 logEvent(
                     "TOOL_REMOVED",
                     oldPath .. " | reason=" .. tostring(reason),
-                    "tool-remove|" .. tostring(item)
+                    "tool-remove|" .. tostring(item),
+                    true
+                )
+
+                recordPickupTransition(
+                    item,
+                    "Inventory",
+                    oldPath,
+                    "absent",
+                    tostring(reason)
                 )
             end
         end
@@ -1364,13 +2050,28 @@ local function attachTargetRootSignals()
     local function onRemoving(instance)
         if isRelevantText(safeFullName(instance))
             or isSpecialText(safeFullName(instance)) then
+            local removedPath = safeFullName(instance)
+
             logEvent(
                 "OBJECT_REMOVING",
                 instance.ClassName
                     .. " | "
-                    .. safeFullName(instance),
+                    .. removedPath,
                 "object-remove|" .. tostring(instance),
                 true
+            )
+
+            recordPickupTransition(
+                instance,
+                "Parent",
+                instance.Parent and safeFullName(instance.Parent) or nil,
+                nil,
+                "DescendantRemoving"
+            )
+
+            triggerPickupProbe(
+                "Relevant object removing",
+                removedPath
             )
         end
     end
@@ -1469,6 +2170,12 @@ local function startDebug(boundary)
         "AutoHop: " .. tostring(HOP_ENABLED),
         "DeepAtStart: " .. tostring(Debug.deep),
         "PartLines: " .. tostring(CONFIG.PartLines),
+        "PickupHistorySeconds: "
+            .. tostring(CONFIG.PickupHistorySeconds),
+        "PickupProbeSeconds: "
+            .. tostring(CONFIG.PickupProbeSeconds),
+        "PickupPromptDistance: "
+            .. tostring(CONFIG.PickupPromptDistance),
         string.rep("=", 88),
     }
     Debug.dirty = true
@@ -1479,6 +2186,13 @@ local function startDebug(boundary)
     Debug.guiBaseline = setmetatable({}, { __mode = "k" })
     Debug.valueBaseline = setmetatable({}, { __mode = "k" })
     Debug.inventory = {}
+    Debug.pickup.active = false
+    Debug.pickup.untilClock = 0
+    Debug.pickup.trigger = "none"
+    Debug.pickup.history = {}
+    Debug.pickup.watched = setmetatable({}, { __mode = "k" })
+    Debug.pickup.propertyBaseline = setmetatable({}, { __mode = "k" })
+    Debug.pickup.attributeBaseline = setmetatable({}, { __mode = "k" })
 
     attachPlayerGuiWatchers()
     attachPlayerDataWatchers()
@@ -1486,6 +2200,7 @@ local function startDebug(boundary)
     attachRemoteWatchers()
     attachTargetRootSignals()
     installOutgoingHook()
+    task.spawn(attachPickupTransitionWatchers)
 
     task.spawn(scanTargetRoots, "debug-start")
 
@@ -1521,6 +2236,8 @@ local function stopDebug(reason)
     flushLog(true)
     disconnectDebugConnections()
 
+    Debug.pickup.active = false
+    Debug.pickup.untilClock = 0
     Debug.active = false
 
     updateDebugInfo(
@@ -1552,6 +2269,7 @@ local function setDeepMode(enabled)
                     and not shouldIgnoreGui(instance) then
                     Debug.guiBaseline[instance] = trimText(instance.Text)
                     watchGui(instance)
+                    watchPickupInstance(instance)
                 end
             end
         end
@@ -1992,7 +2710,7 @@ if not parented then
 end
 
 local Main = Instance.new("Frame")
-Main.Size = UDim2.fromOffset(520, 390)
+Main.Size = UDim2.fromOffset(520, 445)
 Main.Position = UDim2.new(0.5, -260, 0.08, 0)
 Main.BackgroundColor3 = Color3.fromRGB(18, 24, 32)
 Main.BorderSizePixel = 0
@@ -2185,6 +2903,32 @@ local DeepCorner = Instance.new("UICorner")
 DeepCorner.CornerRadius = UDim.new(0, 7)
 DeepCorner.Parent = UI.DeepButton
 
+UI.ProbeStatus = Instance.new("TextLabel")
+UI.ProbeStatus.Size = UDim2.new(1, 0, 0, 19)
+UI.ProbeStatus.Position = UDim2.fromOffset(0, 297)
+UI.ProbeStatus.BackgroundTransparency = 1
+UI.ProbeStatus.Font = Enum.Font.GothamBold
+UI.ProbeStatus.Text = "PICKUP PROBE: ARMED — AUTO"
+UI.ProbeStatus.TextColor3 = Color3.fromRGB(255, 186, 73)
+UI.ProbeStatus.TextSize = 10
+UI.ProbeStatus.TextXAlignment = Enum.TextXAlignment.Left
+UI.ProbeStatus.Parent = Content
+
+UI.ProbeButton = Instance.new("TextButton")
+UI.ProbeButton.Size = UDim2.new(1, 0, 0, 32)
+UI.ProbeButton.Position = UDim2.fromOffset(0, 319)
+UI.ProbeButton.BackgroundColor3 = Color3.fromRGB(137, 83, 42)
+UI.ProbeButton.BorderSizePixel = 0
+UI.ProbeButton.Font = Enum.Font.GothamBold
+UI.ProbeButton.Text = "KÍCH HOẠT PICKUP PROBE THỦ CÔNG"
+UI.ProbeButton.TextColor3 = Color3.fromRGB(255, 244, 230)
+UI.ProbeButton.TextSize = 11
+UI.ProbeButton.Parent = Content
+
+local ProbeCorner = Instance.new("UICorner")
+ProbeCorner.CornerRadius = UDim.new(0, 7)
+ProbeCorner.Parent = UI.ProbeButton
+
 UI.HopButton = Instance.new("TextButton")
 UI.HopButton.Size = UDim2.new(0.5, -5, 0, 32)
 UI.HopButton.Position = UDim2.new(0, 0, 1, -35)
@@ -2273,7 +3017,7 @@ Minimize.MouseButton1Click:Connect(function()
     Content.Visible = not minimized
     Main.Size = minimized
         and UDim2.fromOffset(520, 42)
-        or UDim2.fromOffset(520, 390)
+        or UDim2.fromOffset(520, 445)
     Minimize.Text = minimized and "+" or "—"
 end)
 
@@ -2290,6 +3034,21 @@ end)
 
 UI.DeepButton.MouseButton1Click:Connect(function()
     setDeepMode(not Debug.deep)
+end)
+
+UI.ProbeButton.MouseButton1Click:Connect(function()
+    if not Debug.active then
+        notify(
+            "Pickup Probe",
+            "Debug chưa hoạt động vì server chưa nằm trong cửa sổ."
+        )
+        return
+    end
+
+    triggerPickupProbe(
+        "Manual button",
+        "User armed probe before/after pickup"
+    )
 end)
 
 UI.ReleaseButton.MouseButton1Click:Connect(function()
@@ -2438,6 +3197,70 @@ task.spawn(function()
     end
 end)
 
+-- Pickup probe lifecycle.
+task.spawn(function()
+    while not State.destroyed do
+        if Debug.active then
+            prunePickupHistory()
+
+            if Debug.pickup.active then
+                local remaining = math.max(
+                    0,
+                    Debug.pickup.untilClock - os.clock()
+                )
+
+                if UI.ProbeStatus then
+                    UI.ProbeStatus.Text = string.format(
+                        "PICKUP PROBE #%d: ACTIVE — CÒN %.1fs | %s",
+                        Debug.pickup.id,
+                        remaining,
+                        Debug.pickup.trigger
+                    )
+                    UI.ProbeStatus.TextColor3 =
+                        Color3.fromRGB(107, 221, 159)
+                end
+
+                if remaining <= 0 then
+                    logEvent(
+                        "PICKUP_PROBE_STOP",
+                        string.format(
+                            "Probe#%d | trigger=%s | finalUptime=%s",
+                            Debug.pickup.id,
+                            Debug.pickup.trigger,
+                            formatDuration(State.uptime)
+                        ),
+                        nil,
+                        true
+                    )
+
+                    Debug.pickup.active = false
+                    Debug.pickup.untilClock = 0
+
+                    if UI.ProbeStatus then
+                        UI.ProbeStatus.Text =
+                            "PICKUP PROBE: ARMED — AUTO"
+                        UI.ProbeStatus.TextColor3 =
+                            Color3.fromRGB(255, 186, 73)
+                    end
+                end
+            elseif UI.ProbeStatus then
+                UI.ProbeStatus.Text =
+                    "PICKUP PROBE: ARMED — AUTO | HISTORY "
+                    .. tostring(#Debug.pickup.history)
+                UI.ProbeStatus.TextColor3 =
+                    Color3.fromRGB(255, 186, 73)
+            end
+        elseif UI.ProbeStatus then
+            UI.ProbeStatus.Text =
+                "PICKUP PROBE: CHỜ DEBUG BẮT ĐẦU"
+            UI.ProbeStatus.TextColor3 =
+                Color3.fromRGB(143, 158, 178)
+        end
+
+        task.wait(0.1)
+    end
+end)
+
 -- Flush log định kỳ.
 task.spawn(function()
     while not State.destroyed do
@@ -2463,3 +3286,11 @@ end)
 print("[CHEST DEBUG LITE] Started")
 print("[CHEST DEBUG LITE] Auto Hop:", HOP_ENABLED and "ON" or "OFF")
 print("[CHEST DEBUG LITE] JobId:", JobId)
+
+print(
+    "[PICKUP PROBE] History:",
+    CONFIG.PickupHistorySeconds,
+    "seconds | After trigger:",
+    CONFIG.PickupProbeSeconds,
+    "seconds"
+)
