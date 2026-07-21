@@ -8,13 +8,13 @@ getgenv().Settings = {
     ["Chest Tween Speed"] = 325;
     ["Chest Touch Radius"] = 8;
 
-    -- Server uptime window: 04-05, 08-09, 12-13...
+    -- Server uptime window: 04-06, 08-10, 12-14...
     ["Chest Server Period"] = 4 * 60 * 60;
     ["Chest Server Grace"] = 2 * 60 * 60;
 
     -- Hop
-    ["Hop Max Pages"] = 150;
-    ["Hop Scan Batch"] = 150; -- quét 50 page/server mỗi đợt
+    ["Hop Max Pages"] = 500;
+    ["Hop Scan Batch"] = 50; -- quét 50 page/server mỗi đợt
     ["Hop Max Players"] = 8;
 
     -- Soul Guitar Instance chest bypass
@@ -1435,7 +1435,7 @@ GuiService.ErrorMessageChanged:Connect(newcclosure(function()
     end
 end))
 print("[CYBORG BASE OK] Soul Guitar chest replacement loaded")
-print("[CYBORG BASE OK] Windows: 04-05, 08-09, 12-13, ...")
+print("[CYBORG BASE OK] Windows: 04-06, 08-10, 12-14, ...")
 print("[CYBORG BASE OK] Hop max pages:", getgenv().Settings["Hop Max Pages"])
 print("[CYBORG BASE OK] Hop scan batch:", getgenv().Settings["Hop Scan Batch"])
 print("[CYBORG BASE OK] Chest method: Soul Guitar Instance Bypass")
