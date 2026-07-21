@@ -78,7 +78,7 @@ local CONFIG = {
     -- Hop
     MaxPlayers           = USER_CONFIG.MaxPlayers or 4, -- chap nhan <= 4 nguoi
     ForcedRegion         = USER_CONFIG.ForcedRegion,     -- nil, "US", "EU", "AP"...
-    MaxPages             = USER_CONFIG.MaxPages or 100,
+    MaxPages             = USER_CONFIG.MaxPages or 500,
     ConcurrentWorkers    = USER_CONFIG.ConcurrentWorkers or 6,
     CandidateTarget      = USER_CONFIG.CandidateTarget or 18,
     BrowserTimeout       = USER_CONFIG.BrowserTimeout or 8,
