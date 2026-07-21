@@ -10,7 +10,7 @@ getgenv().Settings = {
 
     -- Server uptime window: 04-05, 08-09, 12-13...
     ["Chest Server Period"] = 4 * 60 * 60;
-    ["Chest Server Grace"] = 1 * 60 * 60;
+    ["Chest Server Grace"] = 2 * 60 * 60;
 
     -- Hop
     ["Hop Max Pages"] = 150;
