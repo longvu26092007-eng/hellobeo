@@ -1,6 +1,7 @@
 getgenv().Settings = {
-    ["Max Chests"] = 20;
-    ["Reset After Collect Chests"] = 10;
+    ["Max Chests"] = 50;
+    ["Skip Chest Delay"] = 1;
+    ["Reset After Collect Chests"] = 7;
     ["Katakuri Progress"] = 100;
     ["Fragments"] = 1000;
     ["Black Screen"] = false;
@@ -13,7 +14,7 @@ getgenv().Settings = {
 
     -- Hop
     ["Hop Max Pages"] = 500;
-    ["Hop Scan Batch"] = 150; -- quét 50 page/server mỗi đợt
+    ["Hop Scan Batch"] = 50; -- quét 50 page/server mỗi đợt
     ["Hop Max Players"] = 8;
 }
 
@@ -744,6 +745,21 @@ local function TweenTouchPart(part, text, speedSetting, radiusSetting, stopCondi
     return touched
 end
 
+local function TweenChest(chest, stopCondition)
+    if not chest or not chest:IsA("BasePart") or not chest.Parent or not chest.CanTouch then
+        return false
+    end
+
+    return TweenTouchPart(
+        chest,
+        nil,
+        "Chest Tween Speed",
+        "Chest Touch Radius",
+        function()
+            return not chest.Parent or not chest.CanTouch or (stopCondition and stopCondition())
+        end
+    )
+end
 
 local lastGhost = tick()
 BringMonster = (function(name, count) count = count or 3
@@ -842,50 +858,53 @@ hookedNotification = hookfunction(require(ReplicatedStorage.Notification).new, n
     return hookedNotification(...)
 end))
 
+-- ============================================================
+-- EXACT CHEST METHOD FROM USER SOURCE
+-- Y nguyen cach trong FarmBeli:
+--   task.delay(2, function() v.CanTouch = false end)
+--   Character:SetPrimaryPartCFrame(v.CFrame)
+--   PressKeyEvent("Space")
+--   repeat cho den khi v.CanTouch = false
+-- ============================================================
+local function SoulGuitarExactChestMethod(v, stopCondition)
+    if not v
+        or not v:IsA("BasePart")
+        or not v.Parent
+        or not v.CanTouch then
+        return false
+    end
+
+    repeat
+        task.wait()
+
+        task.delay(2, function()
+            if v and v.Parent then
+                v.CanTouch = false
+            end
+        end)
+
+        if Character
+            and Character:FindFirstChildWhichIsA("Humanoid")
+            and Character:FindFirstChildWhichIsA("Humanoid").Health > 0 then
+
+            Character:SetPrimaryPartCFrame(v.CFrame)
+        end
+
+        PressKeyEvent("Space")
+    until
+        not v
+        or not v.Parent
+        or not v.CanTouch
+        or (stopCondition and stopCondition())
+
+    return
+        not v
+        or not v.Parent
+        or not v.CanTouch
+end
+
 local all = 0
 local fragok = false;
-
-FarmBeli = (function(x)
-    if type(x) ~= "function" then warn("ddijt con me may") end
-    local chests, c = {}, 0 local m = CollectionService:GetTagged("_ChestTagged")
-    if all < getgenv().Settings["Max Chests"] and not CheckTool("Fist of Darkness") then
-        for _, v in next, CollectionService:GetTagged("_ChestTagged") do if v and v.CanTouch then local dist = (v.Position - HumanoidRootPart.Position).Magnitude table.insert(chests, {obj = v, dist = dist}) end end
-            table.sort(chests, function(a, b) return a.dist < b.dist end)
-            if not CheckTool("Fist of Darkness") then 
-                for i, t in next, chests do local v = t.obj
-                    if v:IsA("BasePart") and v.Name:find("Chest") then
-                        if v.CanTouch then
-                            repeat task.wait()
-                                print("Collect Chests | Collected: " .. c.."/"..all .. "/"..getgenv().Settings["Max Chests"].." Chests")
-                                task.delay(2, function() v.CanTouch = false end)
-                                if Character and Character.Humanoid and Character.Humanoid.Health > 0 then
-                                    Character:SetPrimaryPartCFrame(v.CFrame)
-                                end
-                                PressKeyEvent("Space")
-                            until not v.CanTouch or CheckTool("Fist of Darkness") c += 1 all += 1
-                            if all >= getgenv().Settings["Max Chests"] then print("Stopped: Max Chests reached") HopServer(8) break
-                            elseif CheckTool("Fist of Darkness") then print("Stopped: Fist of Darkness detected") break
-                            elseif CheckMonster("Darkbeard") then print("Stopped: Darkbeard nearby") HopServer(8) break
-                            end
-                            print(c, getgenv().Settings["Reset After Collect Chests"])
-                            if Character and c >= getgenv().Settings["Reset After Collect Chests"] and not CheckTool("Fist of Darkness") then
-                                if Character and Character:FindFirstChildWhichIsA("Humanoid")then
-                                    Character:FindFirstChildWhichIsA("Humanoid"):ChangeState(Enum.HumanoidStateType.Dead)
-                                    print("Collect Chests | Reset: Collected: "..tostring(getgenv().Settings["Reset After Collect Chests"]) .." Chests")
-                                end
-                                c = 0 task.wait(1)
-                            end
-                        end
-                        if i % 250 == 0 then task.wait(0.1) end
-                    end
-                end
-            else
-                Tween(false)
-                print("Stopped: Found Special Item")
-            end
-        if not CheckTool("Fist of Darkness") and not CheckMonster("Darkbeard") then HopServer(10) end 
-    end
-end)
 task.spawn(function()
     while task.wait(0.5) do
         xpcall(function()
@@ -1043,22 +1062,259 @@ task.spawn(function()
                 if CheckSea(2) then
                     if CheckTool("Fist of Darkness") then
                         EquipWeapon("Fist of Darkness")
-                        fireclickdetector(workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector)
+                        fireclickdetector(
+                            workspace.Map.CircleIsland
+                                .RaidSummon.Button.Main.ClickDetector
+                        )
                     else
-                        local inWindow, uptime, source, timeInfo = CheckChestTimeWindow()
+                        local inWindow, uptime, source, timeInfo =
+                            CheckChestTimeWindow()
+
                         if not uptime then
-                            SetText("Cyborg Chest | Cannot read server uptime\n"..tostring(source))
+                            SetText(
+                                "Cyborg Chest | Cannot read server uptime\n"
+                                .. tostring(source)
+                            )
                             task.wait(3)
                         elseif not inWindow then
-                            local nextText = timeInfo and FormatUptime(timeInfo.NextBoundary) or "unknown"
-                            SetText("Cyborg Chest | Outside chest window\nUptime: "..FormatUptime(uptime).." | Next: "..nextText.."\nHop server...")
+                            local nextText =
+                                timeInfo
+                                and FormatUptime(timeInfo.NextBoundary)
+                                or "unknown"
+
+                            SetText(
+                                "Cyborg Chest | Outside chest window\n"
+                                .. "Uptime: "
+                                .. FormatUptime(uptime)
+                                .. " | Next: "
+                                .. nextText
+                                .. "\nHop server..."
+                            )
+
                             task.wait(1)
-                            HopServer(tonumber(getgenv().Settings["Hop Max Players"]) or 8)
+                            HopServer(
+                                tonumber(
+                                    getgenv().Settings[
+                                        "Hop Max Players"
+                                    ]
+                                ) or 8
+                            )
                         else
-                            FarmBeli(function()
-                                local valid = CheckChestTimeWindow()
-                                return not valid or all >= getgenv().Settings["Max Chests"] or CheckTool("Fist of Darkness") or CheckTool("Darkbeard")
+                            local windowStart =
+                                FormatUptime(timeInfo.Boundary)
+                            local windowEnd =
+                                FormatUptime(timeInfo.WindowEnd)
+
+                            SetText(
+                                "Soul Guitar Chest | "
+                                .. windowStart
+                                .. "-"
+                                .. windowEnd
+                                .. "\nUptime: "
+                                .. FormatUptime(uptime)
+                            )
+
+                            local chests, c = {}, 0
+
+                            if not Character
+                                or IsDied(Character)
+                                or not HumanoidRootPart then
+                                print("Not found character")
+                                task.wait(3)
+                                return
+                            end
+
+                            Tween(false)
+
+                            for _, chest in next,
+                                CollectionService:GetTagged(
+                                    "_ChestTagged"
+                                ) do
+
+                                if chest
+                                    and chest:IsA("BasePart")
+                                    and chest.Parent
+                                    and chest.CanTouch
+                                    and chest.Name:find("Chest") then
+
+                                    local dist =
+                                        (
+                                            chest.Position
+                                            - HumanoidRootPart.Position
+                                        ).Magnitude
+
+                                    table.insert(chests, {
+                                        obj = chest,
+                                        dist = dist,
+                                    })
+                                end
+                            end
+
+                            table.sort(chests, function(a, b)
+                                return a.dist < b.dist
                             end)
+
+                            if #chests > 0
+                                and all
+                                    < getgenv().Settings["Max Chests"]
+                                and not CheckTool(
+                                    "Fist of Darkness"
+                                ) then
+
+                                for _, data in next, chests do
+                                    local chest = data.obj
+
+                                    local stillValid, nowUptime =
+                                        CheckChestTimeWindow()
+
+                                    if not stillValid then
+                                        SetText(
+                                            "Chest window ended | Uptime "
+                                            .. FormatUptime(
+                                                nowUptime or 0
+                                            )
+                                            .. "\nHop server..."
+                                        )
+                                        task.wait(1)
+                                        HopServer(
+                                            tonumber(
+                                                getgenv().Settings[
+                                                    "Hop Max Players"
+                                                ]
+                                            ) or 8
+                                        )
+                                        break
+                                    end
+
+                                    if chest
+                                        and chest.Parent
+                                        and chest.CanTouch then
+
+                                        repeat
+                                            task.wait()
+
+                                            SetText(
+                                                "Collect Soul Guitar Chests | Exact Source Method"
+                                                .. "\nWindow: "
+                                                .. windowStart
+                                                .. "-"
+                                                .. windowEnd
+                                                .. "\nCollected: "
+                                                .. tostring(c)
+                                                .. "/"
+                                                .. tostring(all)
+                                                .. "/"
+                                                .. tostring(
+                                                    getgenv().Settings[
+                                                        "Max Chests"
+                                                    ]
+                                                )
+                                            )
+
+                                            SoulGuitarExactChestMethod(
+                                                chest,
+                                                function()
+                                                    local valid =
+                                                        CheckChestTimeWindow()
+
+                                                    return
+                                                        not valid
+                                                        or CheckTool(
+                                                            "Fist of Darkness"
+                                                        )
+                                                        or IsDied(Character)
+                                                end
+                                            )
+                                        until
+                                            not chest
+                                            or not chest.Parent
+                                            or not chest.CanTouch
+                                            or CheckTool(
+                                                "Fist of Darkness"
+                                            )
+                                            or IsDied(Character)
+
+                                        if CheckTool(
+                                            "Fist of Darkness"
+                                        ) then
+                                            SetText(
+                                                "Stopped: Fist of Darkness detected"
+                                            )
+                                            break
+                                        elseif CheckMonster(
+                                            "Darkbeard"
+                                        ) then
+                                            break
+                                        end
+
+                                        if not IsDied(Character) then
+                                            c += 1
+                                            all += 1
+
+                                            if all
+                                                >= getgenv().Settings[
+                                                    "Max Chests"
+                                                ] then
+
+                                                SetText(
+                                                    "Max Chests reached | Hop"
+                                                )
+                                                HopServer(
+                                                    tonumber(
+                                                        getgenv().Settings[
+                                                            "Hop Max Players"
+                                                        ]
+                                                    ) or 8
+                                                )
+                                                break
+                                            end
+
+                                            if c
+                                                >= getgenv().Settings[
+                                                    "Reset After Collect Chests"
+                                                ]
+                                                and not CheckTool(
+                                                    "Fist of Darkness"
+                                                ) then
+
+                                                local humanoid =
+                                                    Character
+                                                    and Character:
+                                                        FindFirstChildWhichIsA(
+                                                            "Humanoid"
+                                                        )
+
+                                                if humanoid then
+                                                    humanoid:ChangeState(
+                                                        Enum.HumanoidStateType.Dead
+                                                    )
+                                                end
+
+                                                c = 0
+                                                task.wait(1)
+                                            end
+                                        else
+                                            break
+                                        end
+                                    end
+                                end
+                            else
+                                if not CheckTool("Fist of Darkness")
+                                    and not CheckMonster("Darkbeard") then
+
+                                    SetText(
+                                        "No chest found in valid window | Hop"
+                                    )
+
+                                    HopServer(
+                                        tonumber(
+                                            getgenv().Settings[
+                                                "Hop Max Players"
+                                            ]
+                                        ) or 8
+                                    )
+                                end
+                            end
                         end
                     end
                 else
