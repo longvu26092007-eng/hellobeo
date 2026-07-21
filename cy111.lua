@@ -13,7 +13,7 @@ getgenv().Settings = {
     ["Chest Server Grace"] = 1 * 60 * 60;
 
     -- Hop
-    ["Hop Max Pages"] = 500;
+    ["Hop Max Pages"] = 150;
     ["Hop Scan Batch"] = 150; -- quét 50 page/server mỗi đợt
     ["Hop Max Players"] = 8;
 
