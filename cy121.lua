@@ -1,10 +1,3 @@
--- EDIT KEY HERE, THEN EXECUTE THIS FILE DIRECTLY.
-getgenv = getgenv or function() return _G end
-local __env = getgenv()
-if __env.Key == nil then
-    __env.Key = "PUT_BANANA_KEY_HERE"
-end
-
 -- ============================================================
 -- EXECUTOR / STARTUP COMPATIBILITY BOOTSTRAP
 -- Prevents early "attempt to call a nil value" crashes.
@@ -84,7 +77,7 @@ local DEFAULT_SETTINGS = {
     ["Katakuri Progress"] = 100,
     ["Fragments"] = 1000,
     ["Black Screen"] = false,
-    ["Chest Tween Speed"] = 350,
+    ["Chest Tween Speed"] = 375,
     ["Chest Touch Radius"] = 8,
     ["Chest Server Period"] = 4 * 60 * 60,
     ["Chest Server Grace"] = 2 * 60 * 60,
@@ -1437,6 +1430,8 @@ task.spawn(function()
                 SetText("Cyborg V1: owned\nGhoul V1: owned\nCompleted-done")
                 return
             elseif RaceFlow.mode == "GET_GHOUL" then
+                -- Ghoul is fully independent from the Cyborg 4h + 2h chest window.
+                -- Do not check Sea, server uptime, or hop by Cyborg chest time here.
                 Tween(false)
                 StartGhoulLoader()
                 return
@@ -1556,6 +1551,11 @@ task.spawn(function()
                         EquipWeapon("Fist of Darkness")
                         SafeClickDetector(workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector)
                     else
+                        -- IMPORTANT: 4h + 2h applies ONLY to Get Cyborg chest/Fist farming.
+                        -- This block is reachable only while RaceFlow.mode == "GET_CYBORG".
+                        if RaceFlow.mode ~= "GET_CYBORG" then
+                            return
+                        end
                         local inWindow, uptime, uptimeSource, timeInfo = CheckChestTimeWindow()
 
                         if not uptime then
