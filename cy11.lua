@@ -9,10 +9,12 @@ getgenv().Settings = {
     ["Chest Touch Radius"] = 8;
 
     -- Server hop scanner
-    ["Hop Max Pages"] = 150;          -- Tổng số page tối đa được duyệt
-    ["Hop Pages Per Batch"] = 100;     -- Số page quét trong mỗi lần hop
+    ["Hop Max Pages"] = 500;          -- Tổng số page tối đa được duyệt
+    ["Hop Pages Per Batch"] = 150;    -- Số page yêu cầu trong mỗi lần hop
     ["Hop Max Players"] = 8;          -- Chỉ lấy server có player <= giá trị này
     ["Hop Forced Region"] = nil;      -- VD: "Singapore"; nil = mọi region
+    ["Hop Scan Concurrency"] = 70;  -- Số page gọi song song (không phải tổng page)
+    ["Hop Batch Timeout"] = 18;     -- Giới hạn thời gian chờ một batch
 
     -- Server uptime chest window: every 4 hours, active for 2 hours
     ["Chest Server Period"] = 4 * 60 * 60;
@@ -166,6 +168,10 @@ local DashboardState = {
         StartPage = 0,
         EndPage = 0,
         ScannedPages = 0,
+        RequestedPages = 0,
+        CompletedPages = 0,
+        FailedPages = 0,
+        TimedOut = false,
         Candidates = 0,
         SelectedJobId = nil,
         SelectedPlayers = nil,
@@ -217,7 +223,7 @@ local Panel = Instance.new("Frame")
 Panel.Name = "Panel"
 Panel.AnchorPoint = Vector2.new(0.5, 0)
 Panel.Position = UDim2.new(0.5, 0, 0, 42)
-Panel.Size = UDim2.fromOffset(610, 285)
+Panel.Size = UDim2.fromOffset(660, 330)
 Panel.BackgroundColor3 = Color3.fromRGB(13, 18, 25)
 Panel.BackgroundTransparency = 0.08
 Panel.BorderSizePixel = 0
@@ -259,7 +265,7 @@ TitleLabel.Size = UDim2.new(1, -24, 1, 0)
 TitleLabel.Position = UDim2.fromOffset(12, 0)
 TitleLabel.BackgroundTransparency = 1
 TitleLabel.Font = Enum.Font.GothamBold
-TitleLabel.Text = "CYBORG AUTOMATION — DETAILED STATUS"
+TitleLabel.Text = "CYBORG AUTOMATION — TIME WINDOW FIX v2"
 TitleLabel.TextColor3 = Color3.fromRGB(116, 227, 169)
 TitleLabel.TextSize = 15
 TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
@@ -314,7 +320,7 @@ local SourceLabel = makeDashboardLabel(
 
 local RaceLabel = makeDashboardLabel(
     "RaceAndSea",
-    131, 24,
+    131, 38,
     "Sea: waiting | Race: waiting | Fragments: waiting",
     13,
     Color3.fromRGB(229, 233, 240),
@@ -323,7 +329,7 @@ local RaceLabel = makeDashboardLabel(
 
 local ItemLabel = makeDashboardLabel(
     "CyborgItems",
-    156, 40,
+    170, 54,
     "State: waiting | Fist: no | Microchip: no | Core Brain: no | Order: no",
     12,
     Color3.fromRGB(205, 216, 228),
@@ -332,7 +338,7 @@ local ItemLabel = makeDashboardLabel(
 
 local StatusLabel = makeDashboardLabel(
     "CurrentStatus",
-    197, 42,
+    225, 46,
     "Status: Loading...",
     13,
     Color3.fromRGB(255, 255, 255),
@@ -341,7 +347,7 @@ local StatusLabel = makeDashboardLabel(
 
 local HopLabel = makeDashboardLabel(
     "HopStatus",
-    240, 34,
+    272, 48,
     "Hop: idle",
     11,
     Color3.fromRGB(145, 205, 255),
@@ -421,26 +427,174 @@ local function SetText(...)
 end
 
 local mainfile = LocalPlayer.Name .. ".txt"
-if type(isfile) == "function" and type(writefile) == "function" then
-    if not isfile(mainfile) then
-        writefile(mainfile, "NaN")
+local progressfile = LocalPlayer.Name .. "_cyborg_progress.txt"
+local ownershipfile = LocalPlayer.Name .. "_cyborg_owned.txt"
+
+local function safeReadFile(path)
+    if type(isfile) ~= "function" or type(readfile) ~= "function" then
+        return nil
+    end
+
+    local okExists, exists = pcall(isfile, path)
+    if not okExists or not exists then
+        return nil
+    end
+
+    local ok, result = pcall(readfile, path)
+    if ok and result ~= nil then
+        return tostring(result)
+    end
+
+    return nil
+end
+
+local function safeWriteFile(path, content)
+    if type(writefile) ~= "function" then
+        return false
+    end
+
+    return pcall(writefile, path, tostring(content))
+end
+
+-- Tách file tiến trình Get Cyborg khỏi file kết quả cuối.
+-- PlayerName.txt chỉ được ghi Completed-done khi đã xác nhận cả Cyborg V1 và Ghoul V1.
+do
+    local legacy = safeReadFile(mainfile)
+
+    if legacy == "unlock" or legacy == "chest" or legacy == "NaN" then
+        safeWriteFile(progressfile, legacy)
+        safeWriteFile(mainfile, "Pending")
+    elseif legacy == "Completed-cyborg" then
+        safeWriteFile(ownershipfile, "cyborg-owned")
+        safeWriteFile(mainfile, "Pending")
+    end
+
+    if not safeReadFile(progressfile) then
+        safeWriteFile(progressfile, "NaN")
     end
 end
 
 local function readMainState()
-    if type(readfile) ~= "function" then
-        return tostring(CyborgBlockPartUnlocked or "NaN")
+    return safeReadFile(progressfile)
+        or tostring(CyborgBlockPartUnlocked or "NaN")
+end
+
+local RaceFlow = {
+    CyborgOwnedRuntime = false,
+    BananaStarted = false,
+    BananaRunning = false,
+    BananaLastAttempt = 0,
+    BananaLastError = nil,
+    Completed = safeReadFile(mainfile) == "Completed-done",
+}
+
+local function getCurrentRaceName()
+    local data = LocalPlayer and LocalPlayer:FindFirstChild("Data")
+    local race = data and data:FindFirstChild("Race")
+    return race and tostring(race.Value) or ""
+end
+
+local function markCyborgOwned()
+    RaceFlow.CyborgOwnedRuntime = true
+    safeWriteFile(ownershipfile, "cyborg-owned")
+end
+
+local function hasCyborgV1()
+    if RaceFlow.CyborgOwnedRuntime then
+        return true
     end
 
-    local ok, result = pcall(function()
-        return readfile(mainfile)
+    if getCurrentRaceName():lower() == "cyborg" then
+        markCyborgOwned()
+        return true
+    end
+
+    if safeReadFile(ownershipfile) == "cyborg-owned" then
+        RaceFlow.CyborgOwnedRuntime = true
+        return true
+    end
+
+    return false
+end
+
+-- Theo luồng đã chốt: Banana hoàn tất khi race hiện tại đổi sang Ghoul.
+-- Không gọi Ectoplasm Change trong checker và không đoán từ kết quả mơ hồ.
+local function hasGhoulV1()
+    return getCurrentRaceName():lower() == "ghoul"
+end
+
+local function writeCompletedDone()
+    if RaceFlow.Completed then
+        return true
+    end
+
+    if hasCyborgV1() and hasGhoulV1() then
+        safeWriteFile(mainfile, "Completed-done")
+        RaceFlow.Completed = true
+        return true
+    end
+
+    return false
+end
+
+local function startBananaGetGhoul()
+    if RaceFlow.Completed or hasGhoulV1() then
+        return false
+    end
+
+    -- Chỉ gọi Banana khi player đang dùng Cyborg, đúng yêu cầu.
+    if getCurrentRaceName():lower() ~= "cyborg" then
+        return false
+    end
+
+    if RaceFlow.BananaRunning or RaceFlow.BananaStarted then
+        return true
+    end
+
+    if tick() - RaceFlow.BananaLastAttempt < 15 then
+        return false
+    end
+
+    local env = getgenv()
+    if type(env.Key) ~= "string" or env.Key == "" then
+        RaceFlow.BananaLastError = "getgenv().Key is empty"
+        return false
+    end
+
+    RaceFlow.BananaLastAttempt = tick()
+    RaceFlow.BananaStarted = true
+    RaceFlow.BananaRunning = true
+    RaceFlow.BananaLastError = nil
+
+    task.spawn(function()
+        local ok, err = xpcall(function()
+            env.Config = {
+                ["Hop Server Get Ghoul"] = true,
+                ["Auto Get Ghoul"] = true,
+            }
+
+            local compiler = loadstring or load
+            assert(type(compiler) == "function", "loadstring/load is unavailable")
+
+            local bananaUrl = "https:" .. "//raw.githubusercontent.com/obiiyeuem/vthangsitink/main/BananaHub.lua"
+            local source = game:HttpGet(bananaUrl)
+            local runner, compileError = compiler(source)
+            assert(runner, tostring(compileError))
+            runner()
+        end, function(message)
+            return tostring(message)
+        end)
+
+        RaceFlow.BananaRunning = false
+
+        if not ok then
+            RaceFlow.BananaStarted = false
+            RaceFlow.BananaLastError = err
+            warn("[Banana Get Ghoul] " .. tostring(err))
+        end
     end)
 
-    if ok and result then
-        return tostring(result)
-    end
-
-    return tostring(CyborgBlockPartUnlocked or "NaN")
+    return true
 end
 
 local function hasToolForUI(toolName)
@@ -588,25 +742,54 @@ local function CheckChestTimeWindow()
         return false, nil, source, nil
     end
 
-    local period =
+    -- Quy tắc chính xác:
+    --   dưới 4h       -> HOP
+    --   4h00-6h00     -> GIỮ
+    --   trên 6h-8h    -> HOP
+    --   8h00-10h00    -> GIỮ
+    --   trên 10h-12h  -> HOP ...
+    -- Nghĩa là cửa sổ đầu tiên bắt đầu tại 4h, sau đó lặp lại mỗi 4h,
+    -- mỗi cửa sổ chỉ kéo dài thêm 2h.
+    local period = math.max(
+        1,
         tonumber(getgenv().Settings["Chest Server Period"])
-        or (4 * 60 * 60)
-
-    local grace =
+            or (4 * 60 * 60)
+    )
+    local grace = math.max(
+        0,
         tonumber(getgenv().Settings["Chest Server Grace"])
-        or (2 * 60 * 60)
+            or (2 * 60 * 60)
+    )
 
-    local offset = uptime % period
-    local inWindow = offset < grace
-    local cycleStart = uptime - offset
+    local firstWindowStart = period
+
+    if uptime < firstWindowStart then
+        return false, uptime, source, {
+            Phase = "BEFORE_FIRST_WINDOW",
+            Offset = uptime,
+            CycleStart = firstWindowStart,
+            CycleEnd = firstWindowStart + grace,
+            NextBoundary = firstWindowStart,
+            Remaining = firstWindowStart - uptime,
+        }
+    end
+
+    local windowIndex = math.floor((uptime - firstWindowStart) / period)
+    local cycleStart = firstWindowStart + (windowIndex * period)
     local cycleEnd = cycleStart + grace
+    local offset = uptime - cycleStart
+
+    -- Đúng ví dụ: 6h00 và 10h00 vẫn giữ; chỉ sau mốc đó mới hop.
+    local inWindow = uptime <= cycleEnd
     local nextBoundary = inWindow and cycleEnd or (cycleStart + period)
 
     return inWindow, uptime, source, {
+        Phase = inWindow and "ACTIVE" or "OUTSIDE",
         Offset = offset,
         CycleStart = cycleStart,
         CycleEnd = cycleEnd,
         NextBoundary = nextBoundary,
+        Remaining = math.max(0, nextBoundary - uptime),
     }
 end
 
@@ -621,24 +804,28 @@ task.spawn(function()
 
             local inWindow, _, _, timeInfo = CheckChestTimeWindow()
             if timeInfo then
-                local nextBoundary = FormatUptime(timeInfo.NextBoundary)
-                local offsetText = FormatUptime(timeInfo.Offset)
+                local startText = FormatUptime(timeInfo.CycleStart)
+                local endText = FormatUptime(timeInfo.CycleEnd)
+                local nextText = FormatUptime(timeInfo.NextBoundary)
+                local remainingText = FormatUptime(timeInfo.Remaining)
 
                 if inWindow then
                     WindowLabel.Text =
                         "Cyborg 4h + 2h Window: ACTIVE"
-                        .. " | cycle offset "
-                        .. offsetText
-                        .. " | end "
-                        .. nextBoundary
+                        .. " | keep "
+                        .. startText
+                        .. " -> "
+                        .. endText
+                        .. " | closes "
+                        .. nextText
                     WindowLabel.TextColor3 = Color3.fromRGB(109, 222, 161)
                 else
                     WindowLabel.Text =
-                        "Cyborg 4h + 2h Window: WAIT"
-                        .. " | cycle offset "
-                        .. offsetText
-                        .. " | next "
-                        .. nextBoundary
+                        "Cyborg 4h + 2h Window: HOP"
+                        .. " | next valid "
+                        .. nextText
+                        .. " | remaining "
+                        .. remainingText
                     WindowLabel.TextColor3 = Color3.fromRGB(246, 197, 88)
                 end
             end
@@ -656,10 +843,12 @@ task.spawn(function()
         local fragments = data and data:FindFirstChild("Fragments")
 
         RaceLabel.Text = string.format(
-            "Sea: %s | Race: %s | Fragments: %s",
+            "Sea: %s | Race: %s | Fragments: %s | Cyborg V1: %s | Ghoul V1: %s",
             getSeaText(),
             race and tostring(race.Value) or "waiting",
-            fragments and tostring(fragments.Value) or "waiting"
+            fragments and tostring(fragments.Value) or "waiting",
+            hasCyborgV1() and "yes" or "no",
+            hasGhoulV1() and "yes" or "no"
         )
 
         local orderExists =
@@ -668,12 +857,14 @@ task.spawn(function()
             or ReplicatedStorage:FindFirstChild("Order")
 
         ItemLabel.Text = string.format(
-            "State: %s | Fist: %s | Microchip: %s | Core Brain: %s | Order: %s",
+            "State: %s | Fist: %s | Microchip: %s | Core Brain: %s | Order: %s\nBanana: %s%s",
             tostring(CyborgBlockPartUnlocked or readMainState()),
             hasToolForUI("Fist of Darkness") and "yes" or "no",
             hasToolForUI("Microchip") and "yes" or "no",
             hasToolForUI("Core Brain") and "yes" or "no",
-            orderExists and "yes" or "no"
+            orderExists and "yes" or "no",
+            RaceFlow.BananaRunning and "running" or (RaceFlow.BananaStarted and "started" or "idle"),
+            RaceFlow.BananaLastError and (" | error: " .. tostring(RaceFlow.BananaLastError)) or ""
         )
 
         StatusLabel.Text = "Status: " .. tostring(DashboardState.Status)
@@ -689,15 +880,19 @@ task.spawn(function()
             or "none"
 
         HopLabel.Text = string.format(
-            "Hop: %s | pages %s-%s (%s scanned) | candidates %s | selected %s\nConfig: maxPages=%s, pagesPerBatch=%s, maxPlayers=%s, region=%s",
+            "Hop: %s | pages %s-%s | requested %s | done %s | failed %s | candidates %s | selected %s\nConfig: maxPages=%s, pagesPerBatch=%s, concurrency=%s, timeout=%ss, maxPlayers=%s, region=%s",
             tostring(hop.Status or "Idle"),
             tostring(hop.StartPage or 0),
             tostring(hop.EndPage or 0),
-            tostring(hop.ScannedPages or 0),
+            tostring(hop.RequestedPages or 0),
+            tostring(hop.CompletedPages or hop.ScannedPages or 0),
+            tostring(hop.FailedPages or 0),
             tostring(hop.Candidates or 0),
             selected,
             tostring(getgenv().Settings["Hop Max Pages"]),
             tostring(getgenv().Settings["Hop Pages Per Batch"]),
+            tostring(getgenv().Settings["Hop Scan Concurrency"] or 25),
+            tostring(getgenv().Settings["Hop Batch Timeout"] or 18),
             tostring(getgenv().Settings["Hop Max Players"]),
             tostring(getgenv().Settings["Hop Forced Region"] or "any")
         )
@@ -705,25 +900,6 @@ task.spawn(function()
         task.wait(1)
     end
 end)
-
-local completedCyborgWritten = false
-local function WriteCompletedCyborg()
-    if completedCyborgWritten then
-        return
-    end
-
-    local race =
-        LocalPlayer
-        and LocalPlayer:FindFirstChild("Data")
-        and LocalPlayer.Data:FindFirstChild("Race")
-
-    if race and tostring(race.Value):lower() == "cyborg" then
-        pcall(function()
-            writefile(mainfile, "Completed-cyborg")
-        end)
-        completedCyborgWritten = true
-    end
-end
 
 function CheckSea(v: number) return v == tonumber(workspace:GetAttribute("MAP"):match("%d+")) end
 
@@ -896,11 +1072,18 @@ local function getHopConfig(maxPlayersArg, forcedRegionArg)
         forcedRegion = nil
     end
 
+    local concurrency = math.max(1, math.floor(tonumber(settings["Hop Scan Concurrency"]) or 25))
+    concurrency = math.min(concurrency, pagesPerBatch)
+
+    local batchTimeout = math.max(3, tonumber(settings["Hop Batch Timeout"]) or 18)
+
     return {
         MaxPages = maxPages,
         PagesPerBatch = pagesPerBatch,
         MaxPlayers = maxPlayers,
         ForcedRegion = forcedRegion,
+        Concurrency = concurrency,
+        BatchTimeout = batchTimeout,
     }
 end
 
@@ -918,74 +1101,129 @@ function GetServers(MaxPlayers, ForcedRegion)
         startPage = 1
     end
 
+    local pages = {}
+    for offset = 0, config.PagesPerBatch - 1 do
+        pages[#pages + 1] = ((startPage - 1 + offset) % config.MaxPages) + 1
+    end
+
     local candidates = {}
     local seenJobs = {}
-    local lastPage = startPage
-    local scanned = 0
+    local cursor = 0
+    local completed = 0
+    local failed = 0
+    local workersDone = 0
+    local active = true
+    local workerCount = math.min(config.Concurrency, #pages)
+    local scanStartedAt = tick()
 
-    DashboardState.Hop.Status = "Scanning"
-    DashboardState.Hop.StartPage = startPage
-    DashboardState.Hop.EndPage = startPage
+    DashboardState.Hop.Status = "Scanning parallel"
+    DashboardState.Hop.StartPage = pages[1] or startPage
+    DashboardState.Hop.EndPage = pages[#pages] or startPage
+    DashboardState.Hop.CurrentPage = pages[1] or startPage
     DashboardState.Hop.ScannedPages = 0
+    DashboardState.Hop.RequestedPages = #pages
+    DashboardState.Hop.CompletedPages = 0
+    DashboardState.Hop.FailedPages = 0
+    DashboardState.Hop.TimedOut = false
     DashboardState.Hop.Candidates = 0
     DashboardState.Hop.SelectedJobId = nil
     DashboardState.Hop.SelectedPlayers = nil
     DashboardState.Hop.SelectedRegion = nil
 
-    for offset = 0, config.PagesPerBatch - 1 do
-        local page = ((startPage - 1 + offset) % config.MaxPages) + 1
-        lastPage = page
-        scanned = scanned + 1
+    local function processPageData(pageData)
+        if type(pageData) ~= "table" then
+            return
+        end
 
-        DashboardState.Hop.CurrentPage = page
-        DashboardState.Hop.EndPage = page
-        DashboardState.Hop.ScannedPages = scanned
-        DashboardState.Hop.Status =
-            "Scanning page "
-            .. tostring(page)
-            .. "/"
-            .. tostring(config.MaxPages)
+        for jobId, info in pairs(pageData) do
+            local jobKey = tostring(jobId)
+            if type(info) == "table"
+                and jobKey ~= tostring(game.JobId)
+                and not seenJobs[jobKey] then
+                local players = tonumber(info.Count)
+                local region = info.Region or info.Regoin
+                local regionOk =
+                    not config.ForcedRegion
+                    or normalizeRegion(region) == normalizeRegion(config.ForcedRegion)
 
-        local ok, pageData = pcall(function()
-            return serverBrowser:InvokeServer(page)
-        end)
-
-        if ok and type(pageData) == "table" then
-            for jobId, info in pairs(pageData) do
-                if type(info) == "table"
-                    and tostring(jobId) ~= tostring(game.JobId)
-                    and not seenJobs[jobId] then
-                    local players = tonumber(info.Count)
-                    local region = info.Region or info.Regoin
-
-                    local regionOk =
-                        not config.ForcedRegion
-                        or normalizeRegion(region)
-                            == normalizeRegion(config.ForcedRegion)
-
-                    if players
-                        and players <= config.MaxPlayers
-                        and regionOk then
-                        seenJobs[jobId] = true
-                        candidates[#candidates + 1] = {
-                            JobId = jobId,
-                            Players = players,
-                            LastUpdate = tonumber(info.__LastUpdate) or 0,
-                            Region = region or "Unknown",
-                        }
-                    end
+                if players and players <= config.MaxPlayers and regionOk then
+                    seenJobs[jobKey] = true
+                    candidates[#candidates + 1] = {
+                        JobId = jobId,
+                        Players = players,
+                        LastUpdate = tonumber(info.__LastUpdate) or 0,
+                        Region = region or "Unknown",
+                    }
                 end
             end
         end
-
-        DashboardState.Hop.Candidates = #candidates
-        task.wait()
     end
 
-    DashboardState.Hop.NextPage =
-        ((lastPage - 1 + 1) % config.MaxPages) + 1
+    local function worker()
+        while active do
+            cursor = cursor + 1
+            local index = cursor
+            local page = pages[index]
+            if not page then
+                break
+            end
 
-    -- "Best server": ít player nhất; nếu bằng nhau thì ưu tiên data mới hơn.
+            DashboardState.Hop.CurrentPage = page
+            local ok, pageData = pcall(function()
+                return serverBrowser:InvokeServer(page)
+            end)
+
+            if not active then
+                break
+            end
+
+            if ok and type(pageData) == "table" then
+                processPageData(pageData)
+            else
+                failed = failed + 1
+            end
+
+            completed = completed + 1
+            DashboardState.Hop.ScannedPages = completed
+            DashboardState.Hop.CompletedPages = completed
+            DashboardState.Hop.FailedPages = failed
+            DashboardState.Hop.Candidates = #candidates
+            DashboardState.Hop.Status = string.format(
+                "Scanning %d/%d pages (%d workers)",
+                completed,
+                #pages,
+                workerCount
+            )
+        end
+
+        workersDone = workersDone + 1
+    end
+
+    for _ = 1, workerCount do
+        task.spawn(worker)
+    end
+
+    repeat
+        task.wait(0.05)
+    until workersDone >= workerCount
+        or (tick() - scanStartedAt) >= config.BatchTimeout
+
+    if workersDone < workerCount then
+        active = false
+        DashboardState.Hop.TimedOut = true
+        DashboardState.Hop.Status = string.format(
+            "Batch timeout: %d/%d pages completed",
+            completed,
+            #pages
+        )
+    else
+        DashboardState.Hop.Status = "Scan complete"
+    end
+
+    local lastRequestedPage = pages[#pages] or startPage
+    DashboardState.Hop.NextPage = ((lastRequestedPage - 1 + 1) % config.MaxPages) + 1
+
+    -- Best server: ít player nhất; nếu bằng nhau, ưu tiên dữ liệu mới hơn.
     table.sort(candidates, function(a, b)
         if a.Players ~= b.Players then
             return a.Players < b.Players
@@ -998,9 +1236,7 @@ function GetServers(MaxPlayers, ForcedRegion)
         return tostring(a.JobId) < tostring(b.JobId)
     end)
 
-    DashboardState.Hop.Status = "Scan complete"
     DashboardState.Hop.Candidates = #candidates
-
     return candidates, config
 end
 
@@ -1321,10 +1557,10 @@ hookedNotification = hookfunction(require(ReplicatedStorage.Notification).new, n
     if CheckSea(2) then
         if args:lower():find("supply a <core brain>") or args:find("<Fist of Darkness> has been") then
             CyborgBlockPartUnlocked = "unlock"
-            writefile(mainfile, "unlock")
+            safeWriteFile(progressfile, "unlock")
         elseif args:find("Microchip not found") then
             CyborgBlockPartUnlocked = "chest"
-            writefile(mainfile, "chest")
+            safeWriteFile(progressfile, "chest")
         end
     end
     return hookedNotification(...)
@@ -1335,69 +1571,50 @@ local fragok = false;
 task.spawn(function()
     while task.wait(0.5) do
         xpcall(function()
-            WriteCompletedCyborg()
-            if LocalPlayer.Data.Race.Value ~= "Cyborg" and LocalPlayer.Data.Fragments.Value >= 2500 then COMMF_:InvokeServer("CyborgTrainer", "Buy") end
-            CyborgBlockPartUnlocked = readfile(mainfile) or "NaN"
-            pcall(function() fireclickdetector(workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector) end)
-            if LocalPlayer.Data.Race.Value == "Cyborg" then
-                if COMMF_:InvokeServer("Wenlocktoad") == nil then
-                    if CheckSea(2) then
-                        if not LocalPlayer.Data.Race:FindFirstChild("Evolved") then
-                            SetText("Upgrading Race to V2")
-                            if COMMF_:InvokeServer("Alchemist", "2") == "Come back when you find them." then
-                                if not CheckTool("Flower 1") and workspace.Flower1.Transparency == 0 then
-                                    Tween(false)
-                                    SetText("Upgrade Race V2 | Collecting Flower 1")
-                                    repeat
-                                        task.wait(0.1)
-                                        Character:SetPrimaryPartCFrame(workspace.Flower1.CFrame)
-                                    until (CheckTool("Flower 1") or workspace.Flower1.Transparency ~= 0)
-                                elseif not CheckTool("Flower 2") and workspace.Flower2.Transparency == 0 then
-                                    Tween(false)
-                                    SetText("Upgrade Race V2 | Collecting Flower 2")
-                                    repeat
-                                        task.wait(0.1)
-                                        Character:SetPrimaryPartCFrame(workspace.Flower2.CFrame)
-                                    until (CheckTool("Flower 2") or workspace.Flower2.Transparency ~= 0)
-                                elseif not CheckTool("Flower 3") then
-                                    for _, v in next, workspace.Enemies:GetChildren() do
-                                        if v.Name == "Swan Pirate" then
-                                            if v:FindFirstChildWhichIsA("Humanoid") and v.Humanoid.Health > 0 and v.HumanoidRootPart then
-                                                repeat task.wait() KillMonster(v.Name)
-                                                until not v or not v:FindFirstChildWhichIsA("Humanoid") or v.Humanoid.Health <= 0 or not v.HumanoidRootPart or CheckTool("Flower 3")
-                                            end
-                                        else
-                                            Tween(CFrame.new(980.0985107421875, 121.331298828125, 1287.2093505859375))
-                                        end
-                                    end
-                                else
-                                    if CheckTool("Flower 1") and CheckTool("Flower 2") and CheckTool("Flower 3") then
-                                        COMMF_:InvokeServer("Alchemist", "3")
-                                    end
-                                end
-                            end
-                        elseif COMMF_:InvokeServer("Wenlocktoad") == nil then
-                            local venlock = COMMF_:InvokeServer("Wenlocktoad", "2")
-                            if typeof(venlock) == "string" then SetText("Upgrade Race V3")
-                                if venlock:find("haven't completed") ~= nil or venlock:find("Talk to me again") ~= nil then
-                                    local t = math.huge local n;
-                                    for _, v in next, COMMF_:InvokeServer("getInventory") do if v.Type == "Blox Fruit" then if v.Value < t then t = v.Value n = v.Name end end end
-                                    COMMF_:InvokeServer("LoadFruit", n) COMMF_:InvokeServer("Wenlocktoad", "3")
-                                end
-                            end
-                        else
-                            SetText("IDK WHAT I AM DOING NOW")
-                        end
-                    else SetText("Travel to sea 2") task.wait(1) COMMF_:InvokeServer("TravelDressrosa")
-                    end
+            local currentRace = getCurrentRaceName()
+
+            if RaceFlow.Completed or safeReadFile(mainfile) == "Completed-done" then
+                RaceFlow.Completed = true
+                Tween(false)
+                SetText("Completed-done | Cyborg V1 + Ghoul V1 confirmed")
+                return
+            end
+
+            -- Sau khi Banana đổi race sang Ghoul, marker Cyborg đã lưu từ trước
+            -- sẽ cho phép xác nhận đủ cả hai race và ghi file kết quả cuối.
+            if writeCompletedDone() then
+                Tween(false)
+                SetText("Completed-done | Cyborg V1 + Ghoul V1 confirmed")
+                return
+            end
+
+            if currentRace == "Cyborg" then
+                markCyborgOwned()
+                Tween(false)
+
+                if startBananaGetGhoul() then
+                    SetText("Cyborg V1 confirmed | Running Banana Get Ghoul...")
+                elseif RaceFlow.BananaLastError then
+                    SetText("Cyborg V1 confirmed | Banana waiting: " .. tostring(RaceFlow.BananaLastError))
                 else
-                    if CheckSea(3) then
-                        writefile(mainfile, "Completed-cyborg")
-                        SetText("DONE V3")
-                    else SetText("Teleport to Sea 3") task.wait(3) COMMF_:InvokeServer("TravelZou") task.wait(10)
-                    end
+                    SetText("Cyborg V1 confirmed | Banana Get Ghoul already started")
                 end
-            elseif CyborgBlockPartUnlocked == "unlock" or game:GetService("ReplicatedStorage").Remotes.CommF_:InvokeServer("CyborgTrainer", "Check") == true then
+
+                return
+            end
+
+            if currentRace ~= "Cyborg"
+                and LocalPlayer.Data.Fragments.Value >= 2500 then
+                COMMF_:InvokeServer("CyborgTrainer", "Buy")
+            end
+
+            CyborgBlockPartUnlocked = readMainState()
+            pcall(function()
+                fireclickdetector(workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector)
+            end)
+
+            if CyborgBlockPartUnlocked == "unlock"
+                or game:GetService("ReplicatedStorage").Remotes.CommF_:InvokeServer("CyborgTrainer", "Check") == true then
                 local have, need = LocalPlayer.Data.Fragments.Value, getgenv().Settings.Fragments
                 if fragok then
                     if have < 2500 then fragok = false
@@ -1508,16 +1725,16 @@ task.spawn(function()
                                 or "unknown"
 
                             SetText(
-                                "Cyborg Chest | Outside 4h + 2h window\n"
+                                "Cyborg Chest | Outside valid 4h + 2h window\n"
                                 .. "Uptime: "
                                 .. FormatUptime(uptime)
-                                .. " | Next: "
+                                .. " | Next valid: "
                                 .. nextText
                                 .. "\nHop server..."
                             )
 
                             task.wait(1)
-                            HopServer(8)
+                            HopServer(getgenv().Settings["Hop Max Players"])
                             return
                         end
 
