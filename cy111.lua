@@ -1,32 +1,88 @@
-getgenv().Settings = {
-    ["Max Chests"] = 50;
-    ["Skip Chest Delay"] = 1;
-    ["Reset After Collect Chests"] = 7;
-    ["Katakuri Progress"] = 100;
-    ["Fragments"] = 1000;
-    ["Black Screen"] = false;
-    ["Chest Tween Speed"] = 325;
-    ["Chest Touch Radius"] = 8;
+-- ============================================================
+-- EXECUTOR / STARTUP COMPATIBILITY BOOTSTRAP
+-- Prevents early "attempt to call a nil value" crashes.
+-- ============================================================
+getgenv = getgenv or function()
+    return _G
+end
 
-    -- Server uptime chest window: every 4 hours, active for 2 hours
-    ["Chest Server Period"] = 4 * 60 * 60;
-    ["Chest Server Grace"] = 2 * 60 * 60;
+local ENV = getgenv()
+local unpackArgs = unpack or table.unpack
+unpack = unpackArgs
+cloneref = cloneref or clonereference or function(value)
+    return value
+end
+isnetworkowner = isnetworkowner or isNetworkOwner or function()
+    return true
+end
+newcclosure = newcclosure or function(callback)
+    return callback
+end
+local compileSource = loadstring or load
+local safeWarn = warn or print
+
+local function SafeNotify(title, text, duration)
+    pcall(function()
+        game:GetService("StarterGui"):SetCore("SendNotification", {
+            Title = tostring(title or "Script"),
+            Text = tostring(text or ""),
+            Duration = tonumber(duration) or 5,
+        })
+    end)
+end
+
+local DEFAULT_SETTINGS = {
+    ["Max Chests"] = 50,
+    ["Skip Chest Delay"] = 1,
+    ["Reset After Collect Chests"] = 7,
+    ["Katakuri Progress"] = 100,
+    ["Fragments"] = 1000,
+    ["Black Screen"] = false,
+    ["Chest Tween Speed"] = 325,
+    ["Chest Touch Radius"] = 8,
+    ["Chest Server Period"] = 4 * 60 * 60,
+    ["Chest Server Grace"] = 2 * 60 * 60,
 }
 
-repeat task.wait(0.5) until game:IsLoaded() and game.Players.LocalPlayer and game.Players.LocalPlayer:FindFirstChildWhichIsA("PlayerGui")
-if getgenv().WARCLOADER then StarterGui:SetCore("SendNotification", {Title = "Execution Blocked", Text = "The script is already running. Please wait 10 seconds", Duration = 5}) return end getgenv().WARCLOADER = true task.delay(10, (function() getgenv().WARCLOADER = nil end))
+ENV.Settings = type(ENV.Settings) == "table" and ENV.Settings or {}
+for key, value in pairs(DEFAULT_SETTINGS) do
+    if ENV.Settings[key] == nil then
+        ENV.Settings[key] = value
+    end
+end
 
-getgenv().cloneref = cloneref or clonereference or function(x) return x end
-getgenv().isnetworkowner = isnetworkowner or isNetworkOwner or function() return true end
-workspace = cloneref(workspace) or cloneref(Workspace) or (getrenv and (getrenv().workspace or getrenv().Workspace)) or cloneref(game:GetService("Workspace"))
+repeat task.wait(0.5) until game:IsLoaded()
+    and game:GetService("Players").LocalPlayer
+    and game:GetService("Players").LocalPlayer:FindFirstChildWhichIsA("PlayerGui")
+
+if ENV.WARCLOADER then
+    SafeNotify("Execution Blocked", "The script is already running. Please wait 10 seconds", 5)
+    return
+end
+ENV.WARCLOADER = true
+task.delay(10, function()
+    ENV.WARCLOADER = nil
+end)
+
+ENV.cloneref = cloneref
+ENV.isnetworkowner = isnetworkowner
+
+local WorkspaceService = game:GetService("Workspace")
+workspace = cloneref(WorkspaceService)
 PlaceId, JobId = game.PlaceId, game.JobId
-getfenv = getfenv or _G or _ENV or shared or function() return {} end
+getfenv = getfenv or function()
+    return _G
+end
 IsOnMobile = false
 Services = setmetatable({}, {__index = function(self, name)
-    local s, c = pcall(function() return cloneref(game:GetService(name)) end)
-    if s then rawset(self, name, c) return c
-    else error("Invalid Roblox Service: " .. tostring(name))
+    local success, service = pcall(function()
+        return cloneref(game:GetService(name))
+    end)
+    if success and service then
+        rawset(self, name, service)
+        return service
     end
+    error("Invalid Roblox Service: " .. tostring(name))
 end})
 COREGUI = Services.CoreGui
 RunService = Services.RunService
@@ -43,11 +99,12 @@ ReplicatedFirst = Services.ReplicatedFirst
 StarterGui = Services.StarterGui
 GuiService = Services.GuiService
 TeleportService = Services.TeleportService
-COMMF_ = ReplicatedStorage:WaitForChild("Remotes") and ReplicatedStorage.Remotes:WaitForChild("CommF_")
+COMMF_ = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("CommF_")
 LocalPlayer = Players.LocalPlayer
-LocalPlayer.CharacterAdded:Connect(function(v)
-    Character = v Humanoid = v:WaitForChild("Humanoid")
-    HumanoidRootPart = v:WaitForChild("HumanoidRootPart")
+LocalPlayer.CharacterAdded:Connect(function(character)
+    Character = character
+    Humanoid = character:WaitForChild("Humanoid")
+    HumanoidRootPart = character:WaitForChild("HumanoidRootPart")
 end)
 if LocalPlayer.Character then
     Character = LocalPlayer.Character
@@ -55,82 +112,173 @@ if LocalPlayer.Character then
     HumanoidRootPart = Character:FindFirstChild("HumanoidRootPart") or Character:WaitForChild("HumanoidRootPart")
 end
 
-StarterGui:SetCore("SendNotification", {Title = "Executed", Text = "Loading… Please wait", Duration = 5})
+SafeNotify("Executed", "Loading... Please wait", 5)
 if not game:IsLoaded() or workspace.DistributedGameTime <= 10 then
     local WFGTL = COREGUI:FindFirstChild("WFGTL") or Instance.new("Hint", COREGUI)
     WFGTL.Text = "Just a moment... Waiting while the game loads - This won't take long!"
-    task.wait(10 - workspace.DistributedGameTime)
+    task.wait(math.max(0, 10 - workspace.DistributedGameTime))
     WFGTL:Destroy()
 end
-if not COMMF_ then repeat task.wait(1) until COMMF_ end
 
-local gmod = require(ReplicatedStorage.GuideModule) and ReplicatedStorage:FindFirstChild("GuideModule") and gmod ~= (nil and {}) and gmod.Data ~= (nil and {}) and gmod.Data.NPCList ~= (nil and {})
-task.spawn((function()
-    xpcall(function()
-        gethui().IgnoreGuiInset = true
-    end, (function(err)
-        xpcall((function()
-            local g = COREGUI:FindFirstChild("ScreenGUI") or Instance.new("ScreenGui", COREGUI)
-            g.Name = "ScreenGUI" g.IgnoreGuiInset = true
-            hookfunction(gethui, function() return g end)
-            task.delay(5, (function()StarterGui:SetCore("SendNotification", {Title = "Incompatible Executor", Text = "This executor may cause errors while running the script\n[ERROR CODE: UIGE]", Duration = 20})end))
-        end), (function() warn("???") end))
-    end))
-end))
-
+-- gethui/hookfunction are optional. The main UI is parented to PlayerGui,
+-- so unsupported executor APIs must never stop the script.
 task.spawn(function()
-    xpcall(function()
+    if type(gethui) == "function" then
+        pcall(function()
+            local targetGui = gethui()
+            if targetGui then
+                targetGui.IgnoreGuiInset = true
+            end
+        end)
+    end
+end)
+
+-- Team selection is independent and protected from executor-specific APIs.
+task.spawn(function()
+    local ok, err = xpcall(function()
         if not LocalPlayer.Team then
             if LocalPlayer.PlayerGui:FindFirstChild("LoadingScreen") then
                 repeat task.wait(1) until not LocalPlayer.PlayerGui:FindFirstChild("LoadingScreen")
             end
-            xpcall(function() COMMF_:InvokeServer("SetTeam", "Pirates")
-            end, function() firesignal(LocalPlayer.PlayerGui["Main (minimal)"].ChooseTeam.Container.Pirates) end)
+            local selected = pcall(function()
+                COMMF_:InvokeServer("SetTeam", "Pirates")
+            end)
+            if not selected and type(firesignal) == "function" then
+                pcall(function()
+                    firesignal(LocalPlayer.PlayerGui["Main (minimal)"].ChooseTeam.Container.Pirates)
+                end)
+            end
             task.wait(2)
         end
-    end, function(err) warn("????", err) end)
+    end, function(message)
+        return tostring(message)
+    end)
+    if not ok then
+        safeWarn("[Startup] Team selection error:", err)
+    end
 end)
-repeat task.wait(2) until Character and Character:FindFirstChild("HumanoidRootPart") and Character:FindFirstChildWhichIsA("Humanoid") and Character:IsDescendantOf(workspace.Characters)
 
-pcall(function() LocalPlayer.PlayerGui:FindFirstChild("Blank"):Destroy() end)
+repeat task.wait(0.5) until LocalPlayer.Team ~= nil
+repeat task.wait(0.5) until Character
+    and Character:FindFirstChild("HumanoidRootPart")
+    and Character:FindFirstChildWhichIsA("Humanoid")
+    and workspace:FindFirstChild("Characters")
+    and Character:IsDescendantOf(workspace.Characters)
+
+pcall(function()
+    local previous = LocalPlayer.PlayerGui:FindFirstChild("Blank")
+    if previous then
+        previous:Destroy()
+    end
+end)
 local BlankScreen = LocalPlayer.PlayerGui:FindFirstChild("Blank") or Instance.new("ScreenGui", LocalPlayer.PlayerGui)
-BlankScreen.Name = "Blank" BlankScreen.ResetOnSpawn = false BlankScreen.DisplayOrder = -math.huge BlankScreen.IgnoreGuiInset = true
+BlankScreen.Name = "Blank"
+BlankScreen.ResetOnSpawn = false
+BlankScreen.DisplayOrder = -math.huge
+BlankScreen.IgnoreGuiInset = true
 local Black = BlankScreen:FindFirstChild("Black Screen") or Instance.new("Frame", BlankScreen)
-Black.Name = "Black Screen" Black.Size = UDim2.new(1, 0, 1, 0) Black.BackgroundColor3 = Color3.new(0, 0, 0) Black.ZIndex = -math.huge
-Black.Visible = getgenv().Settings["Black Screen"] or false
+Black.Name = "Black Screen"
+Black.Size = UDim2.new(1, 0, 1, 0)
+Black.BackgroundColor3 = Color3.new(0, 0, 0)
+Black.ZIndex = -math.huge
+Black.Visible = ENV.Settings["Black Screen"] or false
 
-RunService:Set3dRenderingEnabled(not Black.Visible)
+pcall(function()
+    RunService:Set3dRenderingEnabled(not Black.Visible)
+end)
 
-local label = Instance.new("TextLabel", BlankScreen)
+local label = BlankScreen:FindFirstChild("CenteredLabel") or Instance.new("TextLabel", BlankScreen)
 label.Name = "CenteredLabel"
 label.AnchorPoint = Vector2.new(0.5, 0.5)
 label.Position = UDim2.new(0.5, 0, 0.5, 0)
 label.Size = UDim2.new(0.6, 0, 0.15, 0)
-label.Text = string.rep("Nil ", 20)
-label.TextScaled = true;
-label.TextWrapped = true;
-label.TextXAlignment = Enum.TextXAlignment.Center;
-label.TextYAlignment = Enum.TextYAlignment.Center;
-label.BackgroundTransparency = 1;
-label.Font = Enum.Font.GothamSemibold;
-label.TextSize = 48;
+label.Text = "Loading..."
+label.TextScaled = true
+label.TextWrapped = true
+label.TextXAlignment = Enum.TextXAlignment.Center
+label.TextYAlignment = Enum.TextYAlignment.Center
+label.BackgroundTransparency = 1
+label.Font = Enum.Font.GothamSemibold
+label.TextSize = 48
 label.TextColor3 = Color3.fromRGB(255, 255, 255)
 
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if not gameProcessed and input.KeyCode == Enum.KeyCode.F4 then
         Black.Visible = not Black.Visible
-        RunService:Set3dRenderingEnabled(not Black.Visible)
-        StarterGui:SetCore("SendNotification", {
-            Title = "Black Screen",
-            Text = Black.Visible and "Đã BẬT màn hình đen (Tắt Render 3D)" or "Đã TẮT màn hình đen (Bật Render 3D)",
-            Duration = 2
-        })
+        pcall(function()
+            RunService:Set3dRenderingEnabled(not Black.Visible)
+        end)
+        SafeNotify(
+            "Black Screen",
+            Black.Visible and "Da BAT man hinh den" or "Da TAT man hinh den",
+            2
+        )
     end
 end)
 
-local function SetText(newText) label.Text = newText end
+local function SetText(newText)
+    if label then
+        label.Text = tostring(newText or "")
+    end
+end
+
 local mainfile = LocalPlayer.Name .. ".txt"
-if not isfile(mainfile) then writefile(mainfile, "NaN") end
+local FILE_API_AVAILABLE = type(isfile) == "function"
+    and type(readfile) == "function"
+    and type(writefile) == "function"
+
+local function SafeIsFile(path)
+    if not FILE_API_AVAILABLE then
+        return false
+    end
+    local ok, result = pcall(isfile, path)
+    return ok and result == true
+end
+
+local function SafeReadFile(path, fallback)
+    fallback = fallback == nil and "NaN" or fallback
+    if not FILE_API_AVAILABLE or not SafeIsFile(path) then
+        return fallback
+    end
+    local ok, result = pcall(readfile, path)
+    if not ok then
+        return fallback
+    end
+    return tostring(result or fallback)
+end
+
+local function SafeWriteFile(path, value)
+    if not FILE_API_AVAILABLE then
+        safeWarn("[File] writefile/isfile/readfile unavailable; completion file cannot be written")
+        return false
+    end
+    local ok, err = pcall(writefile, path, tostring(value))
+    if not ok then
+        safeWarn("[File] write failed:", err)
+    end
+    return ok
+end
+
+if not SafeIsFile(mainfile) then
+    SafeWriteFile(mainfile, "NaN")
+end
+
+local function SafeClickDetector(detector)
+    if not detector or type(fireclickdetector) ~= "function" then
+        return false
+    end
+    return pcall(fireclickdetector, detector)
+end
+
+local function SafeTouch(partA, partB, state)
+    if not partA or not partB or type(firetouchinterest) ~= "function" then
+        return false
+    end
+    return pcall(firetouchinterest, partA, partB, state or 0)
+end
+
+-- GuideModule is optional here; later helpers require it directly when available.
+local GuideModule = ReplicatedStorage:FindFirstChild("GuideModule")
 
 -- ============================================================
 -- REAL SERVER UPTIME + 4H PERIOD / 2H ACTIVE WINDOW
@@ -231,34 +379,34 @@ local RaceFlow = {
     ghoulOwned = false,
     cyborgCheckRaw = nil,
     ghoulCheckRaw = nil,
-    ghoulLoaderStarted = false,
     ghoulEverConfirmed = false,
+    ghoulConfirmedAt = nil,
     completedWritten = false,
     lastCyborgBuyAttempt = 0,
     lastSeaTravelAttempt = 0,
     sea2Ready = false,
     legacyCyborgOwned = false,
+    banana = {
+        started = false,
+        running = false,
+        lastAttempt = 0,
+        lastError = nil,
+    },
 }
 
 local function ReadMainFileState()
-    if not isfile(mainfile) then
-        return "NaN"
-    end
-    local ok, value = pcall(readfile, mainfile)
-    return ok and tostring(value or "NaN") or "NaN"
+    return SafeReadFile(mainfile, "NaN")
 end
 
--- The old script wrote Completed-cyborg. Preserve that as evidence that
--- Cyborg was obtained, then remove the old completion marker as requested.
+-- Old markers are never trusted as final completion. Completed-cyborg is kept
+-- only as legacy evidence for Cyborg; Completed-done is cleared and rechecked.
 do
-    local oldState = ReadMainFileState()
-    if oldState:lower() == "completed-cyborg" then
+    local oldState = ReadMainFileState():lower()
+    if oldState == "completed-cyborg" then
         RaceFlow.legacyCyborgOwned = true
-        pcall(function()
-            writefile(mainfile, "NaN")
-        end)
-    elseif oldState:lower() == "completed-done" then
-        RaceFlow.completedWritten = true
+        SafeWriteFile(mainfile, "NaN")
+    elseif oldState == "completed-done" then
+        SafeWriteFile(mainfile, "NaN")
     end
 end
 
@@ -278,8 +426,11 @@ end
 
 local function SafeCommF(...)
     local args = {...}
+    if not COMMF_ or type(COMMF_.InvokeServer) ~= "function" then
+        return false, "CommF_ unavailable"
+    end
     local ok, result = pcall(function()
-        return COMMF_:InvokeServer(unpack(args))
+        return COMMF_:InvokeServer(unpackArgs(args))
     end)
     if not ok then
         return false, result
@@ -287,45 +438,86 @@ local function SafeCommF(...)
     return true, result
 end
 
-local function ResultLooksOwned(result)
-    if result == true or result == 1 then
-        return true
-    end
-
-    if type(result) == "table" then
-        for _, key in ipairs({"Owned", "owned", "Unlocked", "unlocked", "Bought", "bought", "Purchased", "purchased", "Has", "has"}) do
-            if result[key] == true or result[key] == 1 then
-                return true
-            end
-        end
-        return false
-    end
-
-    if type(result) ~= "string" then
-        return false
-    end
-
-    local text = result:lower()
+local function ContainsNegativeOwnershipText(text)
     for _, token in ipairs({
         "not enough", "do not have", "don't have", "dont have", "need ",
         "missing", "required", "requires", "cannot", "can't", "cant",
-        "not unlocked", "not purchased", "not bought"
-    }) do
-        if text:find(token, 1, true) then
-            return false
-        end
-    end
-
-    for _, token in ipairs({
-        "already", "owned", "unlocked", "purchased", "bought",
-        "you have", "can change", "change race"
+        "not unlocked", "not purchased", "not bought", "come back"
     }) do
         if text:find(token, 1, true) then
             return true
         end
     end
-
     return false
+end
+
+local function TableHasOwnedFlag(result)
+    if type(result) ~= "table" then
+        return false
+    end
+    for _, key in ipairs({
+        "Owned", "owned", "Unlocked", "unlocked", "Bought", "bought",
+        "Purchased", "purchased", "Has", "has", "Completed", "completed"
+    }) do
+        if result[key] == true or result[key] == 1 or result[key] == 2 then
+            return true
+        end
+    end
+    return false
+end
+
+local function CyborgResultIsOwned(result)
+    if result == 2 or tostring(result) == "2" then
+        return true
+    end
+    if TableHasOwnedFlag(result) then
+        return true
+    end
+    if type(result) ~= "string" then
+        return false
+    end
+    local text = result:lower()
+    if ContainsNegativeOwnershipText(text) then
+        return false
+    end
+    return (text:find("cyborg", 1, true) and (
+        text:find("already", 1, true)
+        or text:find("owned", 1, true)
+        or text:find("unlocked", 1, true)
+        or text:find("purchased", 1, true)
+    )) and true or false
+end
+
+-- Conservative on purpose: true/1 from BuyCheck is NOT enough to write
+-- Completed-done. Ghoul must be the current race, return explicit state 2,
+-- or return an unambiguous owned/already result from the Ghoul check itself.
+local function GhoulResultIsOwned(result)
+    if result == 2 or tostring(result) == "2" then
+        return true
+    end
+    if TableHasOwnedFlag(result) then
+        return true
+    end
+    if type(result) ~= "string" then
+        return false
+    end
+
+    local text = result:lower()
+    if ContainsNegativeOwnershipText(text) then
+        return false
+    end
+
+    local ownershipWord = text:find("already", 1, true)
+        or text:find("owned", 1, true)
+        or text:find("unlocked", 1, true)
+        or text:find("purchased", 1, true)
+        or text:find("bought", 1, true)
+
+    local ghoulContext = text:find("ghoul", 1, true)
+        or text:find("this race", 1, true)
+        or text:find("change race", 1, true)
+
+    return ownershipWord ~= nil and ghoulContext ~= nil
 end
 
 local function CheckCyborgOwned()
@@ -333,24 +525,15 @@ local function CheckCyborgOwned()
     if raceName:lower() == "cyborg" or RaceFlow.legacyCyborgOwned then
         RaceFlow.cyborgOwned = true
         RaceFlow.legacyCyborgOwned = true
-        RaceFlow.cyborgCheckRaw = raceName:lower() == "cyborg" and "current_race" or "previously_confirmed"
+        RaceFlow.cyborgCheckRaw = raceName:lower() == "cyborg"
+            and "current_race"
+            or "legacy_confirmed"
         return true, RaceFlow.cyborgCheckRaw
     end
 
     local ok, result = SafeCommF("CyborgTrainer", "Check")
     RaceFlow.cyborgCheckRaw = ok and result or ("remote_error:" .. tostring(result))
-
-    -- CyborgTrainer Check uses 2 as the completed/owned state. A boolean true
-    -- can be an intermediate unlocked/progression state, so it must not mark
-    -- Cyborg V1 as owned by itself.
-    local owned = ok and (result == 2 or tostring(result) == "2")
-    if not owned and ok and type(result) == "string" then
-        owned = ResultLooksOwned(result)
-    elseif not owned and ok and type(result) == "table" then
-        owned = ResultLooksOwned(result)
-    end
-
-    RaceFlow.cyborgOwned = owned or false
+    RaceFlow.cyborgOwned = ok and CyborgResultIsOwned(result) or false
     if RaceFlow.cyborgOwned then
         RaceFlow.legacyCyborgOwned = true
     end
@@ -359,31 +542,47 @@ end
 
 local function CheckGhoulOwned()
     local raceName = GetCurrentRace()
-    if raceName:lower() == "ghoul" or RaceFlow.ghoulEverConfirmed then
+    if raceName:lower() == "ghoul" then
         RaceFlow.ghoulOwned = true
         RaceFlow.ghoulEverConfirmed = true
-        RaceFlow.ghoulCheckRaw = raceName:lower() == "ghoul" and "current_race" or "previously_confirmed"
+        RaceFlow.ghoulConfirmedAt = tick()
+        RaceFlow.ghoulCheckRaw = "current_race"
         return true, RaceFlow.ghoulCheckRaw
     end
 
-    -- BuyCheck only checks the Ghoul purchase/unlock state. It does not call
-    -- Ectoplasm Change, so the account's current race is not switched here.
+    if RaceFlow.ghoulEverConfirmed and RaceFlow.ghoulConfirmedAt then
+        RaceFlow.ghoulOwned = true
+        RaceFlow.ghoulCheckRaw = "previously_runtime_confirmed"
+        return true, RaceFlow.ghoulCheckRaw
+    end
+
+    -- Check only. Never calls Ectoplasm Change here.
     local ok, result = SafeCommF("Ectoplasm", "BuyCheck", 4)
     RaceFlow.ghoulCheckRaw = ok and result or ("remote_error:" .. tostring(result))
-    RaceFlow.ghoulOwned = ok and ResultLooksOwned(result) or false
+    RaceFlow.ghoulOwned = ok and GhoulResultIsOwned(result) or false
     if RaceFlow.ghoulOwned then
         RaceFlow.ghoulEverConfirmed = true
+        RaceFlow.ghoulConfirmedAt = tick()
     end
     return RaceFlow.ghoulOwned, RaceFlow.ghoulCheckRaw
 end
 
 local function WriteCompletedDone()
-    if not RaceFlow.completedWritten or ReadMainFileState():lower() ~= "completed-done" then
-        pcall(function()
-            writefile(mainfile, "Completed-done")
-        end)
-        RaceFlow.completedWritten = true
+    -- Hard gate: no stale file and no BananaHub finish can mark completion.
+    -- Only the independent Ghoul ownership check can open this gate.
+    if RaceFlow.cyborgOwned ~= true
+        or RaceFlow.ghoulOwned ~= true
+        or not RaceFlow.ghoulConfirmedAt then
+        return false
     end
+
+    if ReadMainFileState():lower() ~= "completed-done" then
+        if not SafeWriteFile(mainfile, "Completed-done") then
+            return false
+        end
+    end
+    RaceFlow.completedWritten = true
+    return true
 end
 
 local function GetSeaNumber()
@@ -417,46 +616,65 @@ local function EnsureSea2ForCyborg()
     return false
 end
 
+local BANANA_RETRY_COOLDOWN = 15
+
 local function StartGhoulLoader()
-    if RaceFlow.ghoulLoaderStarted then
+    local banana = RaceFlow.banana
+    if banana.running or banana.started then
         return true
     end
 
-    -- The key must be supplied outside this script, for example:
-    -- getgenv().Key = "111"
-    local externalKey = getgenv().Key
+    local externalKey = ENV.Key
     if externalKey == nil or tostring(externalKey) == "" then
         SetText("Cyborg V1: owned\nGhoul V1: missing\nSet getgenv().Key outside the loader")
         return false
     end
 
-    RaceFlow.ghoulLoaderStarted = true
+    if type(compileSource) ~= "function" then
+        banana.lastError = "Executor does not provide loadstring/load"
+        SetText("BananaHub cannot start:\nloadstring/load is unavailable")
+        safeWarn("[BananaGhoul]", banana.lastError)
+        return false
+    end
 
-    -- Preserve the exact externally supplied key for BananaHub.
-    getgenv().Key = externalKey
-    getgenv().Config = {
-        ["Hop Server Get Ghoul"] = true,
-        ["Auto Get Ghoul"] = true,
-    }
+    local now = tick()
+    if now - banana.lastAttempt < BANANA_RETRY_COOLDOWN then
+        return false
+    end
 
-    SetText("Cyborg V1: owned\nGhoul V1: missing\nStarting BananaHub Get Ghoul...")
+    banana.lastAttempt = now
+    banana.started = true
+    banana.running = true
+    banana.lastError = nil
 
+    SetText("Cyborg V1: owned\nGhoul V1: missing\nBananaHub Get Ghoul running independently...")
+
+    -- Completely independent worker: its errors never stop Get Cyborg or the
+    -- ownership checker, and it can never write Completed-done by itself.
     task.spawn(function()
         local ok, err = xpcall(function()
+            ENV.Key = externalKey
+            ENV.Config = {
+                ["Hop Server Get Ghoul"] = true,
+                ["Auto Get Ghoul"] = true,
+            }
+
             local source = game:HttpGet(GH0UL_LOADER_URL)
-            local loader = loadstring(source)
-            if not loader then
-                error("BananaHub loadstring returned nil")
+            local loader, compileError = compileSource(source)
+            if type(loader) ~= "function" then
+                error("BananaHub compile failed: " .. tostring(compileError or "unknown"))
             end
             loader()
         end, function(message)
             return tostring(message)
         end)
 
+        banana.running = false
         if not ok then
-            RaceFlow.ghoulLoaderStarted = false
-            SetText("Get Ghoul loader error:\n" .. tostring(err))
-            warn("[RaceFlow] BananaHub Get Ghoul error:", err)
+            banana.started = false
+            banana.lastError = err
+            SetText("BananaHub Get Ghoul error:\n" .. tostring(err))
+            safeWarn("[BananaGhoul] independent worker error:", err)
         end
     end)
 
@@ -495,8 +713,13 @@ local function RefreshRaceFlow()
     RaceFlow.mode = "COMPLETED"
     RaceFlow.sea2Ready = true
     Tween(false)
-    WriteCompletedDone()
-    SetText("Cyborg V1: owned\nGhoul V1: owned\nCompleted-done")
+    local wrote = WriteCompletedDone()
+    if wrote then
+        SetText("Cyborg V1: owned\nGhoul V1: verified\nCompleted-done")
+    else
+        RaceFlow.mode = "GET_GHOUL"
+        SetText("Ghoul verification not complete; file not written")
+    end
     RaceFlow.busy = false
     return RaceFlow.mode
 end
@@ -550,15 +773,8 @@ task.spawn(function()
     local race = data:WaitForChild("Race")
 
     RaceFlow.ready = true
-    if RaceFlow.completedWritten then
-        RaceFlow.cyborgOwned = true
-        RaceFlow.ghoulOwned = true
-        RaceFlow.mode = "COMPLETED"
-        WriteCompletedDone()
-        SetText("Cyborg V1: owned\nGhoul V1: owned\nCompleted-done")
-    else
-        RefreshRaceFlow()
-    end
+    -- Never trust an old completion file. Runtime ownership checks decide.
+    RefreshRaceFlow()
 
     if race then
         race:GetPropertyChangedSignal("Value"):Connect(function()
@@ -569,8 +785,11 @@ task.spawn(function()
     while task.wait(OWNERSHIP_RECHECK_DELAY) do
         if RaceFlow.mode ~= "COMPLETED" then
             RefreshRaceFlow()
-        else
+        elseif RaceFlow.ghoulOwned and RaceFlow.ghoulConfirmedAt then
             WriteCompletedDone()
+        else
+            RaceFlow.mode = "GET_GHOUL"
+            RefreshRaceFlow()
         end
     end
 end)
@@ -591,7 +810,15 @@ PressKeyEvent = (function(k, d)
 end)
 
 local remoteAttack, idremote
-local seed = ReplicatedStorage.Modules.Net.seed:InvokeServer()
+local seed = 0
+pcall(function()
+    local net = ReplicatedStorage:FindFirstChild("Modules")
+        and ReplicatedStorage.Modules:FindFirstChild("Net")
+    local seedRemote = net and net:FindFirstChild("seed")
+    if seedRemote and type(seedRemote.InvokeServer) == "function" then
+        seed = tonumber(seedRemote:InvokeServer()) or 0
+    end
+end)
 task.spawn((function() for _, v in next, ({ReplicatedStorage.Util, ReplicatedStorage.Common, ReplicatedStorage.Remotes, ReplicatedStorage.Assets, ReplicatedStorage.FX}) do
     for _, n in next, v:GetChildren() do if n:IsA("RemoteEvent") and n:GetAttribute("Id") then remoteAttack, idremote = n, n:GetAttribute("Id") end
     end v.ChildAdded:Connect(function(n) if n:IsA("RemoteEvent") and n:GetAttribute("Id") then remoteAttack, idremote = n, n:GetAttribute("Id")
@@ -682,27 +909,89 @@ end)
 
 local lastCallFA = tick()
 FastAttack = (function(x)
-    if not HumanoidRootPart or not Character:FindFirstChildWhichIsA("Humanoid") or Character.Humanoid.Health <= 0 or not Character:FindFirstChildWhichIsA("Tool") then return end
-    local FAD = 0.01 -- throttle
-    if FAD ~= 0 and tick() - lastCallFA <= FAD then return end
-    local t = {}
-    for _, e in next, workspace.Enemies:GetChildren() do
-        local h = e:FindFirstChild("Humanoid") local hrp = e:FindFirstChild("HumanoidRootPart")
-        if e ~= Character and (x and e.Name == x or not x) and h and hrp and not IsDied(e) and (hrp.Position - HumanoidRootPart.Position).Magnitude <= 65 then t[#t + 1] = e end
+    if not HumanoidRootPart
+        or not Character
+        or not Character:FindFirstChildWhichIsA("Humanoid")
+        or Character.Humanoid.Health <= 0
+        or not Character:FindFirstChildWhichIsA("Tool") then
+        return
     end
-    local n = ReplicatedStorage.Modules.Net
-    local h = {[2] = {}}
-    local last
-    for i = 1, #t do local v = t[i]
-        local part = v:FindFirstChild("Head") or v:FindFirstChild("HumanoidRootPart")
-        if not h[1] then h[1] = part end
-        h[2][#h[2] + 1] = {v, part} last = v
+
+    local FAD = 0.01
+    if FAD ~= 0 and tick() - lastCallFA <= FAD then
+        return
     end
-    n:FindFirstChild("RE/RegisterAttack"):FireServer()
-    n:FindFirstChild("RE/RegisterHit"):FireServer(unpack(h))
-    cloneref(remoteAttack):FireServer(string.gsub("RE/RegisterHit", ".",function(c)
-        return string.char(bit32.bxor(string.byte(c), math.floor(workspace:GetServerTimeNow()/10%10)+1))
-    end), bit32.bxor(idremote+909090, seed*2), unpack(h))
+
+    local targets = {}
+    local enemies = workspace:FindFirstChild("Enemies")
+    if not enemies then
+        return
+    end
+
+    for _, enemy in next, enemies:GetChildren() do
+        local humanoid = enemy:FindFirstChild("Humanoid")
+        local root = enemy:FindFirstChild("HumanoidRootPart")
+        if enemy ~= Character
+            and ((x and enemy.Name == x) or not x)
+            and humanoid
+            and root
+            and not IsDied(enemy)
+            and (root.Position - HumanoidRootPart.Position).Magnitude <= 65 then
+            targets[#targets + 1] = enemy
+        end
+    end
+
+    if #targets == 0 then
+        return
+    end
+
+    local net = ReplicatedStorage:FindFirstChild("Modules")
+        and ReplicatedStorage.Modules:FindFirstChild("Net")
+    if not net then
+        return
+    end
+
+    local hitData = {[2] = {}}
+    for _, enemy in ipairs(targets) do
+        local part = enemy:FindFirstChild("Head") or enemy:FindFirstChild("HumanoidRootPart")
+        if part then
+            hitData[1] = hitData[1] or part
+            hitData[2][#hitData[2] + 1] = {enemy, part}
+        end
+    end
+
+    if not hitData[1] or #hitData[2] == 0 then
+        return
+    end
+
+    local registerAttack = net:FindFirstChild("RE/RegisterAttack")
+    local registerHit = net:FindFirstChild("RE/RegisterHit")
+    if registerAttack then
+        pcall(function()
+            registerAttack:FireServer()
+        end)
+    end
+    if registerHit then
+        pcall(function()
+            registerHit:FireServer(unpackArgs(hitData))
+        end)
+    end
+
+    if remoteAttack and idremote ~= nil then
+        pcall(function()
+            cloneref(remoteAttack):FireServer(
+                string.gsub("RE/RegisterHit", ".", function(character)
+                    return string.char(bit32.bxor(
+                        string.byte(character),
+                        math.floor(workspace:GetServerTimeNow() / 10 % 10) + 1
+                    ))
+                end),
+                bit32.bxor((tonumber(idremote) or 0) + 909090, (tonumber(seed) or 0) * 2),
+                unpackArgs(hitData)
+            )
+        end)
+    end
+
     lastCallFA = tick()
 end)
 
@@ -715,55 +1004,80 @@ end
 
 local LastServersDataPulled, CachedServers
 function GetServers()
-    if LastServersDataPulled then
+    if LastServersDataPulled and CachedServers then
         if os.time() - LastServersDataPulled < 60 then
             return CachedServers
         end
     end
 
-    for i = 1, 100, 1 do
-        local data = game:GetService("ReplicatedStorage"):WaitForChild("__ServerBrowser"):InvokeServer(i)
-        if IfTableHaveIndex(data) then
+    local browser = ReplicatedStorage:FindFirstChild("__ServerBrowser")
+    if not browser then
+        return {}
+    end
+
+    for page = 1, 100 do
+        local ok, data = pcall(function()
+            return browser:InvokeServer(page)
+        end)
+        if ok and type(data) == "table" and IfTableHaveIndex(data) then
             LastServersDataPulled = os.time()
             CachedServers = data
             return data
         end
     end
+
+    return CachedServers or {}
 end
 
 HopServer = function(MaxPlayers, ForcedRegion)
-    MaxPlayers = MaxPlayers or 8
+    MaxPlayers = tonumber(MaxPlayers) or 8
     SetText("Fetching Server...")
-    local Servers = GetServers()
-    local ArrayServers = {}
 
-    for i, v in next, Servers do
-        if v.Count <= MaxPlayers then
-            table.insert(ArrayServers, {
-                JobId = i,
-                Players = v.Count,
-                LastUpdate = v.__LastUpdate,
-                Region = v.Region
-            })
+    local servers = GetServers() or {}
+    local candidates = {}
+    for jobId, server in next, servers do
+        if type(server) == "table"
+            and jobId ~= game.JobId
+            and tonumber(server.Count)
+            and tonumber(server.Count) <= MaxPlayers
+            and (not ForcedRegion or server.Region == ForcedRegion) then
+            candidates[#candidates + 1] = {
+                JobId = jobId,
+                Players = tonumber(server.Count) or math.huge,
+                LastUpdate = server.__LastUpdate,
+                Region = server.Region,
+            }
         end
     end
-    SetText(#ArrayServers, 'servers received')
-    local ServerData
-    for i = 1, #ArrayServers do
-        while task.wait(1) do
-            local Index = math.random(1, #ArrayServers)
-            ServerData = ArrayServers[Index]
-            if ServerData then
-                if not ForcedRegion or ServerData.Regoin == ForcedRegion then
-                    SetText("Found Server:", ServerData.JobId, 'Player Count:', ServerData.Players, "Region:", ServerData.Region)
-                    break
-                end
-            end
-        end
 
-        print('Teleporting to', ServerData.JobId, '...')
-        game:GetService("ReplicatedStorage"):WaitForChild("__ServerBrowser"):InvokeServer('teleport', ServerData.JobId)
+    table.sort(candidates, function(a, b)
+        return a.Players < b.Players
+    end)
+
+    if #candidates == 0 then
+        SetText("No matching server found. Retrying later...")
+        return false
     end
+
+    local serverData = candidates[math.random(1, #candidates)]
+    SetText(
+        "Found Server: " .. tostring(serverData.JobId)
+        .. " | Players: " .. tostring(serverData.Players)
+        .. " | Region: " .. tostring(serverData.Region or "Unknown")
+    )
+
+    local browser = ReplicatedStorage:FindFirstChild("__ServerBrowser")
+    if not browser then
+        return false
+    end
+
+    local ok, err = pcall(function()
+        browser:InvokeServer("teleport", serverData.JobId)
+    end)
+    if not ok then
+        safeWarn("[HopServer]", err)
+    end
+    return ok
 end
 
 local connection, tween, pathPart, isTweening = nil, nil, nil, false
@@ -902,9 +1216,9 @@ local function TweenTouchPart(part, text, speedSetting, radiusSetting, stopCondi
         if (root.Position - part.Position).Magnitude <= touchRadius then
             touched = true
             pcall(function()
-                firetouchinterest(root, part, 0)
+                SafeTouch(root, part, 0)
                 task.wait(0.08)
-                firetouchinterest(root, part, 1)
+                SafeTouch(root, part, 1)
             end)
             task.wait(0.15)
         end
@@ -1015,20 +1329,48 @@ TableQuests = setmetatable({}, {__index = function(_, k)
     return m and {Position = m, Meters = d, RawNPCName = raw} or nil
 end})
 
-local hookedNotification;
-hookedNotification = hookfunction(require(ReplicatedStorage.Notification).new, newcclosure(function(...)
-    local args = ({...})[1]
-    if not RaceFlow.completedWritten and RaceFlow.mode ~= "COMPLETED" and CheckSea(2) then
-        if args:lower():find("supply a <core brain>") or args:find("<Fist of Darkness> has been") then
-            CyborgBlockPartUnlocked = "unlock"
-            writefile(mainfile, "unlock")
-        elseif args:find("Microchip not found") then
-            CyborgBlockPartUnlocked = "chest"
-            writefile(mainfile, "chest")
+local hookedNotification
+
+do
+    local okModule, notificationModule = pcall(function()
+        return require(ReplicatedStorage:WaitForChild("Notification"))
+    end)
+    local originalNew = okModule and notificationModule and notificationModule.new
+
+    if type(hookfunction) == "function" and type(originalNew) == "function" then
+        local callback = newcclosure(function(...)
+            local args = ({...})[1]
+            if type(args) == "string"
+                and not RaceFlow.completedWritten
+                and RaceFlow.mode ~= "COMPLETED"
+                and CheckSea(2) then
+                local lower = args:lower()
+                if lower:find("supply a <core brain>", 1, true)
+                    or args:find("<Fist of Darkness> has been", 1, true) then
+                    CyborgBlockPartUnlocked = "unlock"
+                    SafeWriteFile(mainfile, "unlock")
+                elseif args:find("Microchip not found", 1, true) then
+                    CyborgBlockPartUnlocked = "chest"
+                    SafeWriteFile(mainfile, "chest")
+                end
+            end
+
+            if type(hookedNotification) == "function" then
+                return hookedNotification(...)
+            end
+            return nil
+        end)
+
+        local okHook, original = pcall(hookfunction, originalNew, callback)
+        if okHook and type(original) == "function" then
+            hookedNotification = original
+        else
+            safeWarn("[Notification] hook unavailable; continuing with polling mode")
         end
+    else
+        safeWarn("[Notification] hookfunction unavailable; continuing with polling mode")
     end
-    return hookedNotification(...)
-end))
+end
 
 local all = 0
 local fragok = false;
@@ -1067,7 +1409,7 @@ task.spawn(function()
             end
 
             CyborgBlockPartUnlocked = ReadMainFileState()
-            pcall(function() fireclickdetector(workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector) end)
+            pcall(function() SafeClickDetector(workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector) end)
 
             local _, cyborgProgressCheck = SafeCommF("CyborgTrainer", "Check")
             if CyborgBlockPartUnlocked == "unlock" or cyborgProgressCheck == true then
@@ -1097,7 +1439,7 @@ task.spawn(function()
                             pcall(function() Tween(ReplicatedStorage.Order:GetPivot()) end)
                         else
                             if not CheckTool("Microchip") and not CheckTool("Core Brain") then COMMF_:InvokeServer("BlackbeardReward", "Microchip", "2") task.wait(1) end
-                            fireclickdetector(workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector)
+                            SafeClickDetector(workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector)
                             TryBuyCyborg(true)
                         end
                     else SetText("Travel to Dressrosa") task.wait(3) COMMF_:InvokeServer("TravelDressrosa")
@@ -1108,7 +1450,7 @@ task.spawn(function()
                             for _, v2 in next, {workspace.Enemies, ReplicatedStorage} do
                                 for _, v in next, v2:GetChildren() do
                                     if v.Name == "Dough King" or v.Name == "Cake Prince" or v.Name:find("rip_indra") then
-                                        if v.Name ~= "rip_indra" then if not CheckLocation("Dimensional Shift") then firetouchinterest(LocalPlayer.Character.HumanoidRootPart, workspace.Map.CakeLoaf.BigMirror.Main, 0) task.wait(3) end end
+                                        if v.Name ~= "rip_indra" then if not CheckLocation("Dimensional Shift") then SafeTouch(LocalPlayer.Character.HumanoidRootPart, workspace.Map.CakeLoaf.BigMirror.Main, 0) task.wait(3) end end
                                         if v:FindFirstChildWhichIsA("Humanoid") and v.Humanoid.Health > 0 and v.HumanoidRootPart then
                                             repeat task.wait() KillMonster(v.Name)
                                             until not v or not v:FindFirstChildWhichIsA("Humanoid") or v.Humanoid.Health <= 0 or not v.HumanoidRootPart
@@ -1163,7 +1505,7 @@ task.spawn(function()
                 if CheckSea(2) then
                     if CheckTool("Fist of Darkness") then
                         EquipWeapon("Fist of Darkness")
-                        fireclickdetector(workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector)
+                        SafeClickDetector(workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector)
                     else
                         local inWindow, uptime, uptimeSource, timeInfo = CheckChestTimeWindow()
 
@@ -1259,12 +1601,14 @@ task.spawn(function()
                 end
             else
                 if CheckSea(2) then
-                    fireclickdetector(workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector)
+                    SafeClickDetector(workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector)
                 else SetText("Travel to sea 2") task.wait(3) COMMF_:InvokeServer("TravelDressrosa")
                 end
             end
-        end, function(err) warn(err)
-            StarterGui:SetCore("SendNotification", {Title = "ERROR", Text = err})
+        end, function(err)
+            safeWarn("[MainLoop]", err)
+            SafeNotify("ERROR", tostring(err), 5)
+            return tostring(err)
         end)
     end
 end)
@@ -1291,8 +1635,10 @@ end)
 
 TeleportService.TeleportInitFailed:Connect(function(player, teleportResult, message)
     if teleportResult == Enum.TeleportResult.GameFull then inHopPP = false
-    elseif teleportResult == Enum.TeleportResult.IsTeleporting and (message:find("previous teleport")) then
-        StarterGui:SetCore("SendNotification", {Title = "Death Hop Found", Text = message, Duration = 8})
+    elseif teleportResult == Enum.TeleportResult.IsTeleporting
+        and type(message) == "string"
+        and message:find("previous teleport", 1, true) then
+        SafeNotify("Death Hop Found", message, 8)
         task.delay(10, function() game:Shutdown() end)
     end
 end)
