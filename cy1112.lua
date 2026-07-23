@@ -1,7 +1,7 @@
 getgenv().Settings = {
-    ["Max Chests"] = 30;
+    ["Max Chests"] = 50;
     ["Skip Chest Delay"] = 1;
-    ["Reset After Collect Chests"] = 15;
+    ["Reset After Collect Chests"] = 7;
     ["Katakuri Progress"] = 100;
     ["Fragments"] = 1000;
     ["Black Screen"] = false;
@@ -11,7 +11,7 @@ getgenv().Settings = {
     -- Server hop scanner
     ["Hop Max Pages"] = 500;          -- Tổng số page tối đa được duyệt
     ["Hop Pages Per Batch"] = 150;     -- Số page quét trong mỗi lần hop
-    ["Hop Max Players"] = 5;          -- Chỉ lấy server có player <= giá trị này
+    ["Hop Max Players"] = 8;          -- Chỉ lấy server có player <= giá trị này
     ["Hop Forced Region"] = nil;      -- VD: "Singapore"; nil = mọi region
 
     -- Server uptime chest window: every 4 hours, active for 2 hours
