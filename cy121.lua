@@ -78,13 +78,13 @@ local function SafeNotify(title, text, duration)
 end
 
 local DEFAULT_SETTINGS = {
-    ["Max Chests"] = 50,
+    ["Max Chests"] = 30,
     ["Skip Chest Delay"] = 1,
-    ["Reset After Collect Chests"] = 7,
+    ["Reset After Collect Chests"] = 15,
     ["Katakuri Progress"] = 100,
     ["Fragments"] = 1000,
     ["Black Screen"] = false,
-    ["Chest Tween Speed"] = 325,
+    ["Chest Tween Speed"] = 350,
     ["Chest Touch Radius"] = 8,
     ["Chest Server Period"] = 4 * 60 * 60,
     ["Chest Server Grace"] = 2 * 60 * 60,
