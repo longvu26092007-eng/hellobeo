@@ -1,7 +1,7 @@
 getgenv().Settings = {
-    ["Max Chests"] = 50;
+    ["Max Chests"] = 30;
     ["Skip Chest Delay"] = 1;
-    ["Reset After Collect Chests"] = 7;
+    ["Reset After Collect Chests"] = 15;
     ["Katakuri Progress"] = 100;
     ["Fragments"] = 1000;
     ["Black Screen"] = false;
@@ -9,8 +9,8 @@ getgenv().Settings = {
     ["Chest Touch Radius"] = 8;
 
     -- Server hop scanner
-    ["Hop Max Pages"] = 500;          -- Tổng số page tối đa được duyệt
-    ["Hop Pages Per Batch"] = 150;     -- Số page quét trong mỗi lần hop
+    ["Hop Max Pages"] = 150;          -- Tổng số page tối đa được duyệt
+    ["Hop Pages Per Batch"] = 100;     -- Số page quét trong mỗi lần hop
     ["Hop Max Players"] = 8;          -- Chỉ lấy server có player <= giá trị này
     ["Hop Forced Region"] = nil;      -- VD: "Singapore"; nil = mọi region
 
