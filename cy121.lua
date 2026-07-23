@@ -1,3 +1,10 @@
+-- EDIT KEY HERE, THEN EXECUTE THIS FILE DIRECTLY.
+getgenv = getgenv or function() return _G end
+local __env = getgenv()
+if __env.Key == nil then
+    __env.Key = "PUT_BANANA_KEY_HERE"
+end
+
 -- ============================================================
 -- EXECUTOR / STARTUP COMPATIBILITY BOOTSTRAP
 -- Prevents early "attempt to call a nil value" crashes.
@@ -20,6 +27,45 @@ newcclosure = newcclosure or function(callback)
 end
 local compileSource = loadstring or load
 local safeWarn = warn or print
+
+local function SafeHttpGet(url)
+    if type(url) ~= "string" or url == "" then
+        return false, "invalid_url"
+    end
+
+    local ok, body = pcall(function()
+        return game:HttpGet(url)
+    end)
+    if ok and type(body) == "string" and body ~= "" then
+        return true, body
+    end
+
+    local requestFunction = nil
+    if type(request) == "function" then
+        requestFunction = request
+    elseif type(http_request) == "function" then
+        requestFunction = http_request
+    elseif type(syn) == "table" and type(syn.request) == "function" then
+        requestFunction = syn.request
+    end
+
+    if requestFunction then
+        local requestOk, response = pcall(requestFunction, {
+            Url = url,
+            Method = "GET",
+        })
+        if requestOk and type(response) == "table" then
+            local responseBody = response.Body or response.body
+            if type(responseBody) == "string" and responseBody ~= "" then
+                return true, responseBody
+            end
+            return false, tostring(response.StatusMessage or response.status_message or response.StatusCode or "empty_response")
+        end
+        return false, tostring(response)
+    end
+
+    return false, tostring(body or "HttpGet/request unavailable")
+end
 
 local function SafeNotify(title, text, duration)
     pcall(function()
@@ -366,7 +412,7 @@ end
 -- Order: Cyborg V1 -> Ghoul V1 -> Completed-done
 -- This module does not change the current race just to check ownership.
 -- ============================================================
-local GH0UL_LOADER_URL = "https://raw.githubusercontent.com/obiiyeuem/vthangsitink/main/BananaHub.lua"
+local GHOUL_LOADER_URL = "https:" .. string.char(47, 47) .. "raw.githubusercontent.com/obiiyeuem/vthangsitink/main/BananaHub.lua"
 local CYBORG_BUY_COOLDOWN = 3
 local OWNERSHIP_RECHECK_DELAY = 5
 local SEA_TRAVEL_COOLDOWN = 8
@@ -659,8 +705,11 @@ local function StartGhoulLoader()
                 ["Auto Get Ghoul"] = true,
             }
 
-            local source = game:HttpGet(GH0UL_LOADER_URL)
-            local loader, compileError = compileSource(source)
+            local httpOk, sourceOrError = SafeHttpGet(GHOUL_LOADER_URL)
+            if not httpOk then
+                error("BananaHub download failed: " .. tostring(sourceOrError))
+            end
+            local loader, compileError = compileSource(sourceOrError)
             if type(loader) ~= "function" then
                 error("BananaHub compile failed: " .. tostring(compileError or "unknown"))
             end
@@ -1515,7 +1564,7 @@ task.spawn(function()
                                 .. tostring(uptimeSource)
                             )
                             task.wait(3)
-                            continue
+                            return
                         elseif not inWindow then
                             local nextText =
                                 timeInfo
@@ -1533,7 +1582,7 @@ task.spawn(function()
 
                             task.wait(1)
                             HopServer(8)
-                            continue
+                            return
                         end
 
                         local chests, c = {}, 0
