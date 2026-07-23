@@ -213,26 +213,371 @@ local function CheckChestTimeWindow()
     }
 end
 
-local completedCyborgWritten = false
-local function WriteCompletedCyborg()
-    if completedCyborgWritten then
-        return
+-- ============================================================
+-- INDEPENDENT RACE OWNERSHIP FLOW
+-- Order: Cyborg V1 -> Ghoul V1 -> Completed-done
+-- This module does not change the current race just to check ownership.
+-- ============================================================
+local GH0UL_LOADER_URL = "https://raw.githubusercontent.com/obiiyeuem/vthangsitink/main/BananaHub.lua"
+local CYBORG_BUY_COOLDOWN = 3
+local OWNERSHIP_RECHECK_DELAY = 5
+local SEA_TRAVEL_COOLDOWN = 8
+
+local RaceFlow = {
+    ready = false,
+    busy = false,
+    mode = "BOOT", -- BOOT | GET_CYBORG | GET_GHOUL | COMPLETED
+    cyborgOwned = false,
+    ghoulOwned = false,
+    cyborgCheckRaw = nil,
+    ghoulCheckRaw = nil,
+    ghoulLoaderStarted = false,
+    ghoulEverConfirmed = false,
+    completedWritten = false,
+    lastCyborgBuyAttempt = 0,
+    lastSeaTravelAttempt = 0,
+    sea2Ready = false,
+    legacyCyborgOwned = false,
+}
+
+local function ReadMainFileState()
+    if not isfile(mainfile) then
+        return "NaN"
     end
+    local ok, value = pcall(readfile, mainfile)
+    return ok and tostring(value or "NaN") or "NaN"
+end
 
-    local race =
-        LocalPlayer
-        and LocalPlayer:FindFirstChild("Data")
-        and LocalPlayer.Data:FindFirstChild("Race")
-
-    if race and tostring(race.Value):lower() == "cyborg" then
+-- The old script wrote Completed-cyborg. Preserve that as evidence that
+-- Cyborg was obtained, then remove the old completion marker as requested.
+do
+    local oldState = ReadMainFileState()
+    if oldState:lower() == "completed-cyborg" then
+        RaceFlow.legacyCyborgOwned = true
         pcall(function()
-            writefile(mainfile, "Completed-cyborg")
+            writefile(mainfile, "NaN")
         end)
-        completedCyborgWritten = true
+    elseif oldState:lower() == "completed-done" then
+        RaceFlow.completedWritten = true
     end
 end
 
-function CheckSea(v: number) return v == tonumber(workspace:GetAttribute("MAP"):match("%d+")) end
+local function GetCurrentRace()
+    local data = LocalPlayer and LocalPlayer:FindFirstChild("Data")
+    local race = data and data:FindFirstChild("Race")
+    if not race then
+        return "Unknown", nil
+    end
+
+    local value = tostring(race.Value or "Unknown")
+    if value == "" then
+        value = "Unknown"
+    end
+    return value, race
+end
+
+local function SafeCommF(...)
+    local args = {...}
+    local ok, result = pcall(function()
+        return COMMF_:InvokeServer(unpack(args))
+    end)
+    if not ok then
+        return false, result
+    end
+    return true, result
+end
+
+local function ResultLooksOwned(result)
+    if result == true or result == 1 then
+        return true
+    end
+
+    if type(result) == "table" then
+        for _, key in ipairs({"Owned", "owned", "Unlocked", "unlocked", "Bought", "bought", "Purchased", "purchased", "Has", "has"}) do
+            if result[key] == true or result[key] == 1 then
+                return true
+            end
+        end
+        return false
+    end
+
+    if type(result) ~= "string" then
+        return false
+    end
+
+    local text = result:lower()
+    for _, token in ipairs({
+        "not enough", "do not have", "don't have", "dont have", "need ",
+        "missing", "required", "requires", "cannot", "can't", "cant",
+        "not unlocked", "not purchased", "not bought"
+    }) do
+        if text:find(token, 1, true) then
+            return false
+        end
+    end
+
+    for _, token in ipairs({
+        "already", "owned", "unlocked", "purchased", "bought",
+        "you have", "can change", "change race"
+    }) do
+        if text:find(token, 1, true) then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function CheckCyborgOwned()
+    local raceName = GetCurrentRace()
+    if raceName:lower() == "cyborg" or RaceFlow.legacyCyborgOwned then
+        RaceFlow.cyborgOwned = true
+        RaceFlow.legacyCyborgOwned = true
+        RaceFlow.cyborgCheckRaw = raceName:lower() == "cyborg" and "current_race" or "previously_confirmed"
+        return true, RaceFlow.cyborgCheckRaw
+    end
+
+    local ok, result = SafeCommF("CyborgTrainer", "Check")
+    RaceFlow.cyborgCheckRaw = ok and result or ("remote_error:" .. tostring(result))
+
+    -- CyborgTrainer Check uses 2 as the completed/owned state. A boolean true
+    -- can be an intermediate unlocked/progression state, so it must not mark
+    -- Cyborg V1 as owned by itself.
+    local owned = ok and (result == 2 or tostring(result) == "2")
+    if not owned and ok and type(result) == "string" then
+        owned = ResultLooksOwned(result)
+    elseif not owned and ok and type(result) == "table" then
+        owned = ResultLooksOwned(result)
+    end
+
+    RaceFlow.cyborgOwned = owned or false
+    if RaceFlow.cyborgOwned then
+        RaceFlow.legacyCyborgOwned = true
+    end
+    return RaceFlow.cyborgOwned, RaceFlow.cyborgCheckRaw
+end
+
+local function CheckGhoulOwned()
+    local raceName = GetCurrentRace()
+    if raceName:lower() == "ghoul" or RaceFlow.ghoulEverConfirmed then
+        RaceFlow.ghoulOwned = true
+        RaceFlow.ghoulEverConfirmed = true
+        RaceFlow.ghoulCheckRaw = raceName:lower() == "ghoul" and "current_race" or "previously_confirmed"
+        return true, RaceFlow.ghoulCheckRaw
+    end
+
+    -- BuyCheck only checks the Ghoul purchase/unlock state. It does not call
+    -- Ectoplasm Change, so the account's current race is not switched here.
+    local ok, result = SafeCommF("Ectoplasm", "BuyCheck", 4)
+    RaceFlow.ghoulCheckRaw = ok and result or ("remote_error:" .. tostring(result))
+    RaceFlow.ghoulOwned = ok and ResultLooksOwned(result) or false
+    if RaceFlow.ghoulOwned then
+        RaceFlow.ghoulEverConfirmed = true
+    end
+    return RaceFlow.ghoulOwned, RaceFlow.ghoulCheckRaw
+end
+
+local function WriteCompletedDone()
+    if not RaceFlow.completedWritten or ReadMainFileState():lower() ~= "completed-done" then
+        pcall(function()
+            writefile(mainfile, "Completed-done")
+        end)
+        RaceFlow.completedWritten = true
+    end
+end
+
+local function GetSeaNumber()
+    local placeId = game.PlaceId
+    if placeId == 2753915549 then
+        return 1
+    elseif placeId == 4442272183 then
+        return 2
+    elseif placeId == 7449423635 then
+        return 3
+    end
+
+    local map = workspace:GetAttribute("MAP")
+    local number = tostring(map or ""):match("%d+")
+    return tonumber(number)
+end
+
+local function EnsureSea2ForCyborg()
+    local sea = GetSeaNumber()
+    RaceFlow.sea2Ready = sea == 2
+    if RaceFlow.sea2Ready then
+        return true
+    end
+
+    local now = tick()
+    if now - RaceFlow.lastSeaTravelAttempt >= SEA_TRAVEL_COOLDOWN then
+        RaceFlow.lastSeaTravelAttempt = now
+        SetText("Cyborg V1: missing\nCurrent Sea: " .. tostring(sea or "Unknown") .. "\nTeleporting to Sea 2...")
+        SafeCommF("TravelDressrosa")
+    end
+    return false
+end
+
+local function StartGhoulLoader()
+    if RaceFlow.ghoulLoaderStarted then
+        return true
+    end
+
+    -- The key must be supplied outside this script, for example:
+    -- getgenv().Key = "111"
+    local externalKey = getgenv().Key
+    if externalKey == nil or tostring(externalKey) == "" then
+        SetText("Cyborg V1: owned\nGhoul V1: missing\nSet getgenv().Key outside the loader")
+        return false
+    end
+
+    RaceFlow.ghoulLoaderStarted = true
+
+    -- Preserve the exact externally supplied key for BananaHub.
+    getgenv().Key = externalKey
+    getgenv().Config = {
+        ["Hop Server Get Ghoul"] = true,
+        ["Auto Get Ghoul"] = true,
+    }
+
+    SetText("Cyborg V1: owned\nGhoul V1: missing\nStarting BananaHub Get Ghoul...")
+
+    task.spawn(function()
+        local ok, err = xpcall(function()
+            local source = game:HttpGet(GH0UL_LOADER_URL)
+            local loader = loadstring(source)
+            if not loader then
+                error("BananaHub loadstring returned nil")
+            end
+            loader()
+        end, function(message)
+            return tostring(message)
+        end)
+
+        if not ok then
+            RaceFlow.ghoulLoaderStarted = false
+            SetText("Get Ghoul loader error:\n" .. tostring(err))
+            warn("[RaceFlow] BananaHub Get Ghoul error:", err)
+        end
+    end)
+
+    return true
+end
+
+local function RefreshRaceFlow()
+    if RaceFlow.busy then
+        return RaceFlow.mode
+    end
+    RaceFlow.busy = true
+
+    -- Required order: always check Cyborg ownership first.
+    local hasCyborg = CheckCyborgOwned()
+    if not hasCyborg then
+        RaceFlow.mode = "GET_CYBORG"
+        RaceFlow.ghoulOwned = false
+        EnsureSea2ForCyborg()
+        if RaceFlow.sea2Ready then
+            SetText("Cyborg V1: missing\nGhoul check: waiting\nRunning Get Cyborg...")
+        end
+        RaceFlow.busy = false
+        return RaceFlow.mode
+    end
+
+    -- Only check Ghoul after Cyborg V1 is confirmed.
+    local hasGhoul = CheckGhoulOwned()
+    if not hasGhoul then
+        RaceFlow.mode = "GET_GHOUL"
+        Tween(false)
+        StartGhoulLoader()
+        RaceFlow.busy = false
+        return RaceFlow.mode
+    end
+
+    RaceFlow.mode = "COMPLETED"
+    RaceFlow.sea2Ready = true
+    Tween(false)
+    WriteCompletedDone()
+    SetText("Cyborg V1: owned\nGhoul V1: owned\nCompleted-done")
+    RaceFlow.busy = false
+    return RaceFlow.mode
+end
+
+local function TryBuyCyborg(force)
+    if RaceFlow.mode ~= "GET_CYBORG" then
+        return RaceFlow.cyborgOwned, "not_in_get_cyborg_mode"
+    end
+
+    local raceName = GetCurrentRace()
+    if raceName:lower() == "cyborg" then
+        RaceFlow.legacyCyborgOwned = true
+        RefreshRaceFlow()
+        return true, "current_race"
+    end
+
+    local now = tick()
+    if now - RaceFlow.lastCyborgBuyAttempt < CYBORG_BUY_COOLDOWN then
+        return false, "cooldown"
+    end
+
+    local data = LocalPlayer and LocalPlayer:FindFirstChild("Data")
+    local fragments = data and data:FindFirstChild("Fragments")
+    if not force and (not fragments or tonumber(fragments.Value) < 2500) then
+        return false, "not_enough_fragments"
+    end
+
+    RaceFlow.lastCyborgBuyAttempt = now
+    local ok, result = SafeCommF("CyborgTrainer", "Buy")
+    task.wait(0.25)
+
+    local newRace = GetCurrentRace()
+    if newRace:lower() == "cyborg" then
+        RaceFlow.legacyCyborgOwned = true
+        RefreshRaceFlow()
+        return true, result
+    end
+
+    return false, ok and result or "remote_error"
+end
+
+-- Wait for the game, Team, Character and Data.Race before any Sea or race check.
+task.spawn(function()
+    repeat task.wait(0.5) until game:IsLoaded()
+    repeat task.wait(0.5) until LocalPlayer and LocalPlayer.Team ~= nil
+    repeat task.wait(0.5) until Character
+        and Character:IsDescendantOf(workspace)
+        and Character:FindFirstChild("HumanoidRootPart")
+        and Character:FindFirstChildWhichIsA("Humanoid")
+    local data = LocalPlayer:WaitForChild("Data")
+    local race = data:WaitForChild("Race")
+
+    RaceFlow.ready = true
+    if RaceFlow.completedWritten then
+        RaceFlow.cyborgOwned = true
+        RaceFlow.ghoulOwned = true
+        RaceFlow.mode = "COMPLETED"
+        WriteCompletedDone()
+        SetText("Cyborg V1: owned\nGhoul V1: owned\nCompleted-done")
+    else
+        RefreshRaceFlow()
+    end
+
+    if race then
+        race:GetPropertyChangedSignal("Value"):Connect(function()
+            task.defer(RefreshRaceFlow)
+        end)
+    end
+
+    while task.wait(OWNERSHIP_RECHECK_DELAY) do
+        if RaceFlow.mode ~= "COMPLETED" then
+            RefreshRaceFlow()
+        else
+            WriteCompletedDone()
+        end
+    end
+end)
+
+function CheckSea(v: number)
+    return tonumber(v) == GetSeaNumber()
+end
 
 local canPress = true
 PressKeyEvent = (function(k, d)
@@ -476,7 +821,7 @@ function Tween(targetCFrame: CFrame | boolean, target: CFrame)
 end
 
 -- ===== [ FIX GHOST CHEST ] Tween toi part roi firetouchinterest de cham THAT SU =====
--- (port tu V3.txt). Thay cho SetPrimaryPartCFrame + PressKeyEvent("Space") vua khong an
+-- Chest touch implementation. Replaces SetPrimaryPartCFrame + PressKeyEvent("Space") which did not collect
 -- duoc chest (ghost) vua de loi khi PrimaryPart chua set.
 local function TweenTouchPart(part, text, speedSetting, radiusSetting, stopCondition)
     if not part or not part:IsA("BasePart") or not part.Parent then
@@ -673,7 +1018,7 @@ end})
 local hookedNotification;
 hookedNotification = hookfunction(require(ReplicatedStorage.Notification).new, newcclosure(function(...)
     local args = ({...})[1]
-    if CheckSea(2) then
+    if not RaceFlow.completedWritten and RaceFlow.mode ~= "COMPLETED" and CheckSea(2) then
         if args:lower():find("supply a <core brain>") or args:find("<Fist of Darkness> has been") then
             CyborgBlockPartUnlocked = "unlock"
             writefile(mainfile, "unlock")
@@ -690,69 +1035,42 @@ local fragok = false;
 task.spawn(function()
     while task.wait(0.5) do
         xpcall(function()
-            WriteCompletedCyborg()
-            if LocalPlayer.Data.Race.Value ~= "Cyborg" and LocalPlayer.Data.Fragments.Value >= 2500 then COMMF_:InvokeServer("CyborgTrainer", "Buy") end
-            CyborgBlockPartUnlocked = readfile(mainfile) or "NaN"
-            pcall(function() fireclickdetector(workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector) end)
-            if LocalPlayer.Data.Race.Value == "Cyborg" then
-                if COMMF_:InvokeServer("Wenlocktoad") == nil then
-                    if CheckSea(2) then
-                        if not LocalPlayer.Data.Race:FindFirstChild("Evolved") then
-                            SetText("Upgrading Race to V2")
-                            if COMMF_:InvokeServer("Alchemist", "2") == "Come back when you find them." then
-                                if not CheckTool("Flower 1") and workspace.Flower1.Transparency == 0 then
-                                    Tween(false)
-                                    SetText("Upgrade Race V2 | Collecting Flower 1")
-                                    repeat
-                                        task.wait(0.1)
-                                        Character:SetPrimaryPartCFrame(workspace.Flower1.CFrame)
-                                    until (CheckTool("Flower 1") or workspace.Flower1.Transparency ~= 0)
-                                elseif not CheckTool("Flower 2") and workspace.Flower2.Transparency == 0 then
-                                    Tween(false)
-                                    SetText("Upgrade Race V2 | Collecting Flower 2")
-                                    repeat
-                                        task.wait(0.1)
-                                        Character:SetPrimaryPartCFrame(workspace.Flower2.CFrame)
-                                    until (CheckTool("Flower 2") or workspace.Flower2.Transparency ~= 0)
-                                elseif not CheckTool("Flower 3") then
-                                    for _, v in next, workspace.Enemies:GetChildren() do
-                                        if v.Name == "Swan Pirate" then
-                                            if v:FindFirstChildWhichIsA("Humanoid") and v.Humanoid.Health > 0 and v.HumanoidRootPart then
-                                                repeat task.wait() KillMonster(v.Name)
-                                                until not v or not v:FindFirstChildWhichIsA("Humanoid") or v.Humanoid.Health <= 0 or not v.HumanoidRootPart or CheckTool("Flower 3")
-                                            end
-                                        else
-                                            Tween(CFrame.new(980.0985107421875, 121.331298828125, 1287.2093505859375))
-                                        end
-                                    end
-                                else
-                                    if CheckTool("Flower 1") and CheckTool("Flower 2") and CheckTool("Flower 3") then
-                                        COMMF_:InvokeServer("Alchemist", "3")
-                                    end
-                                end
-                            end
-                        elseif COMMF_:InvokeServer("Wenlocktoad") == nil then
-                            local venlock = COMMF_:InvokeServer("Wenlocktoad", "2")
-                            if typeof(venlock) == "string" then SetText("Upgrade Race V3")
-                                if venlock:find("haven't completed") ~= nil or venlock:find("Talk to me again") ~= nil then
-                                    local t = math.huge local n;
-                                    for _, v in next, COMMF_:InvokeServer("getInventory") do if v.Type == "Blox Fruit" then if v.Value < t then t = v.Value n = v.Name end end end
-                                    COMMF_:InvokeServer("LoadFruit", n) COMMF_:InvokeServer("Wenlocktoad", "3")
-                                end
-                            end
-                        else
-                            SetText("IDK WHAT I AM DOING NOW")
-                        end
-                    else SetText("Travel to sea 2") task.wait(1) COMMF_:InvokeServer("TravelDressrosa")
-                    end
-                else
-                    if CheckSea(3) then
-                        writefile(mainfile, "Completed-cyborg")
-                        SetText("DONE V3")
-                    else SetText("Teleport to Sea 3") task.wait(3) COMMF_:InvokeServer("TravelZou") task.wait(10)
-                    end
+            if not RaceFlow.ready then
+                SetText("Waiting for game, Team, Character and Race data...")
+                return
+            end
+
+            if RaceFlow.mode == "COMPLETED" then
+                Tween(false)
+                WriteCompletedDone()
+                SetText("Cyborg V1: owned\nGhoul V1: owned\nCompleted-done")
+                return
+            elseif RaceFlow.mode == "GET_GHOUL" then
+                Tween(false)
+                StartGhoulLoader()
+                return
+            elseif RaceFlow.mode ~= "GET_CYBORG" then
+                return
+            end
+
+            if not EnsureSea2ForCyborg() then
+                return
+            end
+
+            -- Get Cyborg runs exactly as before when Cyborg V1 is missing.
+            local currentRace = GetCurrentRace()
+            if currentRace:lower() ~= "cyborg" and LocalPlayer.Data.Fragments.Value >= 2500 then
+                TryBuyCyborg(false)
+                if RaceFlow.mode ~= "GET_CYBORG" then
+                    return
                 end
-            elseif CyborgBlockPartUnlocked == "unlock" or game:GetService("ReplicatedStorage").Remotes.CommF_:InvokeServer("CyborgTrainer", "Check") == true then
+            end
+
+            CyborgBlockPartUnlocked = ReadMainFileState()
+            pcall(function() fireclickdetector(workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector) end)
+
+            local _, cyborgProgressCheck = SafeCommF("CyborgTrainer", "Check")
+            if CyborgBlockPartUnlocked == "unlock" or cyborgProgressCheck == true then
                 local have, need = LocalPlayer.Data.Fragments.Value, getgenv().Settings.Fragments
                 if fragok then
                     if have < 2500 then fragok = false
@@ -780,7 +1098,7 @@ task.spawn(function()
                         else
                             if not CheckTool("Microchip") and not CheckTool("Core Brain") then COMMF_:InvokeServer("BlackbeardReward", "Microchip", "2") task.wait(1) end
                             fireclickdetector(workspace.Map.CircleIsland.RaidSummon.Button.Main.ClickDetector)
-                            game:GetService("ReplicatedStorage").Remotes.CommF_:InvokeServer("CyborgTrainer", "Buy")
+                            TryBuyCyborg(true)
                         end
                     else SetText("Travel to Dressrosa") task.wait(3) COMMF_:InvokeServer("TravelDressrosa")
                     end
@@ -855,7 +1173,7 @@ task.spawn(function()
                                 .. tostring(uptimeSource)
                             )
                             task.wait(3)
-                            return
+                            continue
                         elseif not inWindow then
                             local nextText =
                                 timeInfo
@@ -873,7 +1191,7 @@ task.spawn(function()
 
                             task.wait(1)
                             HopServer(8)
-                            return
+                            continue
                         end
 
                         local chests, c = {}, 0
@@ -954,6 +1272,9 @@ end)
 task.spawn(function()
     while task.wait(4) do
         xpcall(function()
+            if RaceFlow.mode ~= "GET_CYBORG" then
+                return
+            end
             if not Character.Humanoid or Character.Humanoid.Health <= 0 then pcall(function() workspace.TweenGhost:Destroy() end) connection, tween, pathPart, isTweening = nil, nil, nil, false return end
             if not Character:FindFirstChild("HasBuso") then COMMF_:InvokeServer("Buso") end
             for _, v in next, {"Buso", "Geppo", "Soru"} do
