@@ -948,15 +948,17 @@ local function TryBuyGhoulRace()
         return false
     end
 
-    SetStatus("Near Experimic + have Torch -> buy Ghoul (check then change)")
-    -- goi va CAPTURE ket qua de biet server co xu ly khong
-    local resCheck, resChange
+    SetStatus("Near Experimic + have Torch -> buy Ghoul (BuyCheck then Buy)")
+    -- REMOTE THAT (bat duoc tu hook khi bam tay):
+    --   CommF_("Ectoplasm","BuyCheck",4)  -> check
+    --   CommF_("Ectoplasm","Buy",4)       -> MUA (KHONG phai "Change" - "Change" tra nil)
+    local resCheck, resBuy
     pcall(function()
         resCheck = COMMF_:InvokeServer("Ectoplasm", "BuyCheck", id)
         task.wait(0.6)
-        resChange = COMMF_:InvokeServer("Ectoplasm", "Change", id)
+        resBuy = COMMF_:InvokeServer("Ectoplasm", "Buy", id)
     end)
-    print("[Ghoul] BuyCheck ->", tostring(resCheck), "| Change ->", tostring(resChange))
+    print("[Ghoul] BuyCheck ->", tostring(resCheck), "| Buy ->", tostring(resBuy))
     task.wait(1.2)
     local ghoul = IsGhoul()
     if ghoul then SetStatus("Changed to Ghoul race!") end
@@ -1240,10 +1242,12 @@ end)
     detector se detect boss va farm ngay. Neu server khong co boss -> flow lai
     fetch 10 server moi va tiep tuc hop.
 
-  - Doi race Ghoul V1: Hellfire Torch la vat MO KHOA (drop tu boss). Co torch roi:
+  - Doi race Ghoul V1: Hellfire Torch la vat MO KHOA (drop tu boss). PHAI dung SAT NPC
+    Experimic tren Cursed Ship. Remote THAT (bat duoc tu hook khi bam tay):
     COMMF_:InvokeServer("Ectoplasm","BuyCheck", 4)  -- CHECK truoc
-    COMMF_:InvokeServer("Ectoplasm","Change",   4)  -- roi CHANGE (ton 100 ecto)
-    Ghoul Race Id = 4 (theo script goc "Change To Ghoul Race"). Chinh trong ham TryBuyGhoulRace().
+    COMMF_:InvokeServer("Ectoplasm","Buy",      4)  -- roi BUY (ton 100 ecto)
+    LUU Y: la "Buy" - KHONG phai "Change" ("Change" tra nil, khong doi duoc).
+    Ghoul Race Id = 4. Chinh trong ham TryBuyGhoulRace().
   - Torch Mode: 1 = Melee, 2 = Fruit (chi anh huong build sau khi thanh Ghoul). Doi trong config.
   - Khi da co Hellfire Torch -> KHONG fetch server nua, chuyen sang mua race.
   - Khi da thanh Ghoul -> raceDone = true, bao DONE va dung han (khong fetch).
