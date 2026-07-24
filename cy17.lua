@@ -25,7 +25,9 @@ getgenv().GhoulConfig = getgenv().GhoulConfig or {
     ["Hop Delay"]           = 1.5,           -- moi sv cach nhau 1.5s
     ["Detect Timeout"]      = 20,            -- sau khi join, cho toi da bao lau de detect boss (s)
     ["Api Freshness"]       = 120,           -- chi lay sv co timestamp/update trong vong 120s (neu API co field)
-    ["Torch Mode"]          = 1,             -- 1 = Melee, 2 = Fruit  (khi doi race co "1 Hellfire Torch")
+    ["Torch Mode"]          = 1,             -- 1 = Melee, 2 = Fruit (build sau khi thanh Ghoul)
+    ["Ghoul Race Id"]       = 4,             -- id race Ghoul dung cho remote Ectoplasm/Change (script goc dung 4)
+    ["Attack Weapon"]       = "",            -- ten/ToolTip melee de equip khi danh boss ("" = equip tool bat ky)
     ["Ectoplasm MPos"]      = CFrame.new(911.35827636719, 125.95812988281, 33159.5390625),
     ["Ship Entrance"]       = Vector3.new(923.21252441406, 126.9760055542, 32852.83203125),
     ["Ship Mobs"]           = {"Ship Deckhand", "Ship Engineer", "Ship Steward", "Ship Officer"},
@@ -224,6 +226,50 @@ local function EquipAnyTool()
     end
 end
 
+-- Equip MELEE de danh boss. Goi lien tuc trong vong farm vi sau khi boss chet
+-- (hoac respawn) game hay bo trang bi -> phai equip lai.
+-- Uu tien: ten/ToolTip trong CFG["Attack Weapon"]; roi tool co attribute Melee;
+-- cuoi cung fallback tool bat ky de FastAttack chay duoc.
+local function EquipMelee()
+    if not Character or not Humanoid then return end
+    local want = tostring(CFG["Attack Weapon"] or "")
+
+    -- neu dang cam dung tool muon roi thi thoi
+    local cur = Character:FindFirstChildWhichIsA("Tool")
+    if cur then
+        if want ~= "" and (cur.Name == want or cur.ToolTip == want) then return end
+        if want == "" then
+            -- khong chi dinh -> mien la dang cam mot tool la du
+            return
+        end
+    end
+
+    local function tryEquip(pred)
+        for _, x in next, LocalPlayer.Backpack:GetChildren() do
+            if x:IsA("Tool") and pred(x) then
+                pcall(function() Humanoid:EquipTool(x) end)
+                return true
+            end
+        end
+        return false
+    end
+
+    -- 1) dung ten/ToolTip config
+    if want ~= "" then
+        if tryEquip(function(t) return t.Name == want or t.ToolTip == want end) then return end
+    end
+    -- 2) tool co danh dau Melee (Blox Fruits: Tool co attribute/child kieu "Melee")
+    if tryEquip(function(t)
+        local ok = false
+        pcall(function() ok = (t:GetAttribute("Sub") == "Melee") or (t:FindFirstChild("MeleeWeapon") ~= nil) end)
+        return ok
+    end) then return end
+    -- 3) fallback: tool bat ky (giu hanh vi cu)
+    if not Character:FindFirstChildWhichIsA("Tool") then
+        tryEquip(function() return true end)
+    end
+end
+
 local lastCallFA = tick()
 local function FastAttack(x)
     if not HumanoidRootPart or not Character:FindFirstChildWhichIsA("Humanoid")
@@ -399,14 +445,31 @@ end
 --  STEP 4: FARM ECTOPLASM  (ra thuyen Ship, tham khao script goc)
 --==================================================================
 local farmingMaterial = false
-local function RequestShipEntrance()
-    -- neu o xa thi request vao thuyen
-    if not HumanoidRootPart then return end
-    local d = (HumanoidRootPart.Position - CFG["Ship Entrance"]).Magnitude
-    if d >= 18000 then
+
+-- Tien toi khu farm ecto: o xa -> requestEntrance ra thuyen Ship roi tween toi (khong TP thang).
+-- Tra ve true khi da o gan (trong tam danh), false khi con dang di chuyen.
+local function ApproachShip(targetCF)
+    if not HumanoidRootPart then return false end
+    targetCF = targetCF or CFG["Ectoplasm MPos"]
+    local dist = (HumanoidRootPart.Position - targetCF.Position).Magnitude
+
+    -- da gan -> tween sat vao
+    if dist <= CFG["Boss Near Dist"] then
+        Tween(targetCF * CFrame.new(0, 12, 0))
+        return true
+    end
+
+    -- con xa -> qua xa thi requestEntrance ra thuyen truoc
+    if dist >= CFG["Boss Entrance Dist"] then
+        SetStatus(("Far from ship (%d) -> requestEntrance"):format(math.floor(dist)))
         pcall(function() COMMF_:InvokeServer("requestEntrance", CFG["Ship Entrance"]) end)
         task.wait(1)
     end
+
+    -- tween tien toi khu farm (khong TP)
+    SetStatus(("Tween to ship (%d studs)"):format(math.floor(dist)))
+    Tween(targetCF * CFrame.new(0, 12, 0))
+    return false
 end
 
 local function FarmEctoplasm()
@@ -416,18 +479,18 @@ local function FarmEctoplasm()
     while farmingMaterial do
         if GetEctoplasm() >= CFG["Ectoplasm Needed"] then break end
         pcall(function()
-            RequestShipEntrance()
-            EquipAnyTool()
+            EquipMelee()
             local mob = FindEnemy(table.unpack(CFG["Ship Mobs"]))
             if mob and mob:FindFirstChild("HumanoidRootPart") then
-                -- gom + danh
-                TP(mob.HumanoidRootPart.CFrame * CFrame.new(0, 15, 0))
-                EquipWeapon(Character and Character:FindFirstChildWhichIsA("Tool") and Character:FindFirstChildWhichIsA("Tool").ToolTip or "")
-                FastAttack(mob.Name)
+                -- CHECK gan quai chua: xa -> requestEntrance ra thuyen + tween; gan -> danh
+                local near = ApproachShip(mob.HumanoidRootPart.CFrame)
+                if near then
+                    EquipMelee()
+                    FastAttack(mob.Name)
+                end
             else
-                -- khong thay quai -> ve vi tri farm
-                TP(CFG["Ectoplasm MPos"])
-                RequestShipEntrance()
+                -- khong thay quai -> tien ve khu farm (xa thi entrance ra thuyen + tween)
+                ApproachShip(CFG["Ectoplasm MPos"])
             end
         end)
         task.wait(0.1)
@@ -576,22 +639,32 @@ end
 local raceDone = false
 local busyFarming = false  -- khoa tranh 2 vong lap farm boss chay cung luc
 
--- doi race Ghoul: nop Hellfire Torch. Torch Mode 1 = Melee, 2 = Fruit
-local function TrySubmitTorch()
+-- Da la Ghoul chua?
+local function IsGhoul()
+    local ok, r = pcall(function() return plr.Data.Race.Value == "Ghoul" end)
+    return ok and r
+end
+
+-- Mua/doi race Ghoul V1.
+-- Hellfire Torch la vat MO KHOA (drop tu boss) -> co no roi moi buy duoc.
+-- Cach doi (theo script goc "Change To Ghoul Race"): Ectoplasm/BuyCheck (check) -> Ectoplasm/Change.
+-- Ghoul Race Id = 4. Ecto se bi server tru (100).
+local function TryBuyGhoulRace()
+    if IsGhoul() then return true end
     if not HasHellfireTorch() then return false end
-    SetStatus("Got Hellfire Torch! Submitting (mode " .. tostring(CFG["Torch Mode"]) .. ")")
-    local mode = tostring(CFG["Torch Mode"]) -- "1" melee / "2" fruit
-    local ok = pcall(function()
-        -- buoc doi race: BuyCheck roi Change (nhu script goc), truyen so luong = 1 torch
-        COMMF_:InvokeServer("Hellfire Torch", "BuyCheck", mode)
-        task.wait(0.5)
-        COMMF_:InvokeServer("Hellfire Torch", "Change", mode)
+    local id = CFG["Ghoul Race Id"]
+    SetStatus("Have Hellfire Torch -> buy Ghoul race (check then change)")
+    pcall(function()
+        -- buoc 1: CHECK truoc (dung nhu ban nho - phai check roi moi change duoc)
+        COMMF_:InvokeServer("Ectoplasm", "BuyCheck", id)
+        task.wait(0.6)
+        -- buoc 2: CHANGE de doi sang Ghoul
+        COMMF_:InvokeServer("Ectoplasm", "Change", id)
     end)
-    task.wait(1)
-    -- xac nhan da thanh Ghoul
-    local isGhoul = false
-    pcall(function() isGhoul = (plr.Data.Race.Value == "Ghoul") end)
-    return isGhoul
+    task.wait(1.2)
+    local ghoul = IsGhoul()
+    if ghoul then SetStatus("Changed to Ghoul race!") end
+    return ghoul
 end
 
 -- Tien toi gan boss: check khoang cach -> xa thi requestEntrance ra thuyen -> tween toi.
@@ -620,17 +693,25 @@ local function ApproachBoss(bossPart)
     return false
 end
 
--- vong lap farm boss trong 1 server: detect -> danh; song song check torch
+-- vong lap farm boss trong 1 server: detect -> danh.
+-- QUAN TRONG: ngay khi co Hellfire Torch -> DUNG farm boss, di mua race (khong fetch nua).
 local function _FarmBossBody()
+    -- neu vao day ma da co torch san -> mua race luon, khoi farm
+    if HasHellfireTorch() then
+        if TryBuyGhoulRace() then raceDone = true return "DONE" end
+        -- co torch nhung chua mua duoc (thieu ecto?) -> bao de main flow xu ly, khong farm boss
+        return "HAS_TORCH"
+    end
+
     local deadline = tick() + CFG["Detect Timeout"]
     -- cho detect boss
     SetStatus("Detecting boss in server...")
     while tick() < deadline do
-        if BossPresent() then break end
-        -- trong luc cho, van kiem tra torch (phong khi da co san)
         if HasHellfireTorch() then
-            if TrySubmitTorch() then raceDone = true return "DONE" end
+            if TryBuyGhoulRace() then raceDone = true return "DONE" end
+            return "HAS_TORCH"
         end
+        if BossPresent() then break end
         task.wait(0.5)
     end
 
@@ -642,6 +723,13 @@ local function _FarmBossBody()
     -- co boss -> farm den khi chet / co torch / mat boss
     SetStatus("Boss found! Farming " .. CFG["Boss Name"])
     while true do
+        -- co torch bat cu luc nao -> dung farm ngay, di mua race
+        if HasHellfireTorch() then
+            SetStatus("Got Hellfire Torch -> stop farming boss")
+            if TryBuyGhoulRace() then raceDone = true return "DONE" end
+            return "HAS_TORCH"
+        end
+
         local boss = FindEnemy(CFG["Boss Name"])
         if not boss then
             -- boss chua spawn / dang o storage -> tien lai gan cho spawn bang requestEntrance + tween
@@ -658,29 +746,26 @@ local function _FarmBossBody()
                 SetStatus("Boss killed")
                 break
             end
-            EquipAnyTool()
+            -- LUON equip melee lai (sau khi boss chet/respawn game hay bo trang bi)
+            EquipMelee()
             local bhrp = boss:FindFirstChild("HumanoidRootPart")
             -- CHECK gan boss chua: chua gan -> requestEntrance + tween toi; gan roi -> danh
             local near = ApproachBoss(bhrp)
             if near then
+                EquipMelee()   -- chac chan dang cam melee truoc khi danh
                 FastAttack(CFG["Boss Name"])
-            end
-        end
-
-        -- STEP 6: check torch lien tuc trong khi farm
-        if HasHellfireTorch() then
-            if TrySubmitTorch() then
-                raceDone = true
-                return "DONE"
             end
         end
         task.wait(0.1)
     end
 
-    -- sau khi boss chet, van check torch 1 lan (drop co the roi vao inv)
-    task.wait(1)
-    if HasHellfireTorch() then
-        if TrySubmitTorch() then raceDone = true return "DONE" end
+    -- sau khi boss chet, cho 1 chut roi check torch (drop co the roi vao inv sau vai giay)
+    for _ = 1, 6 do
+        if HasHellfireTorch() then
+            if TryBuyGhoulRace() then raceDone = true return "DONE" end
+            return "HAS_TORCH"
+        end
+        task.wait(0.5)
     end
     return "KILLED"
 end
@@ -725,40 +810,60 @@ task.spawn(function()
 
     -- STEP 5 + 6: detect+farm boss, check torch. Fetch server CHI khi server hien tai KHONG co boss.
     while not raceDone do
-        -- dam bao van du nguyen lieu (co the bi tru khi thu doi)
-        if GetEctoplasm() < CFG["Ectoplasm Needed"] then
-            SetStatus("Ectoplasm dropped below needed -> refarm")
-            GoToSea2()
-            FarmEctoplasm()
-        end
-
-        -- CHECK BOSS TRUOC KHI FETCH: neu server dang dung da co boss -> farm luon, khoi hop.
-        if BossPresent() then
-            SetStatus("Boss present in CURRENT server -> farm now (no fetch)")
-            local r = FarmBossInServer()
-            if r == "DONE" or raceDone then break end
-            -- farm xong (boss chet / mat) -> vong lai check tiep, neu het boss se fetch
-        end
-
-        -- server hien tai khong co boss -> fetch danh sach server de hop di tim
-        if raceDone then break end
-        local servers = FetchBossServers()
-        if #servers == 0 then
-            SetStatus("No servers from API, retry in 3s")
-            task.wait(3)
-        else
-            -- spam join tung server, moi server cach nhau Hop Delay(1.5s)
-            -- neu detect duoc boss -> nhay vao FarmBossInServer (chay tai server hien tai sau khi teleport)
-            -- Luu y: sau teleport script se reload -> can persist qua queue_on_teleport
-            for i, s in ipairs(servers) do
-                if raceDone then break end
-                SetStatus(("Join server %d/%d (players %d)"):format(i, #servers, s.Players or 0))
-                JoinJobId(s.JobId, s.PlaceId)
-                task.wait(CFG["Hop Delay"])
+        -- ==== UU TIEN 1: da co Hellfire Torch -> DUNG fetch/farm, di mua race ngay ====
+        if HasHellfireTorch() then
+            SetStatus("Have Hellfire Torch -> stop fetching, buy Ghoul race")
+            -- neu thieu ecto thi refarm truoc khi doi
+            if GetEctoplasm() < CFG["Ectoplasm Needed"] then
+                SetStatus("Need Ectoplasm to change race -> refarm")
+                GoToSea2()
+                FarmEctoplasm()
             end
-            -- neu het 10 server ma van chua roi khoi (khong teleport duoc) -> fetch lai
-            SetStatus("Fetched 10 servers done, re-fetch")
-            task.wait(2)
+            if TryBuyGhoulRace() then raceDone = true break end
+            -- chua mua duoc (co the do delay server) -> thu lai, tuyet doi KHONG fetch
+            task.wait(1.5)
+            -- quay lai dau vong (van con torch -> lai vao nhanh nay, khong fetch)
+            -- tiep tuc
+        else
+            -- ==== chua co torch: dam bao du nguyen lieu ====
+            if GetEctoplasm() < CFG["Ectoplasm Needed"] then
+                SetStatus("Ectoplasm dropped below needed -> refarm")
+                GoToSea2()
+                FarmEctoplasm()
+            end
+
+            -- ==== UU TIEN 2: server dang dung da co boss -> farm luon, khoi hop ====
+            if BossPresent() then
+                SetStatus("Boss present in CURRENT server -> farm now (no fetch)")
+                local r = FarmBossInServer()
+                if r == "DONE" or raceDone then break end
+                -- neu farm xong ma co torch (HAS_TORCH) -> vong lai se vao nhanh mua race o tren
+                if r == "HAS_TORCH" then
+                    -- khong fetch, quay lai dau de mua race
+                else
+                    -- boss chet/mat, khong torch -> vong lai; neu van khong co boss se fetch
+                end
+            elseif not HasHellfireTorch() then
+                -- ==== server hien tai khong co boss & chua co torch -> fetch de hop di tim ====
+                if raceDone then break end
+                local servers = FetchBossServers()
+                if #servers == 0 then
+                    SetStatus("No servers from API, retry in 3s")
+                    task.wait(3)
+                else
+                    -- spam join tung server, moi server cach nhau Hop Delay(1.5s)
+                    -- Luu y: sau teleport script se reload -> can persist qua queue_on_teleport
+                    for i, s in ipairs(servers) do
+                        if raceDone or HasHellfireTorch() then break end
+                        SetStatus(("Join server %d/%d (players %d)"):format(i, #servers, s.Players or 0))
+                        JoinJobId(s.JobId, s.PlaceId)
+                        task.wait(CFG["Hop Delay"])
+                    end
+                    -- het 10 server ma van chua roi khoi (khong teleport duoc) -> fetch lai
+                    SetStatus("Fetched 10 servers done, re-fetch")
+                    task.wait(2)
+                end
+            end
         end
     end
 
@@ -787,10 +892,14 @@ local qtp = (syn and syn.queue_on_teleport)
 -- (Chay ngay trong phien nay - vi teleport se reset, phan nay chi co tac dung
 --  neu ban dan script bang loadstring co queue_on_teleport tu ben ngoai.)
 task.spawn(function()
-    -- detector song song: bat cu khi nao thay boss trong server hien tai -> farm luon
+    -- detector song song: uu tien torch, roi moi den boss
     while not raceDone do
         task.wait(1)
-        if not farmingMaterial and BossPresent() and GetEctoplasm() >= CFG["Ectoplasm Needed"] then
+        -- 1) co Hellfire Torch bat cu luc nao -> mua race ngay, KHONG fetch/farm
+        if HasHellfireTorch() then
+            if TryBuyGhoulRace() then raceDone = true end
+        -- 2) chua co torch: thay boss trong server hien tai + du ecto -> farm luon
+        elseif not farmingMaterial and BossPresent() and GetEctoplasm() >= CFG["Ectoplasm Needed"] then
             local r = FarmBossInServer()
             if r == "DONE" then raceDone = true end
         end
@@ -812,7 +921,13 @@ end)
     detector se detect boss va farm ngay. Neu server khong co boss -> flow lai
     fetch 10 server moi va tiep tuc hop.
 
-  - Torch Mode: 1 = Melee, 2 = Fruit. Doi trong getgenv().GhoulConfig["Torch Mode"].
-  - Remote doi race "Hellfire Torch" theo cach script goc dung ("BuyCheck" + "Change").
-    Neu game cap nhat ten remote/arg khac, chinh trong ham TrySubmitTorch().
+  - Doi race Ghoul V1: Hellfire Torch la vat MO KHOA (drop tu boss). Co torch roi:
+    COMMF_:InvokeServer("Ectoplasm","BuyCheck", 4)  -- CHECK truoc
+    COMMF_:InvokeServer("Ectoplasm","Change",   4)  -- roi CHANGE (ton 100 ecto)
+    Ghoul Race Id = 4 (theo script goc "Change To Ghoul Race"). Chinh trong ham TryBuyGhoulRace().
+  - Torch Mode: 1 = Melee, 2 = Fruit (chi anh huong build sau khi thanh Ghoul). Doi trong config.
+  - Khi da co Hellfire Torch -> KHONG fetch server nua, chuyen sang mua race.
+  - Khi da thanh Ghoul -> raceDone = true, bao DONE va dung han (khong fetch).
+  - Farm boss: LUON EquipMelee() lai moi vong (sau khi boss chet/respawn game hay bo trang bi).
+    Chi dinh melee cu the qua getgenv().GhoulConfig["Attack Weapon"] (ten hoac ToolTip).
 --]]
