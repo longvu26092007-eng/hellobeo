@@ -112,6 +112,17 @@ if not game:IsLoaded() or workspace.DistributedGameTime <= 10 then
 end
 
 --==================================================================
+--  STOP FLAG: tat TAT CA func (nut Stop tren UI hoac getgenv().GHOUL_STOP=true).
+--  Moi vong lap trong script deu check ShouldStop() -> thoat sach, dung bay/danh.
+--==================================================================
+getgenv().GHOUL_STOP = getgenv().GHOUL_STOP or false
+local function ShouldStop()
+    return getgenv().GHOUL_STOP == true
+end
+-- forward-declare: dinh nghia day du sau khi co HoverLock/Tween (xem phia duoi).
+local StopEverything = function() end  -- se duoc gan lai
+
+--==================================================================
 --  SIMPLE STATUS UI
 --==================================================================
 local StatusLabel
@@ -133,7 +144,8 @@ local function MakeUI()
         frame.Parent = gui
         Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
         StatusLabel = Instance.new("TextLabel")
-        StatusLabel.Size = UDim2.new(1, -12, 1, 0)
+        -- chua cho nut Stop ben phai (rong 70px)
+        StatusLabel.Size = UDim2.new(1, -84, 1, 0)
         StatusLabel.Position = UDim2.new(0, 6, 0, 0)
         StatusLabel.BackgroundTransparency = 1
         StatusLabel.Font = Enum.Font.GothamMedium
@@ -142,6 +154,23 @@ local function MakeUI()
         StatusLabel.TextColor3 = Color3.fromRGB(120, 255, 160)
         StatusLabel.Text = "Ghoul: starting..."
         StatusLabel.Parent = frame
+
+        -- NUT STOP: bam de tat tat ca func
+        local stopBtn = Instance.new("TextButton")
+        stopBtn.Size = UDim2.new(0, 72, 0, 26)
+        stopBtn.Position = UDim2.new(1, -78, 0.5, -13)
+        stopBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+        stopBtn.BorderSizePixel = 0
+        stopBtn.Font = Enum.Font.GothamBold
+        stopBtn.TextSize = 13
+        stopBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        stopBtn.Text = "STOP"
+        stopBtn.AutoButtonColor = true
+        stopBtn.Parent = frame
+        Instance.new("UICorner", stopBtn).CornerRadius = UDim.new(0, 6)
+        stopBtn.MouseButton1Click:Connect(function()
+            pcall(StopEverything)
+        end)
     end)
 end
 MakeUI()
@@ -499,12 +528,34 @@ ReEquipMeleeNow = function()
     pcall(EquipMelee)
 end
 
+-- STOP ALL: tat toan bo func - nha hover/tween, huy body-mover, zero velocity.
+-- Gan cho forward-declare (nut Stop tren UI + ham StopEverything goi cai nay).
+StopEverything = function()
+    getgenv().GHOUL_STOP = true
+    pcall(function() HoverLock(nil) end)
+    pcall(function() Tween(false) end)
+    -- don sach cac thu keo nhan vat (neu co)
+    pcall(function()
+        local c = Character or LocalPlayer.Character
+        local root = c and c:FindFirstChild("HumanoidRootPart")
+        if root then
+            for _, n in ipairs({"DracoAntiGravity", "BodyClip", "GhoulTweenGhost"}) do
+                local o = root:FindFirstChild(n)
+                if o then o:Destroy() end
+            end
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+        end
+    end)
+    SetStatus("STOPPED (all func off)")
+end
+
 -- EQUIP-KEEPER: chay nen suot phien. Khi dang danh boss (farmingBoss) -> LUON goi
 -- EquipMelee. EquipMelee tu biet: dang cam dung melee -> return; dang cam sai/torch/trong
 -- -> EP cam lai dung melee. Nho vay chet xong / game doi slot sai deu duoc sua ngay.
 -- Fix trung: "chet xong khong tu cam melee de danh lai" (du tay van dang cam tool khac).
 task.spawn(function()
-    while true do
+    while not ShouldStop() do
         task.wait(0.3)
         if farmingBoss and Character and Humanoid and Humanoid.Health > 0 then
             pcall(EquipMelee)   -- goi vo dieu kien; EquipMelee tu no-op neu da dung
@@ -605,6 +656,7 @@ local function EnsureOnCursedShip()
     if OnCursedShip() then return true end
     SetStatus("Not on Cursed Ship -> requestEntrance")
     for _ = 1, 15 do
+        if ShouldStop() then return false end
         if OnCursedShip() then return true end
         pcall(function() COMMF_:InvokeServer("requestEntrance", CFG["Ship Entrance"]) end)
         task.wait(1)
@@ -678,15 +730,15 @@ local function FarmEctoplasm()
     -- BAT BUOC len Cursed Ship truoc: quai Ectoplasm o ngay tren thuyen nay
     EnsureOnCursedShip()
     while farmingMaterial do
+        if ShouldStop() then farmingMaterial = false break end
         if GetEctoplasm() >= CFG["Ectoplasm Needed"] then break end
         pcall(function()
-            EquipMelee()
+            EquipMelee()   -- keeper nen cung lo, day chi de chac chan cam melee
             local mob = FindEnemy(table.unpack(CFG["Ship Mobs"]))
             if mob and mob:FindFirstChild("HumanoidRootPart") then
                 -- CHECK gan quai chua: xa -> requestEntrance ra thuyen + tween; gan -> danh
                 local near = ApproachShip(mob.HumanoidRootPart.CFrame)
                 if near then
-                    EquipMelee()
                     FastAttack(mob.Name)
                 end
             else
@@ -694,7 +746,7 @@ local function FarmEctoplasm()
                 ApproachShip(CFG["Ectoplasm MPos"])
             end
         end)
-        task.wait(0.1)
+        task.wait()   -- moi frame (~60/s) thay vi 0.1s (10/s) -> danh nhanh hon nhieu
     end
     farmingMaterial = false
     SetStatus("Ectoplasm ready: " .. tostring(GetEctoplasm()))
@@ -887,6 +939,7 @@ local function TryBuyGhoulRace()
     -- tien toi NPC (thu vai lan cho toi khi du gan)
     local nearNPC = false
     for _ = 1, 8 do
+        if ShouldStop() then return false end
         if ApproachRaceNPC() then nearNPC = true break end
         task.wait(0.4)
     end
@@ -961,6 +1014,7 @@ local function _FarmBossBody()
     -- cho detect boss
     SetStatus("Detecting boss in server...")
     while tick() < deadline do
+        if ShouldStop() then return "STOPPED" end
         if HasHellfireTorch() then
             if TryBuyGhoulRace() then raceDone = true return "DONE" end
             return "HAS_TORCH"
@@ -977,6 +1031,7 @@ local function _FarmBossBody()
     -- co boss -> farm den khi chet / co torch / mat boss
     SetStatus("Boss found! Farming " .. CFG["Boss Name"])
     while true do
+        if ShouldStop() then return "STOPPED" end
         -- co torch bat cu luc nao -> dung farm ngay, di mua race
         if HasHellfireTorch() then
             SetStatus("Got Hellfire Torch -> stop farming boss")
@@ -999,17 +1054,16 @@ local function _FarmBossBody()
                 SetStatus("Boss killed")
                 break
             end
-            -- LUON equip melee lai (sau khi boss chet/respawn game hay bo trang bi)
-            EquipMelee()
             local bhrp = boss:FindFirstChild("HumanoidRootPart")
             -- CHECK gan boss chua: chua gan -> requestEntrance + tween toi; gan roi -> danh
             local near = ApproachBoss(bhrp)
             if near then
-                EquipMelee()   -- chac chan dang cam melee truoc khi danh
+                EquipMelee()   -- chac chan dang cam melee (keeper nen cung lo, day chi de chac)
                 FastAttack(CFG["Boss Name"])
             end
         end
-        task.wait(0.1)
+        -- danh moi frame (nhu V3) de toc do toi da; KHONG wait(0.1) (truoc day chi 10 don/giay)
+        task.wait()
     end
 
     -- sau khi boss chet, cho 1 chut roi check torch (drop co the roi vao inv sau vai giay)
@@ -1067,7 +1121,7 @@ task.spawn(function()
     end
 
     -- STEP 5 + 6: detect+farm boss, check torch. Fetch server CHI khi server hien tai KHONG co boss.
-    while not raceDone do
+    while not raceDone and not ShouldStop() do
         -- ==== UU TIEN 1: da co Hellfire Torch -> DUNG fetch/farm, di mua race ngay ====
         if HasHellfireTorch() then
             SetStatus("Have Hellfire Torch -> stop fetching, buy Ghoul race")
@@ -1119,7 +1173,7 @@ task.spawn(function()
                     -- spam join tung server, moi server cach nhau Hop Delay(1.5s)
                     -- Luu y: sau teleport script se reload -> can persist qua queue_on_teleport
                     for i, s in ipairs(servers) do
-                        if raceDone or HasHellfireTorch() then break end
+                        if raceDone or ShouldStop() or HasHellfireTorch() then break end
                         SetStatus(("Join server %d/%d (players %d)"):format(i, #servers, s.Players or 0))
                         JoinJobId(s.JobId, s.PlaceId)
                         task.wait(CFG["Hop Delay"])
@@ -1158,7 +1212,7 @@ local qtp = (syn and syn.queue_on_teleport)
 --  neu ban dan script bang loadstring co queue_on_teleport tu ben ngoai.)
 task.spawn(function()
     -- detector song song: uu tien torch, roi moi den boss
-    while not raceDone do
+    while not raceDone and not ShouldStop() do
         task.wait(1)
         -- 1) co Hellfire Torch bat cu luc nao -> mua race ngay, KHONG fetch/farm
         if HasHellfireTorch() then
