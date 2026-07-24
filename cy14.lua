@@ -473,20 +473,29 @@ local function FetchBossServers()
 
     local currentPlace = tonumber(game.PlaceId)
     local servers = {}
+    local skippedOtherPlace = 0
     for _, v in ipairs(list) do
         if type(v) == "table" then
             local jobId = v.jobid or v.JobId or v.jobId or v.id
             local placeId = tonumber(v.placeid or v.PlaceId or v.placeId or v.place)
             local ts = tonumber(v.timestamp or v.time or v.updated_at)
-            if jobId and (not placeId or placeId == currentPlace) then
+            -- CHI lay server TRUNG dung PlaceId dang dung.
+            -- API tra ve lan lon nhieu placeid (vd 79091703265657 la place khac -> teleport se bi
+            -- Error 773 restricted). Bat buoc placeId == currentPlace.
+            if jobId and placeId and placeId == currentPlace then
                 table.insert(servers, {
                     JobId = tostring(jobId),
                     PlaceId = placeId,
                     Players = tonumber(v.player or v.players or v.Count or 0) or 0,
                     Timestamp = ts,
                 })
+            elseif jobId and placeId and placeId ~= currentPlace then
+                skippedOtherPlace = skippedOtherPlace + 1
             end
         end
+    end
+    if skippedOtherPlace > 0 then
+        print("[Ghoul] Skipped " .. skippedOtherPlace .. " server(s) with different PlaceId (current=" .. tostring(currentPlace) .. ")")
     end
 
     -- API tra ve theo thu tu, cac phan tu cuoi thuong la moi nhat -> uu tien cuoi mang
@@ -516,21 +525,38 @@ end
 
 local function JoinJobId(jobId, placeId)
     if not jobId or tostring(jobId) == "" then return false end
-    if tostring(jobId) == tostring(game.JobId) then return false end
-    local ok = pcall(function()
-        if placeId then
-            TeleportService:TeleportToPlaceInstance(placeId, tostring(jobId), LocalPlayer)
-        else
-            TeleportService:TeleportToPlaceInstance(tonumber(game.PlaceId), tostring(jobId), LocalPlayer)
-        end
-    end)
-    if not ok then
-        -- fallback dung ServerBrowser (nhu PullLever)
-        pcall(function()
-            ReplicatedStorage:WaitForChild("__ServerBrowser"):InvokeServer("teleport", tostring(jobId))
-        end)
+    -- dang o dung server nay roi -> bo qua (tranh join lai chinh minh)
+    if tostring(jobId) == tostring(game.JobId) then
+        SetStatus("Already in this jobid -> skip")
+        return false
     end
-    return true
+
+    -- CACH CHUAN: join bang __ServerBrowser cua Blox Fruits.
+    -- No teleport TRONG place hien tai (giu nguyen PlaceId dang dung),
+    -- chi doi jobid -> tranh Error 773 (place restricted) khi dung placeid la tu API.
+    local sb = ReplicatedStorage:FindFirstChild("__ServerBrowser")
+    if sb then
+        local ok, err = pcall(function()
+            sb:InvokeServer("teleport", tostring(jobId))
+        end)
+        if ok then
+            return true
+        end
+        SetStatus("ServerBrowser join failed: " .. tostring(err))
+    end
+
+    -- Fallback: chi teleport bang placeid khi trung place hien tai (tranh 773).
+    -- Neu placeid tu API khac place dang dung -> KHONG teleport (se bi restricted).
+    local cur = tonumber(game.PlaceId)
+    if placeId and tonumber(placeId) == cur then
+        pcall(function()
+            TeleportService:TeleportToPlaceInstance(cur, tostring(jobId), LocalPlayer)
+        end)
+        return true
+    end
+
+    SetStatus("No safe join method for this jobid -> skip")
+    return false
 end
 
 -- detect boss: boss co trong workspace.Enemies hoac ReplicatedStorage
