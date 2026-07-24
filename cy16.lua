@@ -30,6 +30,10 @@ getgenv().GhoulConfig = getgenv().GhoulConfig or {
     ["Ship Entrance"]       = Vector3.new(923.21252441406, 126.9760055542, 32852.83203125),
     ["Ship Mobs"]           = {"Ship Deckhand", "Ship Engineer", "Ship Steward", "Ship Officer"},
     ["Boss Pos"]            = CFrame.new(916.928589, 181.092773, 33422),
+    -- Boss Cursed Captain o thuyen ma Sea 2, dung chung requestEntrance voi thuyen Ship
+    ["Boss Entrance"]       = Vector3.new(923.21252441406, 126.9760055542, 32852.83203125),
+    ["Boss Near Dist"]      = 250,   -- <= gia tri nay coi la da gan boss (tween thang)
+    ["Boss Entrance Dist"]  = 2000,  -- >= gia tri nay thi request entrance ra thuyen truoc
 }
 
 local CFG = getgenv().GhoulConfig
@@ -590,6 +594,32 @@ local function TrySubmitTorch()
     return isGhoul
 end
 
+-- Tien toi gan boss: check khoang cach -> xa thi requestEntrance ra thuyen -> tween toi.
+-- Tra ve true khi da o gan (trong tam danh), false khi con dang di chuyen.
+local function ApproachBoss(bossPart)
+    if not HumanoidRootPart then return false end
+    local targetCF = bossPart and bossPart.CFrame or CFG["Boss Pos"]
+    local dist = (HumanoidRootPart.Position - targetCF.Position).Magnitude
+
+    -- da gan -> tween sat vao (khong TP thang)
+    if dist <= CFG["Boss Near Dist"] then
+        Tween(targetCF * CFrame.new(3, 8, 2))
+        return true
+    end
+
+    -- con xa -> neu qua xa thi request entrance ra dung thuyen gan boss truoc
+    if dist >= CFG["Boss Entrance Dist"] then
+        SetStatus(("Far from boss (%d) -> requestEntrance"):format(math.floor(dist)))
+        pcall(function() COMMF_:InvokeServer("requestEntrance", CFG["Boss Entrance"]) end)
+        task.wait(1)
+    end
+
+    -- tween tien toi boss (khong TP)
+    SetStatus(("Tween to boss (%d studs)"):format(math.floor(dist)))
+    Tween(targetCF * CFrame.new(3, 8, 2))
+    return false
+end
+
 -- vong lap farm boss trong 1 server: detect -> danh; song song check torch
 local function _FarmBossBody()
     local deadline = tick() + CFG["Detect Timeout"]
@@ -614,13 +644,10 @@ local function _FarmBossBody()
     while true do
         local boss = FindEnemy(CFG["Boss Name"])
         if not boss then
-            -- boss trong storage (chua spawn) -> tp toi vi tri boss cho
+            -- boss chua spawn / dang o storage -> tien lai gan cho spawn bang requestEntrance + tween
             local stor = ReplicatedStorage:FindFirstChild(CFG["Boss Name"])
-            if stor and stor:FindFirstChild("HumanoidRootPart") then
-                TP(stor.HumanoidRootPart.CFrame * CFrame.new(5, 10, 2))
-            else
-                TP(CFG["Boss Pos"])
-            end
+            local waitPart = stor and stor:FindFirstChild("HumanoidRootPart")
+            ApproachBoss(waitPart)   -- xa thi requestEntrance + tween, khong TP thang
             -- neu boss bien mat han va ko con o storage -> coi nhu het
             if not BossPresent() then
                 SetStatus("Boss gone")
@@ -632,10 +659,12 @@ local function _FarmBossBody()
                 break
             end
             EquipAnyTool()
-            if boss:FindFirstChild("HumanoidRootPart") then
-                TP(boss.HumanoidRootPart.CFrame * CFrame.new(3, 8, 2))
+            local bhrp = boss:FindFirstChild("HumanoidRootPart")
+            -- CHECK gan boss chua: chua gan -> requestEntrance + tween toi; gan roi -> danh
+            local near = ApproachBoss(bhrp)
+            if near then
+                FastAttack(CFG["Boss Name"])
             end
-            FastAttack(CFG["Boss Name"])
         end
 
         -- STEP 6: check torch lien tuc trong khi farm
