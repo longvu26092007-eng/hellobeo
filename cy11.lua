@@ -1849,7 +1849,7 @@ GhoulModuleRun = function()
     local BOSS_API      = GC["Boss API"] or "http://fi12.bot-hosting.cloud:20112/api/name=cursedcaptain"
     local FETCH_COUNT   = tonumber(GC["Fetch Count"]) or 10
     local HOP_DELAY     = tonumber(GC["Hop Delay"]) or 1.5
-    local DETECT_TO     = tonumber(GC["Detect Timeout"]) or 20
+    local DETECT_TO     = tonumber(GC["Detect Timeout"]) or 6
     local SHIP_ENTRANCE = GC["Ship Entrance"] or Vector3.new(923.21252441406, 126.9760055542, 32852.83203125)
     local SHIP_CENTER   = GC["Ship Center"] or Vector3.new(911.35827636719, 125.95812988281, 33159.5390625)
     local SHIP_RADIUS   = tonumber(GC["Ship Radius"]) or 3000
@@ -2313,6 +2313,9 @@ GhoulModuleRun = function()
         end
         return nil
     end
+    -- Port tu Ghoul.lua (chuan): CHI lay server trung PlaceId (tranh Error 773),
+    -- SORT theo timestamp MOI NHAT (server boss vua spawn) -> khong join server boss da chet.
+    -- API khong co timestamp -> DAO mang (phan tu cuoi thuong la moi nhat).
     local function FetchBossServers()
         GStatus("Fetch server co boss...")
         local body = HttpReq(BOSS_API)
@@ -2323,26 +2326,60 @@ GhoulModuleRun = function()
         local list = data.data or data.servers or data
         if type(list) ~= "table" then return {} end
         local cur = tonumber(game.PlaceId)
-        local seen, out = {}, {}
+        local servers, skipped = {}, 0
         for _, v in ipairs(list) do
             if type(v) == "table" then
                 local jobId = v.jobid or v.JobId or v.id
                 local placeId = tonumber(v.placeid or v.PlaceId or v.place)
-                if jobId and placeId and placeId == cur
-                    and tostring(jobId) ~= tostring(game.JobId) and not seen[tostring(jobId)] then
-                    seen[tostring(jobId)] = true
-                    out[#out+1] = tostring(jobId)
-                    if #out >= FETCH_COUNT then break end
+                local ts = tonumber(v.timestamp or v.time or v.updated_at)
+                if jobId and placeId and placeId == cur then
+                    servers[#servers+1] = { JobId = tostring(jobId), Timestamp = ts }
+                elseif jobId and placeId and placeId ~= cur then
+                    skipped = skipped + 1
                 end
             end
         end
-        GStatus("API: " .. #out .. " server")
+        if skipped > 0 then print("[Ghoul] Skipped " .. skipped .. " server khac PlaceId (current=" .. tostring(cur) .. ")") end
+
+        -- uu tien server MOI NHAT
+        local hasTs = false
+        for _, s in ipairs(servers) do if s.Timestamp then hasTs = true break end end
+        if hasTs then
+            table.sort(servers, function(a, b) return (a.Timestamp or 0) > (b.Timestamp or 0) end)
+        else
+            local rev = {}
+            for i = #servers, 1, -1 do rev[#rev+1] = servers[i] end
+            servers = rev
+        end
+
+        -- loai jobid dang o + dedup
+        local seen, out = {}, {}
+        for _, s in ipairs(servers) do
+            local jid = tostring(s.JobId)
+            if jid ~= tostring(game.JobId) and not seen[jid] then
+                seen[jid] = true
+                out[#out+1] = jid
+                if #out >= FETCH_COUNT then break end
+            end
+        end
+        GStatus("API: " .. #out .. " server moi nhat")
         return out
     end
+    -- Port tu Ghoul.lua (chuan): join bang __ServerBrowser (teleport TRONG place
+    -- hien tai -> giu PlaceId -> tranh Error 773). Fallback TeleportToPlaceInstance
+    -- CHI khi trung place hien tai. Tra ve true neu da phat lenh teleport.
     local function JoinJob(jobId)
-        if not jobId or tostring(jobId) == tostring(game.JobId) then return end
+        if not jobId or tostring(jobId) == "" or tostring(jobId) == tostring(game.JobId) then return false end
         local sb = ReplicatedStorage:FindFirstChild("__ServerBrowser")
-        if sb then pcall(function() sb:InvokeServer("teleport", tostring(jobId)) end) end
+        if sb then
+            local ok = pcall(function() sb:InvokeServer("teleport", tostring(jobId)) end)
+            if ok then return true end
+        end
+        local cur = tonumber(game.PlaceId)
+        local okTp = pcall(function()
+            TeleportService:TeleportToPlaceInstance(cur, tostring(jobId), LocalPlayer)
+        end)
+        return okTp
     end
 
     -- ==== FIGHT BOSS: pin tren dau boss (movement controller), danh target da cache ====
@@ -2397,11 +2434,20 @@ GhoulModuleRun = function()
             GStatus("Server khong co boss -> hop")
             local servers = FetchBossServers()
             if #servers == 0 then task.wait(3) return end
+            -- join server MOI NHAT dau tien. Khi da phat lenh teleport -> phien se reset,
+            -- DUNG loop ngay (khong join server khac de tranh huy teleport dang chay).
             for _, jid in ipairs(servers) do
                 if not alive() or HasTorchLocal() then break end
                 GStatus("Join server tim boss...")
-                JoinJob(jid)   -- teleport bat dau -> phien nay se reset, dung loop
-                task.wait(HOP_DELAY)
+                if JoinJob(jid) then
+                    -- teleport da phat -> cho reset, khong join tiep
+                    for _ = 1, 20 do
+                        if not alive() then break end
+                        task.wait(0.5)
+                    end
+                    return
+                end
+                task.wait(HOP_DELAY)   -- join loi -> thu server ke tiep
             end
             task.wait(2)
         end
