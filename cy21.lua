@@ -952,6 +952,11 @@ local function _FarmBossBody()
         return "HAS_TORCH"
     end
 
+    -- BAT BUOC len Cursed Ship TRUOC khi detect: boss Cursed Captain o TREN thuyen.
+    -- Neu vua sang Sea 2 / vua join (spawn xa thuyen) thi Enemies chua load boss ->
+    -- detect nham "khong co boss" -> hop server oan. Len thuyen roi moi ket luan.
+    EnsureOnCursedShip()
+
     local deadline = tick() + CFG["Detect Timeout"]
     -- cho detect boss
     SetStatus("Detecting boss in server...")
@@ -1084,6 +1089,13 @@ task.spawn(function()
                 GoToSea2()
                 FarmEctoplasm()
             end
+
+            -- ==== BAT BUOC: requestEntrance LEN Cursed Ship TRUOC khi detect/farm boss. ====
+            -- Boss Cursed Captain o TREN thuyen. Neu chua len (vua travel Sea 2 / vua join sv)
+            -- thi workspace.Enemies CHUA co boss -> BossPresent() = false -> hop nham du sv co boss.
+            -- Len thuyen roi cho 1 nhip cho Enemies load truoc khi quyet dinh.
+            EnsureOnCursedShip()
+            task.wait(0.5)
 
             -- ==== UU TIEN 2: server dang dung da co boss -> farm luon, khoi hop ====
             if BossPresent() then
