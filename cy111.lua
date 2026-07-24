@@ -9,12 +9,12 @@ getgenv().Settings = {
     ["Chest Touch Radius"] = 8;
 
     -- Server hop scanner
-    ["Hop Max Pages"] = 500;          -- Tổng số page tối đa được duyệt
-    ["Hop Pages Per Batch"] = 150;    -- Số page yêu cầu trong mỗi lần hop
-    ["Hop Max Players"] = 8;          -- Chỉ lấy server có player <= giá trị này
-    ["Hop Forced Region"] = nil;      -- VD: "Singapore"; nil = mọi region
-    ["Hop Scan Concurrency"] = 70;  -- Số page gọi song song (không phải tổng page)
-    ["Hop Batch Timeout"] = 18;     -- Giới hạn thời gian chờ một batch
+    ["Hop Max Pages"] = 500;          -- Tá»•ng sá»‘ page tá»‘i Ä‘a Ä‘Æ°á»£c duyá»‡t
+    ["Hop Pages Per Batch"] = 150;    -- Sá»‘ page yÃªu cáº§u trong má»—i láº§n hop
+    ["Hop Max Players"] = 8;          -- Chá»‰ láº¥y server cÃ³ player <= giÃ¡ trá»‹ nÃ y
+    ["Hop Forced Region"] = nil;      -- VD: "Singapore"; nil = má»i region
+    ["Hop Scan Concurrency"] = 70;  -- Sá»‘ page gá»i song song (khÃ´ng pháº£i tá»•ng page)
+    ["Hop Batch Timeout"] = 18;     -- Giá»›i háº¡n thá»i gian chá» má»™t batch
 
     -- Server uptime chest window: every 4 hours, active for 2 hours
     ["Chest Server Period"] = 4 * 60 * 60;
@@ -82,7 +82,7 @@ if LocalPlayer.Character then
     HumanoidRootPart = Character:FindFirstChild("HumanoidRootPart") or Character:WaitForChild("HumanoidRootPart")
 end
 
-StarterGui:SetCore("SendNotification", {Title = "Executed", Text = "Loading… Please wait", Duration = 5})
+StarterGui:SetCore("SendNotification", {Title = "Executed", Text = "Loadingâ€¦ Please wait", Duration = 5})
 if not game:IsLoaded() then
     repeat task.wait() until game:IsLoaded()
 end
@@ -139,7 +139,7 @@ Black.Parent = BlankScreen
 
 RunService:Set3dRenderingEnabled(not Black.Visible)
 
--- Status text cũ vẫn giữ để không làm gãy logic SetText hiện tại.
+-- Status text cÅ© váº«n giá»¯ Ä‘á»ƒ khÃ´ng lÃ m gÃ£y logic SetText hiá»‡n táº¡i.
 local label = Instance.new("TextLabel")
 label.Name = "CenteredLabel"
 label.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -265,7 +265,7 @@ TitleLabel.Size = UDim2.new(1, -24, 1, 0)
 TitleLabel.Position = UDim2.fromOffset(12, 0)
 TitleLabel.BackgroundTransparency = 1
 TitleLabel.Font = Enum.Font.GothamBold
-TitleLabel.Text = "CYBORG AUTOMATION — TIME WINDOW FIX v2"
+TitleLabel.Text = "CYBORG AUTOMATION â€” TIME WINDOW FIX v2"
 TitleLabel.TextColor3 = Color3.fromRGB(116, 227, 169)
 TitleLabel.TextSize = 15
 TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
@@ -354,7 +354,7 @@ local HopLabel = makeDashboardLabel(
     false
 )
 
--- Cho phép kéo panel bằng header.
+-- Cho phÃ©p kÃ©o panel báº±ng header.
 do
     local dragging = false
     local dragStart
@@ -401,8 +401,8 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
             StarterGui:SetCore("SendNotification", {
                 Title = "Black Screen",
                 Text = Black.Visible
-                    and "Đã BẬT màn hình đen (Tắt Render 3D)"
-                    or "Đã TẮT màn hình đen (Bật Render 3D)",
+                    and "ÄÃ£ Báº¬T mÃ n hÃ¬nh Ä‘en (Táº¯t Render 3D)"
+                    or "ÄÃ£ Táº®T mÃ n hÃ¬nh Ä‘en (Báº­t Render 3D)",
                 Duration = 2
             })
         end)
@@ -456,8 +456,8 @@ local function safeWriteFile(path, content)
     return pcall(writefile, path, tostring(content))
 end
 
--- Tách file tiến trình Get Cyborg khỏi file kết quả cuối.
--- PlayerName.txt chỉ được ghi Completed-done khi đã xác nhận cả Cyborg V1 và Ghoul V1.
+-- TÃ¡ch file tiáº¿n trÃ¬nh Get Cyborg khá»i file káº¿t quáº£ cuá»‘i.
+-- PlayerName.txt chá»‰ Ä‘Æ°á»£c ghi Completed-done khi Ä‘Ã£ xÃ¡c nháº­n cáº£ Cyborg V1 vÃ  Ghoul V1.
 do
     local legacy = safeReadFile(mainfile)
 
@@ -493,9 +493,14 @@ local function getCurrentRaceName()
     return race and tostring(race.Value) or ""
 end
 
+-- Ghi proof Cyborg 1 LAN (truoc day ghi moi 0.5s -> I/O lien tuc).
+-- Chi ghi file khi runtime chua danh dau + noi dung file chua dung.
 local function markCyborgOwned()
+    if RaceFlow.CyborgOwnedRuntime then return end
     RaceFlow.CyborgOwnedRuntime = true
-    safeWriteFile(ownershipfile, "cyborg-owned")
+    if safeReadFile(ownershipfile) ~= "cyborg-owned" then
+        safeWriteFile(ownershipfile, "cyborg-owned")
+    end
 end
 
 local function hasCyborgV1()
@@ -626,7 +631,7 @@ local function DetectServerStartTimeFromTimeIn()
     for _, location in ipairs(locations:GetChildren()) do
         local value = location:GetAttribute("TimeIn")
 
-        -- TimeIn phải là Unix timestamp hợp lệ.
+        -- TimeIn pháº£i lÃ  Unix timestamp há»£p lá»‡.
         if type(value) == "number" and value > 1000000000 then
             local rounded = math.floor(value + 0.5)
             groups[rounded] = groups[rounded] or {
@@ -723,14 +728,14 @@ local function CheckChestTimeWindow()
         return false, nil, source, nil
     end
 
-    -- Quy tắc chính xác:
-    --   dưới 4h       -> HOP
-    --   4h00-6h00     -> GIỮ
-    --   trên 6h-8h    -> HOP
-    --   8h00-10h00    -> GIỮ
-    --   trên 10h-12h  -> HOP ...
-    -- Nghĩa là cửa sổ đầu tiên bắt đầu tại 4h, sau đó lặp lại mỗi 4h,
-    -- mỗi cửa sổ chỉ kéo dài thêm 2h.
+    -- Quy táº¯c chÃ­nh xÃ¡c:
+    --   dÆ°á»›i 4h       -> HOP
+    --   4h00-6h00     -> GIá»®
+    --   trÃªn 6h-8h    -> HOP
+    --   8h00-10h00    -> GIá»®
+    --   trÃªn 10h-12h  -> HOP ...
+    -- NghÄ©a lÃ  cá»­a sá»• Ä‘áº§u tiÃªn báº¯t Ä‘áº§u táº¡i 4h, sau Ä‘Ã³ láº·p láº¡i má»—i 4h,
+    -- má»—i cá»­a sá»• chá»‰ kÃ©o dÃ i thÃªm 2h.
     local period = math.max(
         1,
         tonumber(getgenv().Settings["Chest Server Period"])
@@ -760,7 +765,7 @@ local function CheckChestTimeWindow()
     local cycleEnd = cycleStart + grace
     local offset = uptime - cycleStart
 
-    -- Đúng ví dụ: 6h00 và 10h00 vẫn giữ; chỉ sau mốc đó mới hop.
+    -- ÄÃºng vÃ­ dá»¥: 6h00 vÃ  10h00 váº«n giá»¯; chá»‰ sau má»‘c Ä‘Ã³ má»›i hop.
     local inWindow = uptime <= cycleEnd
     local nextBoundary = inWindow and cycleEnd or (cycleStart + period)
 
@@ -1038,7 +1043,7 @@ local function getHopConfig(maxPlayersArg, forcedRegionArg)
     )
     pagesPerBatch = math.min(pagesPerBatch, maxPages)
 
-    -- Config được ưu tiên để mọi call HopServer(8/10) đều dùng cùng một giá trị.
+    -- Config Ä‘Æ°á»£c Æ°u tiÃªn Ä‘á»ƒ má»i call HopServer(8/10) Ä‘á»u dÃ¹ng cÃ¹ng má»™t giÃ¡ trá»‹.
     local maxPlayers =
         tonumber(settings["Hop Max Players"])
         or tonumber(maxPlayersArg)
@@ -1203,7 +1208,7 @@ function GetServers(MaxPlayers, ForcedRegion)
     local lastRequestedPage = pages[#pages] or startPage
     DashboardState.Hop.NextPage = ((lastRequestedPage - 1 + 1) % config.MaxPages) + 1
 
-    -- Best server: ít player nhất; nếu bằng nhau, ưu tiên dữ liệu mới hơn.
+    -- Best server: Ã­t player nháº¥t; náº¿u báº±ng nhau, Æ°u tiÃªn dá»¯ liá»‡u má»›i hÆ¡n.
     table.sort(candidates, function(a, b)
         if a.Players ~= b.Players then
             return a.Players < b.Players
@@ -1274,7 +1279,7 @@ HopServer = function(MaxPlayers, ForcedRegion)
         return false
     end
 
-    -- Nếu teleport không chạy do lỗi im lặng, cho phép thử lại sau.
+    -- Náº¿u teleport khÃ´ng cháº¡y do lá»—i im láº·ng, cho phÃ©p thá»­ láº¡i sau.
     task.delay(12, function()
         inHopPP = false
     end)
@@ -1553,8 +1558,9 @@ task.spawn(function()
         xpcall(function()
             local currentRace = getCurrentRaceName()
 
-            if RaceFlow.Completed or safeReadFile(mainfile) == "Completed-done" then
-                RaceFlow.Completed = true
+            -- Completed: chi doc runtime state (da doc file 1 lan luc startup).
+            -- KHONG safeReadFile moi 0.5s tick (giam file I/O - quan trong khi 25 tab/1 may).
+            if RaceFlow.Completed then
                 Tween(false)
                 SetText("Completed-done | Cyborg V1 + Ghoul V1 confirmed")
                 return
@@ -1828,14 +1834,12 @@ GuiService.ErrorMessageChanged:Connect(newcclosure(function()
 end))
 
 --==================================================================
---  MODULE GHOUL  (tu-build, thay BananaHub)
---  Flow (chi chay khi da co Cyborg V1 -> doi luon sang Ghoul):
---    1. Du Ectoplasm chua? thieu -> farm quai Ship tren Cursed Ship (KillMonster)
---    2. Co Hellfire Torch chua? chua -> farm boss Cursed Captain (hop API tim server)
---    3. Co Torch -> len Cursed Ship, toi sat NPC Experimic -> Ectoplasm/BuyCheck + Buy(4)
---  DUNG CHUNG helper Kaitun: KillMonster (gom+FastAttack+Tween+Ken), EquipWeapon,
---    CheckTool, IsDied, Tween, HopServer, HumanoidRootPart, Character, COMMF_.
---  Remote mua Ghoul (bat duoc tu hook khi bam tay): CommF_("Ectoplasm","Buy",4).
+--  MODULE GHOUL v2  (tu-build, KHONG dung BananaHub)
+--  Refactor: giam lag/giat, tach remote khoi combat loop, movement controller
+--  ben vung (1 Heartbeat pin CFrame -> khong tao tween moi moi tick).
+--  Flow: Cyborg V1 -> doi Ghoul: farm Ectoplasm -> boss Cursed Captain ->
+--        co Hellfire Torch -> toi NPC Experimic -> Ectoplasm/BuyCheck + Buy(4).
+--  Remote GIU NGUYEN (bat tu hook): CommF_("Ectoplasm","Buy",4).
 --==================================================================
 GhoulModuleRun = function()
     local GC = getgenv().GhoulConfig or {}
@@ -1854,58 +1858,136 @@ GhoulModuleRun = function()
     local NPC_POS       = GC["Race NPC Pos"]
     local NPC_DIST      = tonumber(GC["Race NPC Dist"]) or 12
 
-    local function GStatus(t)
-        RaceFlow.GhoulStatus = tostring(t)
-        SetText("Ghoul: " .. tostring(t))
-        print("[Ghoul] " .. tostring(t))
+    -- ==== interval config (default an toan, cho 25 tab/1 may) ====
+    local MAIN_TICK        = tonumber(GC["Ghoul Main Tick"]) or 0.10
+    local BOSS_TICK        = tonumber(GC["Ghoul Boss Combat Tick"]) or 0.06
+    local MOB_TICK         = tonumber(GC["Ghoul Mob Combat Tick"]) or 0.08
+    local BRING_INTERVAL   = tonumber(GC["Ghoul Bring Mob Interval"]) or 0.60
+    local ECTO_REFRESH     = tonumber(GC["Ghoul Ectoplasm Refresh"]) or 2.00
+    local INV_REFRESH      = tonumber(GC["Ghoul Inventory Refresh"]) or 5.00
+    local BOSS_DETECT_INT  = tonumber(GC["Ghoul Boss Detect Interval"]) or 0.35
+    local STATUS_INT       = tonumber(GC["Ghoul Status Update Interval"]) or 0.50
+    local ENTRANCE_RETRY   = tonumber(GC["Ghoul Entrance Retry Interval"]) or 2.00
+    local REACQUIRE_INT    = tonumber(GC["Ghoul Target Reacquire Interval"]) or 0.35
+    local DEBUG            = GC["Ghoul Debug"] == true
+
+    -- token: khi module chay lai (respawn/hop re-exec) token cu khac -> worker cu tu thoat
+    local RUN_TOKEN = {}
+    _G.__GhoulRunToken = RUN_TOKEN
+    local function alive() return _G.__GhoulRunToken == RUN_TOKEN and not getgenv().GHOUL_STOP end
+
+    -- ==== char refs (doc fresh, an toan sau respawn) ====
+    local function curChar() return LocalPlayer.Character end
+    local function curHRP()  local c = LocalPlayer.Character return c and c:FindFirstChild("HumanoidRootPart") end
+    local function curHum()  local c = LocalPlayer.Character return c and c:FindFirstChildWhichIsA("Humanoid") end
+    local function charAlive()
+        local h = curHum()
+        return h and h.Health > 0 and curHRP() ~= nil
     end
 
-    -- ==== helpers Ghoul-rieng ====
-    -- GetEcto: InvokeServer -> CACHE 1s. Vong lap moi frame goi ham nay se KHONG
-    -- block cho server moi frame nua (truoc day block -> cham/dung im).
-    local _ectoT, _ectoV = 0, 0
-    local _torchInvT, _torchInvV = 0, false
-    local function GetEcto()
-        if tick() - _ectoT < 1 then return _ectoV end
-        _ectoT = tick()
-        local ok, n = pcall(function() return tonumber(COMMF_:InvokeServer("Ectoplasm", "Check")) end)
-        if ok and n then _ectoV = n end
-        return _ectoV
+    -- ==== status (chi cap nhat khi doi + throttle) ====
+    local _lastStatusText, _lastStatusAt = nil, 0
+    local function GStatus(t)
+        t = tostring(t)
+        RaceFlow.GhoulStatus = t
+        if t ~= _lastStatusText and (tick() - _lastStatusAt) >= STATUS_INT then
+            _lastStatusAt = tick()
+            _lastStatusText = t
+            SetText("Ghoul: " .. t)
+            print("[Ghoul] " .. t)
+        end
     end
-    local function IsGhoul() return getCurrentRaceName():lower() == "ghoul" end
-    local function HasTorch()
-        -- scan Backpack/Character la LOCAL (nhanh) -> luon check truoc
-        for _, cont in next, {LocalPlayer.Backpack, Character} do
+
+    -- ==== ECTOPLASM cache (worker nen, combat chi doc) ====
+    local Runtime = { Ectoplasm = 0, TorchLocal = false, TorchInv = false }
+    local _ectoReqNow = false
+    task.spawn(function()
+        while alive() do
+            local ok, n = pcall(function() return tonumber(COMMF_:InvokeServer("Ectoplasm", "Check")) end)
+            if ok and n then Runtime.Ectoplasm = n end
+            -- cho ECTO_REFRESH giay, nhung neu co yeu cau refresh uu tien thi thoat som
+            local waited = 0
+            while alive() and waited < ECTO_REFRESH and not _ectoReqNow do
+                task.wait(0.2) waited = waited + 0.2
+            end
+            _ectoReqNow = false
+        end
+    end)
+    local function GetEcto() return Runtime.Ectoplasm end
+    local function RequestEctoRefresh() _ectoReqNow = true end
+
+    -- ==== TORCH: local qua event (nhanh) + inv qua worker (cham, khong chan combat) ====
+    local torchConns = {}
+    local function isTorchTool(x)
+        return x and x:IsA("Tool") and (x.Name == "Hellfire Torch" or x.Name:find("Hellfire"))
+    end
+    local function scanLocalTorch()
+        for _, cont in ipairs({ LocalPlayer:FindFirstChild("Backpack"), LocalPlayer.Character }) do
             if cont then
-                for _, x in next, cont:GetChildren() do
-                    if x:IsA("Tool") and (x.Name == "Hellfire Torch" or x.Name:find("Hellfire")) then
-                        return true
+                for _, x in ipairs(cont:GetChildren()) do
+                    if isTorchTool(x) then return true end
+                end
+            end
+        end
+        return false
+    end
+    local function bindTorchEvents()
+        for _, c in ipairs(torchConns) do pcall(function() c:Disconnect() end) end
+        torchConns = {}
+        Runtime.TorchLocal = scanLocalTorch()
+        local function watch(container)
+            if not container then return end
+            torchConns[#torchConns+1] = container.ChildAdded:Connect(function(x)
+                if isTorchTool(x) then Runtime.TorchLocal = true end
+            end)
+            torchConns[#torchConns+1] = container.ChildRemoved:Connect(function()
+                Runtime.TorchLocal = scanLocalTorch()
+            end)
+        end
+        watch(LocalPlayer:FindFirstChild("Backpack"))
+        watch(LocalPlayer.Character)
+    end
+    bindTorchEvents()
+    torchConns[#torchConns+1] = LocalPlayer.CharacterAdded:Connect(function()
+        task.wait(0.5) if alive() then bindTorchEvents() end
+    end)
+    -- inv worker: chi de fallback xac nhan (cooldown INV_REFRESH), KHONG chan combat
+    task.spawn(function()
+        while alive() do
+            if not Runtime.TorchLocal then
+                local ok, inv = pcall(function() return COMMF_:InvokeServer("getInventory") end)
+                if ok and type(inv) == "table" then
+                    local found = false
+                    for _, v in pairs(inv) do
+                        if type(v) == "table" and v.Name and tostring(v.Name):find("Hellfire") then found = true break end
                     end
+                    Runtime.TorchInv = found
                 end
             end
+            local waited = 0
+            while alive() and waited < INV_REFRESH do task.wait(0.5) waited = waited + 0.5 end
         end
-        -- fallback getInventory la SERVER call -> throttle 2s (khong goi moi frame)
-        if tick() - _torchInvT >= 2 then
-            _torchInvT = tick()
-            _torchInvV = false
-            local ok, inv = pcall(function() return COMMF_:InvokeServer("getInventory") end)
-            if ok and type(inv) == "table" then
-                for _, v in pairs(inv) do
-                    if type(v) == "table" and v.Name and tostring(v.Name):find("Hellfire") then _torchInvV = true break end
-                end
-            end
-        end
-        return _torchInvV
+    end)
+    local function HasTorchLocal() return Runtime.TorchLocal end
+    local function HasTorch() return Runtime.TorchLocal or Runtime.TorchInv end
+
+    local function IsGhoul() return getCurrentRaceName():lower() == "ghoul" end
+
+    -- ==== enemy helpers (snapshot 1 lan/tick khi can) ====
+    local function AliveModel(m)
+        if not m or not m:IsA("Model") then return nil end
+        if IsDied(m) then return nil end
+        return m
     end
-    -- boss/quai CO THUC SU song trong server hien tai? Chi tin workspace.Enemies
-    -- (KHONG scan ReplicatedStorage: template luon ton tai -> false positive).
-    local function AliveInEnemies(name)
-        local m = workspace.Enemies:FindFirstChild(name)
-        return m and not IsDied(m) and m or nil
+    local function FindBoss()
+        local en = workspace:FindFirstChild("Enemies")
+        if not en then return nil end
+        local m = en:FindFirstChild(BOSS_NAME)
+        return AliveModel(m)
     end
-    local function CountShipMobsAlive()
+    local function CountShipMobsAlive(snapshot)
         local n = 0
-        for _, m in next, workspace.Enemies:GetChildren() do
+        for _, m in ipairs(snapshot) do
             if m:IsA("Model") and not IsDied(m) then
                 for _, nm in ipairs(SHIP_MOBS) do
                     if m.Name == nm then n = n + 1 break end
@@ -1914,68 +1996,164 @@ GhoulModuleRun = function()
         end
         return n
     end
+    local function FirstAliveShipMob(snapshot)
+        for _, m in ipairs(snapshot) do
+            if m:IsA("Model") and not IsDied(m) then
+                for _, nm in ipairs(SHIP_MOBS) do
+                    if m.Name == nm then return m end
+                end
+            end
+        end
+        return nil
+    end
 
-    -- forward-declare: NearReferenceOnShip goi FindNPC (dinh nghia ben duoi) -> phai khai bao truoc
-    local FindNPC
+    -- ==== ATTACK: cache remote, hit packet cho target da biet (khong scan full) ====
+    local Net = ReplicatedStorage:FindFirstChild("Modules") and ReplicatedStorage.Modules:FindFirstChild("Net")
+    local RA = Net and Net:FindFirstChild("RE/RegisterAttack")
+    local RH = Net and Net:FindFirstChild("RE/RegisterHit")
+    local function sendHitPacket(h)
+        pcall(function() if RA then RA:FireServer() end end)
+        pcall(function() if RH then RH:FireServer(unpack(h)) end end)
+        pcall(function()
+            if remoteAttack and idremote and seed then
+                cloneref(remoteAttack):FireServer(string.gsub("RE/RegisterHit", ".", function(c)
+                    return string.char(bit32.bxor(string.byte(c), math.floor(workspace:GetServerTimeNow()/10%10)+1))
+                end), bit32.bxor(idremote + 909090, seed * 2), unpack(h))
+            end
+        end)
+    end
+    -- danh 1 target da cache (boss). Khong quet workspace.
+    local _lastAtkT = 0
+    local function FastAttackTarget(target, interval)
+        if tick() - _lastAtkT < (interval or BOSS_TICK) then return end
+        if not charAlive() then return end
+        local hrp = curHRP()
+        if not (curChar() and curChar():FindFirstChildWhichIsA("Tool")) then return end
+        if not target or not target.Parent then return end
+        local h2 = target:FindFirstChild("Humanoid")
+        local part = target:FindFirstChild("Head") or target:FindFirstChild("HumanoidRootPart")
+        if not h2 or h2.Health <= 0 or not part then return end
+        if (part.Position - hrp.Position).Magnitude > 80 then return end
+        _lastAtkT = tick()
+        sendHitPacket({ part, { { target, part } } })
+    end
+    -- danh nhieu quai gan (farm ecto) - snapshot 1 lan
+    local _lastMobAtkT = 0
+    local function FastAttackNearby(snapshot, interval)
+        if tick() - _lastMobAtkT < (interval or MOB_TICK) then return end
+        if not charAlive() then return end
+        local hrp = curHRP()
+        if not (curChar() and curChar():FindFirstChildWhichIsA("Tool")) then return end
+        local list = {}
+        for _, e in ipairs(snapshot) do
+            if e:IsA("Model") and not IsDied(e) then
+                local h2 = e:FindFirstChild("Humanoid")
+                local ehrp = e:FindFirstChild("HumanoidRootPart")
+                if h2 and ehrp and h2.Health > 0 and (ehrp.Position - hrp.Position).Magnitude <= 65 then
+                    list[#list+1] = e
+                end
+            end
+        end
+        if #list == 0 then return end
+        _lastMobAtkT = tick()
+        local h = { nil, {} }
+        for i = 1, #list do
+            local v = list[i]
+            local part = v:FindFirstChild("Head") or v:FindFirstChild("HumanoidRootPart")
+            if not h[1] then h[1] = part end
+            h[2][#h[2]+1] = { v, part }
+        end
+        sendHitPacket(h)
+    end
 
-    -- da o tren/gan Cursed Ship chua?
-    -- KHONG chi dua toa do SHIP_CENTER (cung, de lech -> ket "Not on ship" du da len).
-    -- Coi la DA tren ship neu co DAU HIEU THUC TE quanh minh:
-    --   gan SHIP_CENTER  HOAC  thay Ship Mob / boss / NPC Experimic trong Enemies/workspace gan.
-    local function NearReferenceOnShip()
-        if not HumanoidRootPart then return false end
-        local pos = HumanoidRootPart.Position
-        -- 1) Ship Mob hoac boss song gan (trong Enemies)
-        local en = workspace:FindFirstChild("Enemies")
-        if en then
-            for _, m in next, en:GetChildren() do
-                if m:IsA("Model") then
-                    local isShipMob = (m.Name == BOSS_NAME)
-                    if not isShipMob then
-                        for _, nm in ipairs(SHIP_MOBS) do if m.Name == nm then isShipMob = true break end end
-                    end
-                    if isShipMob then
-                        local hrp = m:FindFirstChild("HumanoidRootPart")
-                        if hrp and (hrp.Position - pos).Magnitude <= 800 then return true end
+    -- ==== EQUIP melee (cache, chi equip khi can) ====
+    local _lastEquipT = 0
+    local function EnsureMelee()
+        local c = curChar()
+        if not c then return end
+        local tool = c:FindFirstChildWhichIsA("Tool")
+        if tool and tool.ToolTip == "Melee" then return end
+        if tick() - _lastEquipT < 1 then return end
+        _lastEquipT = tick()
+        pcall(function() EquipWeapon("Melee") end)
+    end
+
+    -- ==== BRING MOB (chi cho quai thuong, throttle; KHONG dung cho boss) ====
+    local _lastBringT = 0
+    local function BringShipMobs(anchorHRP)
+        if tick() - _lastBringT < BRING_INTERVAL then return end
+        _lastBringT = tick()
+        pcall(function() setscriptable(LocalPlayer, "SimulationRadius", true) end)
+        pcall(function() sethiddenproperty(LocalPlayer, "SimulationRadius", math.huge) end)
+        local hrp = curHRP()
+        if not hrp or not anchorHRP then return end
+        local anchor = anchorHRP.CFrame
+        local i = 0
+        for _, m in ipairs(workspace.Enemies:GetChildren()) do
+            if m:IsA("Model") and not IsDied(m) then
+                local isShip = false
+                for _, nm in ipairs(SHIP_MOBS) do if m.Name == nm then isShip = true break end end
+                if isShip then
+                    local mh = m:FindFirstChild("HumanoidRootPart")
+                    if mh and (hrp.Position - mh.Position).Magnitude <= 1500 then
+                        if not isnetworkowner or isnetworkowner(mh) then
+                            pcall(function()
+                                mh.AssemblyLinearVelocity = Vector3.zero
+                                mh.AssemblyAngularVelocity = Vector3.zero
+                                mh.CFrame = anchor * CFrame.new(i * 2, 0, 0)
+                            end)
+                        end
+                        i = i + 1
+                        if i >= 6 then break end
                     end
                 end
             end
         end
-        -- 2) NPC Experimic gan
-        local _, npcPart = FindNPC()
-        if npcPart and (npcPart.Position - pos).Magnitude <= 800 then return true end
-        return false
-    end
-    local function OnShip()
-        if not HumanoidRootPart then return false end
-        if (HumanoidRootPart.Position - SHIP_CENTER).Magnitude <= SHIP_RADIUS then return true end
-        return NearReferenceOnShip()
-    end
-    local function EnsureOnShip()
-        if OnShip() then return true end
-        GStatus("Not on Cursed Ship -> requestEntrance")
-        for _ = 1, 15 do
-            if getgenv().GHOUL_STOP then return false end
-            if OnShip() then return true end
-            pcall(function() COMMF_:InvokeServer("requestEntrance", SHIP_ENTRANCE) end)
-            task.wait(1)
-            if not OnShip() and HumanoidRootPart then
-                Tween(CFrame.new(SHIP_CENTER) * CFrame.new(0, 12, 0))
-                task.wait(0.5)
-            end
-        end
-        return OnShip()
     end
 
-    -- tim NPC Experimic tren ship theo tu khoa ten
-    -- (gan cho forward-declare o tren -> NearReferenceOnShip dung duoc)
-    FindNPC = function()
+    -- ==== MOVEMENT CONTROLLER: 1 Heartbeat pin CFrame (khong tao tween moi/tick) ====
+    local Move = { conn = nil, desired = nil }
+    function Move.Start()
+        if Move.conn then return end
+        Move.conn = RunService.Heartbeat:Connect(function()
+            local d = Move.desired
+            if not d then return end
+            local hrp = curHRP()
+            local hum = curHum()
+            if not hrp or not hum or hum.Health <= 0 then return end
+            pcall(function()
+                hum.Sit = false
+                hrp.AssemblyLinearVelocity = Vector3.zero
+                hrp.AssemblyAngularVelocity = Vector3.zero
+                hrp.CFrame = d
+            end)
+        end)
+    end
+    function Move.SetDesired(cf) Move.desired = cf end
+    function Move.Stop()
+        if Move.conn then pcall(function() Move.conn:Disconnect() end) Move.conn = nil end
+        Move.desired = nil
+    end
+
+    -- ==== CLEANUP (goi khi chuyen phase quan trong / stop / xong) ====
+    local function CleanupMovement()
+        Move.Stop()
+        pcall(function() Tween(false) end)
+    end
+
+    -- ==== SHIP: len Cursed Ship (dau hieu thuc te + debounce entrance) ====
+    local ExperimicModel, ExperimicPart
+    local function FindNPC()
+        if ExperimicPart and ExperimicPart.Parent and ExperimicModel and ExperimicModel.Parent then
+            return ExperimicModel, ExperimicPart
+        end
+        ExperimicModel, ExperimicPart = nil, nil
         local containers = {}
         for _, nm in ipairs({"NPCs", "Npcs", "NPC"}) do
             local f = workspace:FindFirstChild(nm)
-            if f then containers[#containers + 1] = f end
+            if f then containers[#containers+1] = f end
         end
-        if #containers == 0 then containers = {workspace} end
+        if #containers == 0 then containers = { workspace } end
         for _, cont in ipairs(containers) do
             for _, m in ipairs(cont:GetChildren()) do
                 if m:IsA("Model") then
@@ -1983,7 +2161,7 @@ GhoulModuleRun = function()
                     for _, kw in ipairs(NPC_KEYWORDS) do
                         if lname:find(kw) then
                             local part = m:FindFirstChild("HumanoidRootPart") or m:FindFirstChildWhichIsA("BasePart")
-                            if part then return m, part end
+                            if part then ExperimicModel, ExperimicPart = m, part return m, part end
                         end
                     end
                 end
@@ -1991,34 +2169,89 @@ GhoulModuleRun = function()
         end
         return nil, nil
     end
-    local function ApproachNPC()
-        if not HumanoidRootPart then return false end
+    local function OnShip()
+        local hrp = curHRP()
+        if not hrp then return false end
+        if (hrp.Position - SHIP_CENTER).Magnitude <= SHIP_RADIUS then return true end
+        -- dau hieu thuc te: thay boss / ship mob / NPC gan
+        local pos = hrp.Position
+        local en = workspace:FindFirstChild("Enemies")
+        if en then
+            for _, m in ipairs(en:GetChildren()) do
+                if m:IsA("Model") then
+                    local ok = (m.Name == BOSS_NAME)
+                    if not ok then for _, nm in ipairs(SHIP_MOBS) do if m.Name == nm then ok = true break end end end
+                    if ok then
+                        local mh = m:FindFirstChild("HumanoidRootPart")
+                        if mh and (mh.Position - pos).Magnitude <= 900 then return true end
+                    end
+                end
+            end
+        end
+        local _, np = FindNPC()
+        if np and (np.Position - pos).Magnitude <= 900 then return true end
+        return false
+    end
+    -- len ship: debounce entrance, tween tiep can 1 lan, timeout ngan
+    local function EnsureOnShip(timeout)
+        if OnShip() then return true end
+        timeout = timeout or 22
+        local startT = tick()
+        local lastEntrance = 0
+        while alive() and (tick() - startT) < timeout do
+            if OnShip() then CleanupMovement() return true end
+            if tick() - lastEntrance >= ENTRANCE_RETRY then
+                lastEntrance = tick()
+                GStatus("Len Cursed Ship...")
+                pcall(function() COMMF_:InvokeServer("requestEntrance", SHIP_ENTRANCE) end)
+            end
+            -- tween tiep can (Tween tu chong tao lai neu dang chay)
+            pcall(function() Tween(CFrame.new(SHIP_CENTER) * CFrame.new(0, 12, 0)) end)
+            task.wait(0.35)
+        end
+        CleanupMovement()
+        return OnShip()
+    end
+
+    -- ==== di chuyen toi 1 CFrame roi cho (dung cho tiep can NPC) ====
+    local function MoveToAndWait(targetCF, stopDist, timeout)
+        stopDist = stopDist or NPC_DIST
+        timeout = timeout or 8
+        local startT = tick()
+        pcall(function() Tween(targetCF) end)
+        while alive() and (tick() - startT) < timeout do
+            local hrp = curHRP()
+            if hrp and (hrp.Position - targetCF.Position).Magnitude <= stopDist then
+                CleanupMovement()
+                return true
+            end
+            if not charAlive() then break end
+            task.wait(0.1)
+        end
+        CleanupMovement()
+        local hrp = curHRP()
+        return hrp and (hrp.Position - targetCF.Position).Magnitude <= stopDist
+    end
+
+    -- ==== MUA GHOUL: toi sat NPC Experimic -> BuyCheck + Buy ====
+    local function TryBuyGhoul()
+        if IsGhoul() then return true end
+        if not HasTorch() then return false end
+        EnsureOnShip()
         local _, part = FindNPC()
         local npcCF = part and part.CFrame
         if not npcCF and NPC_POS then
             npcCF = (typeof(NPC_POS) == "CFrame") and NPC_POS or CFrame.new(NPC_POS)
         end
-        if not npcCF then GStatus("NPC Experimic not found on ship") return false end
-        if (HumanoidRootPart.Position - npcCF.Position).Magnitude <= NPC_DIST then return true end
-        GStatus("Move to Experimic NPC")
-        Tween(npcCF * CFrame.new(0, 3, 4))
-        task.wait(0.4)
-        return (HumanoidRootPart.Position - npcCF.Position).Magnitude <= NPC_DIST
-    end
-
-    -- mua Ghoul: len ship -> sat NPC -> BuyCheck + Buy(4). Remote that tu hook.
-    local function TryBuyGhoul()
-        if IsGhoul() then return true end
-        if not HasTorch() then return false end
-        EnsureOnShip()
-        local near = false
-        for _ = 1, 8 do
-            if getgenv().GHOUL_STOP then return false end
-            if ApproachNPC() then near = true break end
-            task.wait(0.4)
+        if not npcCF then GStatus("Khong thay NPC Experimic") return false end
+        GStatus("Toi NPC Experimic")
+        MoveToAndWait(npcCF * CFrame.new(0, 3, 4), NPC_DIST, 8)
+        local hrp = curHRP()
+        if not hrp or (hrp.Position - npcCF.Position).Magnitude > NPC_DIST + 5 then
+            GStatus("Chua toi duoc NPC -> retry")
+            return false
         end
-        if not near then GStatus("Cannot reach Experimic -> retry") return false end
-        GStatus("Near Experimic + Torch -> buy Ghoul")
+        GStatus("Mua Ghoul (BuyCheck + Buy)")
         local rC, rB
         pcall(function()
             rC = COMMF_:InvokeServer("Ectoplasm", "BuyCheck", RACE_ID)
@@ -2027,34 +2260,46 @@ GhoulModuleRun = function()
         end)
         print("[Ghoul] BuyCheck ->", tostring(rC), "| Buy ->", tostring(rB))
         task.wait(1.2)
+        RequestEctoRefresh()
         return IsGhoul()
     end
 
-    -- ==== farm Ectoplasm: quai Ship o tren Cursed Ship, dung KillMonster (proven) ====
+    -- ==== FARM ECTOPLASM: len ship, gom + danh quai ship, giet sach moi doi cho ====
     local function FarmEcto()
-        GStatus("Farm Ectoplasm...")
-        EnsureOnShip()
-        while not getgenv().GHOUL_STOP do
-            if IsGhoul() or HasTorch() then break end
+        GStatus("Farm Ectoplasm")
+        if not EnsureOnShip() then return end
+        Move.Start()
+        while alive() do
+            if IsGhoul() or HasTorchLocal() then break end
             if GetEcto() >= ECTO_NEEDED then break end
-            if CountShipMobsAlive() == 0 then
+            if not charAlive() then task.wait(0.2) end
+
+            local snapshot = workspace.Enemies:GetChildren()
+            local mob = FirstAliveShipMob(snapshot)
+            if not mob then
                 -- het quai -> ve tam thuyen cho spawn (chi den day khi giet sach)
-                Tween(CFrame.new(SHIP_CENTER) * CFrame.new(0, 12, 0))
-                task.wait(0.3)
+                Move.SetDesired(CFrame.new(SHIP_CENTER) * CFrame.new(0, 12, 0))
+                GStatus("Cho quai Ship spawn... (" .. GetEcto() .. "/" .. ECTO_NEEDED .. ")")
+                task.wait(0.4)
             else
-                EquipWeapon("Melee")
-                for _, nm in ipairs(SHIP_MOBS) do
-                    if AliveInEnemies(nm) then KillMonster(nm) end
+                local mh = mob:FindFirstChild("HumanoidRootPart")
+                if mh then
+                    Move.SetDesired(mh.CFrame * CFrame.new(0, 14, 0))  -- pin tren dau cum quai
+                    EnsureMelee()
+                    BringShipMobs(mh)                                   -- gom (throttle)
+                    FastAttackNearby(snapshot, MOB_TICK)               -- danh ca cum
+                    GStatus("Farm Ectoplasm " .. GetEcto() .. "/" .. ECTO_NEEDED)
                 end
-                GStatus("Farm Ectoplasm " .. GetEcto() .. "/" .. ECTO_NEEDED)
+                task.wait(MOB_TICK)
             end
-            task.wait()
         end
-        Tween(false)
-        GStatus("Ectoplasm ready: " .. GetEcto())
+        CleanupMovement()
+        RequestEctoRefresh()
+        GStatus("Ectoplasm: " .. GetEcto() .. "/" .. ECTO_NEEDED)
     end
 
-    -- ==== fetch server co boss (API cursedcaptain) + join bang __ServerBrowser ====
+    -- ==== FETCH server co boss (API) + join ====
+    local _lastFetch = 0
     local function HttpReq(url)
         local req = request or http_request or (syn and syn.request) or (fluxus and fluxus.request)
         if type(req) ~= "function" then return nil end
@@ -2064,12 +2309,12 @@ GhoulModuleRun = function()
                     Headers = { ["Accept"] = "application/json", ["User-Agent"] = "Roblox/WinInet" } })
             end)
             if ok and type(res) == "table" then return res.Body or res.body end
-            task.wait(1.5)
+            task.wait(1)
         end
         return nil
     end
     local function FetchBossServers()
-        GStatus("Fetch boss servers...")
+        GStatus("Fetch server co boss...")
         local body = HttpReq(BOSS_API)
         if not body then return {} end
         local data
@@ -2078,90 +2323,119 @@ GhoulModuleRun = function()
         local list = data.data or data.servers or data
         if type(list) ~= "table" then return {} end
         local cur = tonumber(game.PlaceId)
-        local out = {}
+        local seen, out = {}, {}
         for _, v in ipairs(list) do
             if type(v) == "table" then
                 local jobId = v.jobid or v.JobId or v.id
                 local placeId = tonumber(v.placeid or v.PlaceId or v.place)
-                -- chi lay server TRUNG dung PlaceId dang dung (tranh Error 773 restricted)
-                if jobId and placeId and placeId == cur and tostring(jobId) ~= tostring(game.JobId) then
-                    out[#out + 1] = tostring(jobId)
+                if jobId and placeId and placeId == cur
+                    and tostring(jobId) ~= tostring(game.JobId) and not seen[tostring(jobId)] then
+                    seen[tostring(jobId)] = true
+                    out[#out+1] = tostring(jobId)
                     if #out >= FETCH_COUNT then break end
                 end
             end
         end
-        GStatus("API: " .. #out .. " server(s)")
+        GStatus("API: " .. #out .. " server")
         return out
     end
     local function JoinJob(jobId)
         if not jobId or tostring(jobId) == tostring(game.JobId) then return end
-        -- __ServerBrowser: teleport TRONG place hien tai (giu PlaceId) -> tranh 773
         local sb = ReplicatedStorage:FindFirstChild("__ServerBrowser")
         if sb then pcall(function() sb:InvokeServer("teleport", tostring(jobId)) end) end
     end
 
-    -- ==== farm boss Cursed Captain: len ship, co boss thi KillMonster; khong thi hop ====
-    local function FarmBoss()
-        -- len ship truoc (boss o tren thuyen; vua join/travel co the chua load Enemies)
-        EnsureOnShip()
-        task.wait(0.5)
+    -- ==== FIGHT BOSS: pin tren dau boss (movement controller), danh target da cache ====
+    local function FightBoss(boss)
+        GStatus("Danh boss " .. BOSS_NAME)
+        EnsureMelee()
+        Move.Start()
+        local lastReacquire = tick()
+        while alive() do
+            if HasTorchLocal() then break end
+            if not charAlive() then task.wait(0.15) end
+            -- reacquire boss neu target cu mat
+            if (not boss or not boss.Parent or IsDied(boss)) and (tick() - lastReacquire) >= REACQUIRE_INT then
+                lastReacquire = tick()
+                boss = FindBoss()
+            end
+            if not boss then break end  -- boss chet/mat
+            local bhrp = boss:FindFirstChild("HumanoidRootPart")
+            if bhrp then
+                Move.SetDesired(bhrp.CFrame * CFrame.new(0, 14, 0))  -- pin tren dau boss (on dinh)
+                FastAttackTarget(boss, BOSS_TICK)                    -- danh target da biet
+            end
+            task.wait(BOSS_TICK)
+        end
+        CleanupMovement()
+    end
 
-        -- detect boss trong server hien tai
+    -- ==== FARM BOSS: len ship -> detect -> fight; khong co thi hop ====
+    local function FarmBoss()
+        if not EnsureOnShip() then return end
+        -- detect boss (0.35s/lan cho toi timeout)
+        GStatus("Tim boss trong server...")
         local deadline = tick() + DETECT_TO
-        while tick() < deadline and not getgenv().GHOUL_STOP do
-            if HasTorch() then return end
-            if AliveInEnemies(BOSS_NAME) then break end
-            task.wait(0.5)
+        local boss = FindBoss()
+        while alive() and not boss and tick() < deadline do
+            if HasTorchLocal() then return end
+            task.wait(BOSS_DETECT_INT)
+            boss = FindBoss()
         end
 
-        if AliveInEnemies(BOSS_NAME) then
-            GStatus("Boss found -> farm " .. BOSS_NAME)
-            EquipWeapon("Melee")
-            repeat
-                if getgenv().GHOUL_STOP then return end
-                KillMonster(BOSS_NAME)
-                if HasTorch() then Tween(false) return end
-            until not AliveInEnemies(BOSS_NAME) or getgenv().GHOUL_STOP
-            Tween(false)
-            -- boss chet: doi vai giay xem torch co roi vao inv khong
-            for _ = 1, 6 do
-                if HasTorch() then return end
-                task.wait(0.5)
+        if boss then
+            FightBoss(boss)
+            -- boss xong: cho vai giay xem torch roi vao inv (local event se bat)
+            for _ = 1, 8 do
+                if not alive() or HasTorch() then return end
+                task.wait(0.4)
             end
         else
-            -- khong co boss -> hop server tim (API cursedcaptain)
-            GStatus("No boss here -> fetch & hop")
+            -- khong co boss -> hop (fetch co cooldown; dung loop khi teleport bat dau)
+            if tick() - _lastFetch < 5 then task.wait(2) return end
+            _lastFetch = tick()
+            GStatus("Server khong co boss -> hop")
             local servers = FetchBossServers()
             if #servers == 0 then task.wait(3) return end
             for _, jid in ipairs(servers) do
-                if getgenv().GHOUL_STOP or HasTorch() then break end
-                GStatus("Join server to find boss...")
-                JoinJob(jid)
+                if not alive() or HasTorchLocal() then break end
+                GStatus("Join server tim boss...")
+                JoinJob(jid)   -- teleport bat dau -> phien nay se reset, dung loop
                 task.wait(HOP_DELAY)
             end
             task.wait(2)
         end
     end
 
-    -- ==== MAIN FLOW module Ghoul ====
+    -- ==== MAIN STATE LOOP ====
     GStatus("start")
-    while not getgenv().GHOUL_STOP do
-        if IsGhoul() then GStatus("DONE - da thanh Ghoul") return end
+    while alive() do
+        if IsGhoul() then
+            CleanupMovement()
+            GStatus("DONE - da thanh Ghoul")
+            return
+        end
 
-        -- co Torch -> mua race ngay (khong farm/hop nua)
         if HasTorch() then
-            if GetEcto() < ECTO_NEEDED then FarmEcto() end
-            if TryBuyGhoul() then GStatus("DONE - da thanh Ghoul") return end
-            task.wait(1.5)
+            if GetEcto() < ECTO_NEEDED then
+                FarmEcto()
+            elseif TryBuyGhoul() then
+                CleanupMovement()
+                GStatus("DONE - da thanh Ghoul")
+                return
+            else
+                task.wait(1.2)
+            end
         else
-            -- chua Torch: du ecto chua? thieu -> farm; du -> di danh boss lay Torch
             if GetEcto() < ECTO_NEEDED then
                 FarmEcto()
             else
                 FarmBoss()
             end
         end
-        task.wait()
+        task.wait(MAIN_TICK)
     end
+
+    CleanupMovement()
     GStatus("stopped")
 end
