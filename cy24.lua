@@ -17,7 +17,7 @@
 --  CONFIG
 --==================================================================
 getgenv().GhoulConfig = getgenv().GhoulConfig or {
-    ["Team"]                = "Marines",     -- Team chon khi load
+    ["Team"]                = "Pirates",     -- Team chon khi load
     ["Ectoplasm Needed"]    = 100,           -- so Ectoplasm can co truoc khi di boss
     ["Boss API"]            = "http://fi12.bot-hosting.cloud:20112/api/name=cursedcaptain",
     ["Boss Name"]           = "Cursed Captain",
@@ -246,25 +246,66 @@ local function IsDied(v)
     return (not ok) or r
 end
 
--- ATTACK SETUP (ban moi - manh & ben hon):
--- Dung ham noi bo cua game SendHitsToServer (_G) + CombatUtil de hit-detect that,
--- KHONG phu thuoc remote ma hoa bit32.bxor/seed (cach cu de hong khi game doi seed).
--- Co fallback RE/RegisterHit neu khong lay duoc SendHit.
+-- ATTACK SETUP (theo buy+farmtalon.txt - proven ra dame chuan):
+-- Ban truoc dung cau truc hit2={Head,HRP} + SendHit -> neu executor khong co SendHit
+-- thi fallback SAI cau truc -> KHONG ra dame. Ban nay bam CA 3 cach cho chac:
+--   RegisterAttack -> RegisterHit(cau truc dung {firstPart, {{mob,part},..}}) -> encrypted remote.
 local NET_ = ReplicatedStorage:WaitForChild("Modules"):WaitForChild("Net")
-local RegisterAttack = NET_:FindFirstChild("RE/RegisterAttack")
-local RegisterHit    = NET_:FindFirstChild("RE/RegisterHit")
-local CombatUtil = nil
-pcall(function() CombatUtil = require(ReplicatedStorage.Modules.CombatUtil) end)
--- SendHitsToServer: ham that game dung de gui hit. Poll toi 30s neu chua co.
-local SendHit = nil
-pcall(function() SendHit = getrenv and getrenv()._G and getrenv()._G.SendHitsToServer end)
-if not SendHit then
-    task.spawn(function()
-        local s = tick()
-        repeat
-            task.wait(0.2)
-            pcall(function() SendHit = getrenv and getrenv()._G and getrenv()._G.SendHitsToServer end)
-        until SendHit or tick() - s > 30
+local RegisterAttack = NET_:WaitForChild("RE/RegisterAttack")
+local RegisterHit    = NET_:WaitForChild("RE/RegisterHit")
+
+-- encrypted remote (tim RemoteEvent co attribute "Id") + seed
+local remoteAttack, idremote
+local atkSeed = nil
+pcall(function() atkSeed = NET_:WaitForChild("seed"):InvokeServer() end)
+local function GetRemoteAttack()
+    if remoteAttack and idremote then return true end
+    for _, folder in ipairs({
+        ReplicatedStorage:FindFirstChild("Util"),
+        ReplicatedStorage:FindFirstChild("Common"),
+        ReplicatedStorage:FindFirstChild("Remotes"),
+        ReplicatedStorage:FindFirstChild("Assets"),
+        ReplicatedStorage:FindFirstChild("FX"),
+    }) do
+        if folder then
+            for _, obj in ipairs(folder:GetChildren()) do
+                if obj:IsA("RemoteEvent") and obj:GetAttribute("Id") then
+                    remoteAttack, idremote = obj, obj:GetAttribute("Id")
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+task.spawn(function()
+    for _, folder in ipairs({
+        ReplicatedStorage:FindFirstChild("Util"),
+        ReplicatedStorage:FindFirstChild("Common"),
+        ReplicatedStorage:FindFirstChild("Remotes"),
+        ReplicatedStorage:FindFirstChild("Assets"),
+        ReplicatedStorage:FindFirstChild("FX"),
+    }) do
+        if folder then
+            folder.ChildAdded:Connect(function(obj)
+                if obj:IsA("RemoteEvent") and obj:GetAttribute("Id") then
+                    remoteAttack, idremote = obj, obj:GetAttribute("Id")
+                end
+            end)
+        end
+    end
+end)
+GetRemoteAttack()
+
+-- gui hit ma hoa (giong game that) - bat kem cho chac ra dame
+local function EncryptedRegisterHit(hitData)
+    if not atkSeed then pcall(function() atkSeed = NET_:WaitForChild("seed"):InvokeServer() end) end
+    if not GetRemoteAttack() or not atkSeed then return end
+    pcall(function()
+        local encodedName = string.gsub("RE/RegisterHit", ".", function(c)
+            return string.char(bit32.bxor(string.byte(c), math.floor(workspace:GetServerTimeNow() / 10 % 10) + 1))
+        end)
+        remoteAttack:FireServer(encodedName, bit32.bxor(idremote + 909090, atkSeed * 2), unpack(hitData))
     end)
 end
 
@@ -384,59 +425,55 @@ local function EquipMelee()
     end
 end
 
--- FastAttack (ban moi - tham khao fast attack (1).txt):
---   - Gom target trong ban kinh 65 (co the loc theo ten x -> chi danh boss)
---   - RegisterAttack -> CombatUtil AttackStart/RunHitDetection -> SendHit (fallback RegisterHit)
---   - task.defer de gui hit sau 1 frame (giong client that) -> it bi phat hien, dame chuan
--- x = ten quai muon loc (nil = danh tat ca quanh). Vi du boss: FastAttack("Cursed Captain").
+-- FastAttack (theo buy+farmtalon.txt - cau truc RA DAME CHUAN):
+--   hitData = { firstPart, { {mob1, part1}, {mob2, part2}, ... } }
+--   Ban CA 3 cach: RegisterAttack -> RegisterHit (raw) -> encrypted remote.
+--   (Ban truoc gui hit2={Head,HRP} sai cau truc -> gom duoc quai nhung KHONG ra dame.)
+-- x = ten quai muon loc (nil = danh tat ca quanh). Boss: FastAttack("Cursed Captain").
 local lastCallFA = tick()
+local ATK_DIST = 85
+local function encRegisterHit(hitData)
+    if not atkSeed then pcall(function() atkSeed = NET_:WaitForChild("seed"):InvokeServer() end) end
+    if not GetRemoteAttack() or not atkSeed then return end
+    pcall(function()
+        local encName = string.gsub("RE/RegisterHit", ".", function(c)
+            return string.char(bit32.bxor(string.byte(c),
+                math.floor(workspace:GetServerTimeNow() / 10 % 10) + 1))
+        end)
+        remoteAttack:FireServer(encName, bit32.bxor(idremote + 909090, atkSeed * 2), unpack(hitData))
+    end)
+end
 local function FastAttack(x)
     if not HumanoidRootPart or not Character:FindFirstChildWhichIsA("Humanoid")
         or Character.Humanoid.Health <= 0 or not Character:FindFirstChildWhichIsA("Tool") then return end
-    if tick() - lastCallFA <= 0.01 then return end
+    if tick() - lastCallFA <= 0.03 then return end
     lastCallFA = tick()
 
-    local hrp = HumanoidRootPart
-    local list = {}
+    local root = HumanoidRootPart
+    local targets = {}
     for _, v in next, workspace.Enemies:GetChildren() do
         if v:IsA("Model") and (not x or v.Name == x) then
             local h = v:FindFirstChild("Humanoid")
             local vhrp = v:FindFirstChild("HumanoidRootPart")
-            if h and vhrp and v:FindFirstChild("Head") and h.Health > 0
-                and (vhrp.Position - hrp.Position).Magnitude <= 65 then
-                list[#list + 1] = v
+            local head = v:FindFirstChild("Head")
+            if h and vhrp and h.Health > 0
+                and (vhrp.Position - root.Position).Magnitude <= ATK_DIST then
+                targets[#targets + 1] = { v, head or vhrp }
             end
         end
     end
-    if #list == 0 then return end
+    if #targets == 0 then return end
 
-    local firstPart = nil
-    local hit2 = {}
-    for i = 1, #list do
-        local v = list[i]
-        if not firstPart then firstPart = v:FindFirstChild("HumanoidRootPart") end
-        hit2[i] = { v:FindFirstChild("Head"), v:FindFirstChild("HumanoidRootPart") }
+    -- cau truc dung: hitData[1] = part cua target dau; hitData[2] = list {mob, part}
+    local hitData = { targets[1][2], {} }
+    for _, d in ipairs(targets) do
+        hitData[2][#hitData[2] + 1] = { d[1], d[2] }
     end
-    if not firstPart then return end
 
-    local ok = pcall(function()
-        if RegisterAttack then RegisterAttack:FireServer() end
-        task.defer(function()
-            pcall(function() if CombatUtil then CombatUtil:AttackStart(firstPart, 1) end end)
-            pcall(function()
-                if CombatUtil then
-                    CombatUtil:RunHitDetection(firstPart.Parent or firstPart, 1,
-                        { ["_Object"] = { ["Length"] = 0.2, ["IsPlaying"] = true } })
-                end
-            end)
-            if SendHit then
-                SendHit(firstPart, hit2)
-            elseif RegisterHit then
-                RegisterHit:FireServer(firstPart, hit2)
-            end
-        end)
-    end)
-    return ok
+    pcall(function() RegisterAttack:FireServer() end)
+    pcall(function() RegisterHit:FireServer(unpack(hitData)) end)
+    encRegisterHit(hitData)
+    return true
 end
 
 -- Tween teleport (tham khao V3.txt, rut gon)
