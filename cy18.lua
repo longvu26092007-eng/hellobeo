@@ -36,6 +36,8 @@ getgenv().GhoulConfig = getgenv().GhoulConfig or {
     ["Boss Entrance"]       = Vector3.new(923.21252441406, 126.9760055542, 32852.83203125),
     ["Boss Near Dist"]      = 250,   -- <= gia tri nay coi la da gan boss (tween thang)
     ["Boss Entrance Dist"]  = 2000,  -- >= gia tri nay thi request entrance ra thuyen truoc
+    ["Hover Height"]        = 18,    -- do cao hover tren dau boss (studs) khi da gan -> dung yen danh
+    ["Hover Lock Dist"]     = 40,    -- <= gia tri nay thi bat che do "lam do" (pin CFrame, khong tween nua)
 }
 
 local CFG = getgenv().GhoulConfig
@@ -70,10 +72,21 @@ local LocalPlayer = Players.LocalPlayer
 local COMMF_ = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("CommF_")
 
 local Character, Humanoid, HumanoidRootPart
+-- forward-declare (dinh nghia sau khi co HoverLock/Tween/EquipMelee)
+local ResetMovement           -- huy hover+tween khi respawn
+local ReEquipMeleeNow         -- ep cam lai melee ngay
+local farmingBoss = false     -- true khi dang o vong danh boss (cho equip-keeper biet)
 local function BindChar(c)
     Character = c
     Humanoid = c:WaitForChild("Humanoid")
     HumanoidRootPart = c:WaitForChild("HumanoidRootPart")
+    -- RESPAWN: huy khoa hover/tween cu (tranh giat/keo ve cho chet),
+    -- roi cam lai melee ngay (fix loi chet xong khong tu cam vu khi de danh tiep)
+    task.spawn(function()
+        if ResetMovement then pcall(ResetMovement) end
+        task.wait(0.5)  -- cho character on dinh
+        if ReEquipMeleeNow then pcall(ReEquipMeleeNow) end
+    end)
 end
 LocalPlayer.CharacterAdded:Connect(BindChar)
 if LocalPlayer.Character then BindChar(LocalPlayer.Character) end
@@ -230,23 +243,29 @@ end
 -- (hoac respawn) game hay bo trang bi -> phai equip lai.
 -- Uu tien: ten/ToolTip trong CFG["Attack Weapon"]; roi tool co attribute Melee;
 -- cuoi cung fallback tool bat ky de FastAttack chay duoc.
+-- co phai Hellfire Torch khong (de KHONG bao gio cam no lam vu khi danh boss)
+local function IsTorch(t)
+    return t and (t.Name == "Hellfire Torch" or (t.Name and t.Name:find("Hellfire")))
+end
+
 local function EquipMelee()
     if not Character or not Humanoid then return end
     local want = tostring(CFG["Attack Weapon"] or "")
 
     -- neu dang cam dung tool muon roi thi thoi
     local cur = Character:FindFirstChildWhichIsA("Tool")
-    if cur then
+    if cur and not IsTorch(cur) then
         if want ~= "" and (cur.Name == want or cur.ToolTip == want) then return end
         if want == "" then
-            -- khong chi dinh -> mien la dang cam mot tool la du
+            -- khong chi dinh -> mien la dang cam mot tool (khong phai torch) la du
             return
         end
     end
+    -- neu dang cam Hellfire Torch -> KHONG dung no danh, phai doi sang melee ngay o duoi
 
     local function tryEquip(pred)
         for _, x in next, LocalPlayer.Backpack:GetChildren() do
-            if x:IsA("Tool") and pred(x) then
+            if x:IsA("Tool") and not IsTorch(x) and pred(x) then  -- loai torch
                 pcall(function() Humanoid:EquipTool(x) end)
                 return true
             end
@@ -264,8 +283,8 @@ local function EquipMelee()
         pcall(function() ok = (t:GetAttribute("Sub") == "Melee") or (t:FindFirstChild("MeleeWeapon") ~= nil) end)
         return ok
     end) then return end
-    -- 3) fallback: tool bat ky (giu hanh vi cu)
-    if not Character:FindFirstChildWhichIsA("Tool") then
+    -- 3) fallback: tool bat ky TRU torch
+    if not Character:FindFirstChildWhichIsA("Tool") or IsTorch(cur) then
         tryEquip(function() return true end)
     end
 end
@@ -366,15 +385,79 @@ local function TP(cf)
     end
 end
 
--- Tim quai theo ten (workspace.Enemies + ReplicatedStorage)
+--==================================================================
+--  HOVER LOCK: "lam do player" khi hover tren dau boss.
+--  Thay vi lien tuc tween/TP moi frame (gay giat len giat xuong), ta:
+--   - pin root.CFrame ve dung 1 vi tri co dinh moi Heartbeat
+--   - zero velocity + Sit=false de trong luc/knockback khong keo player
+--  -> player dung im tuyet doi, khong rung.
+--  HoverLock(cf)  : bat/khoa tai vi tri cf (vi tri se giu nguyen den khi doi/tat)
+--  HoverLock(nil) : tat khoa (tra lai dieu khien binh thuong)
+--==================================================================
+local hoverConn, hoverCF = nil, nil
+local function HoverLock(cf)
+    -- tat khoa
+    if cf == nil then
+        if hoverConn then hoverConn:Disconnect() hoverConn = nil end
+        hoverCF = nil
+        return
+    end
+    if typeof(cf) == "Vector3" then cf = CFrame.new(cf) end
+    hoverCF = cf  -- cap nhat diem giu (co the goi lai voi cf moi khi boss di chuyen)
+
+    if hoverConn then return end  -- da co loop -> chi can update hoverCF o tren
+    hoverConn = RunService.Heartbeat:Connect(function()
+        if not hoverCF then return end
+        if not Character then return end
+        local root = Character:FindFirstChild("HumanoidRootPart")
+        local hum = Character:FindFirstChildWhichIsA("Humanoid")
+        if not root or not hum or hum.Health <= 0 then return end
+        -- lam do: chong knockback/trong luc keo player -> khong giat
+        pcall(function()
+            hum.Sit = false
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+        end)
+        -- pin cung vi tri (khong cong them offset moi frame -> khong rung)
+        root.CFrame = hoverCF
+    end)
+end
+
+-- Gan cho forward-declare o dau file (dung sau khi respawn - xem BindChar).
+-- ResetMovement: huy hover + tween dang chay (tranh keo character moi ve cho chet).
+ResetMovement = function()
+    HoverLock(nil)
+    Tween(false)
+end
+-- ReEquipMeleeNow: ep cam lai melee ngay (fix loi chet xong khong tu cam vu khi).
+ReEquipMeleeNow = function()
+    pcall(EquipMelee)
+end
+
+-- EQUIP-KEEPER: chay nen suot phien. Khi dang danh boss (farmingBoss) ma tay khong
+-- cam tool (game bo trang bi luc boss chet/respawn) -> tu cam lai melee ngay.
+-- Fix trung: "chet xong khong tu cam melee de danh lai".
+task.spawn(function()
+    while true do
+        task.wait(0.35)
+        if farmingBoss and Character and Humanoid and Humanoid.Health > 0 then
+            if not Character:FindFirstChildWhichIsA("Tool") then
+                pcall(EquipMelee)
+            end
+        end
+    end
+end)
+
+-- Tim quai SONG theo ten. CHI tim trong workspace.Enemies.
+-- KHONG scan ReplicatedStorage: trong Blox Fruits, boss (vd "Cursed Captain") co san
+-- 1 model template trong RS -> neu scan RS se luon "thay boss" (false positive) gay
+-- ket vong "Boss gone" ma khong bao gio fetch. Quai/boss THUC SU song luon o Enemies.
 local function FindEnemy(...)
     local args = {...}
-    for _, container in next, {workspace.Enemies, ReplicatedStorage} do
-        for _, m in next, container:GetChildren() do
-            if m:IsA("Model") and not IsDied(m) then
-                for _, n in next, args do
-                    if m.Name == n then return m end
-                end
+    for _, m in next, workspace.Enemies:GetChildren() do
+        if m:IsA("Model") and not IsDied(m) then
+            for _, n in next, args do
+                if m.Name == n then return m end
             end
         end
     end
@@ -626,11 +709,12 @@ local function JoinJobId(jobId, placeId)
     return false
 end
 
--- detect boss: boss co trong workspace.Enemies hoac ReplicatedStorage
+-- Boss CO THUC SU trong server hien tai chua? Chi tin workspace.Enemies (boss song).
+-- KHONG check ReplicatedStorage (template luon ton tai -> false positive).
 local function BossPresent()
+    local m = workspace.Enemies:FindFirstChild(CFG["Boss Name"])
+    if m and not IsDied(m) then return true end
     return FindEnemy(CFG["Boss Name"]) ~= nil
-        or (workspace.Enemies:FindFirstChild(CFG["Boss Name"]) ~= nil)
-        or (ReplicatedStorage:FindFirstChild(CFG["Boss Name"]) ~= nil)
 end
 
 --==================================================================
@@ -669,16 +753,22 @@ end
 
 -- Tien toi gan boss: check khoang cach -> xa thi requestEntrance ra thuyen -> tween toi.
 -- Tra ve true khi da o gan (trong tam danh), false khi con dang di chuyen.
+-- KHI DA GAN: dung HoverLock (lam do player) de dung yen tren dau boss, KHONG giat len xuong.
 local function ApproachBoss(bossPart)
     if not HumanoidRootPart then return false end
     local targetCF = bossPart and bossPart.CFrame or CFG["Boss Pos"]
     local dist = (HumanoidRootPart.Position - targetCF.Position).Magnitude
 
-    -- da gan -> tween sat vao (khong TP thang)
+    -- da gan -> HOVER LOCK ngay tren dau boss (do player, khong tween lap -> het giat)
     if dist <= CFG["Boss Near Dist"] then
-        Tween(targetCF * CFrame.new(3, 8, 2))
+        Tween(false)  -- huy tween dang chay (neu co) truoc khi khoa
+        local h = tonumber(CFG["Hover Height"]) or 18
+        HoverLock(targetCF * CFrame.new(0, h, 0))  -- pin dung tren dau boss
         return true
     end
+
+    -- roi xa -> nha khoa hover de di chuyen
+    HoverLock(nil)
 
     -- con xa -> neu qua xa thi request entrance ra dung thuyen gan boss truoc
     if dist >= CFG["Boss Entrance Dist"] then
@@ -732,13 +822,12 @@ local function _FarmBossBody()
 
         local boss = FindEnemy(CFG["Boss Name"])
         if not boss then
-            -- boss chua spawn / dang o storage -> tien lai gan cho spawn bang requestEntrance + tween
-            local stor = ReplicatedStorage:FindFirstChild(CFG["Boss Name"])
-            local waitPart = stor and stor:FindFirstChild("HumanoidRootPart")
-            ApproachBoss(waitPart)   -- xa thi requestEntrance + tween, khong TP thang
-            -- neu boss bien mat han va ko con o storage -> coi nhu het
+            -- da vao vong farm (boss tung song o Enemies) ma gio khong tim thay boss SONG
+            -- -> boss vua chet/despawn. Cho 1 nhip roi confirm; van khong co -> "Boss gone" de
+            --    main flow FETCH server moi (khong ket vong vi da bo check RS template).
+            task.wait(0.3)
             if not BossPresent() then
-                SetStatus("Boss gone")
+                SetStatus("Boss gone -> will fetch new server")
                 break
             end
         else
@@ -773,9 +862,14 @@ end
 local function FarmBossInServer()
     if busyFarming then return "BUSY" end
     busyFarming = true
+    farmingBoss = true   -- bat equip-keeper: re-equip melee lien tuc trong khi danh boss
     -- boc pcall + reset khoa du co loi hay return giua chung
     local ok, result = pcall(_FarmBossBody)
+    -- cleanup du thoat kieu nao: tat keeper, nha khoa hover, huy tween
+    farmingBoss = false
     busyFarming = false
+    pcall(function() HoverLock(nil) end)  -- nha "lam do" khi roi vong danh boss
+    pcall(function() Tween(false) end)
     if not ok then
         SetStatus("Farm boss error: " .. tostring(result))
         return "ERROR"
