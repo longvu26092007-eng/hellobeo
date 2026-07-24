@@ -17,7 +17,7 @@
 --  CONFIG
 --==================================================================
 getgenv().GhoulConfig = getgenv().GhoulConfig or {
-    ["Team"]                = "Pirates",     -- Team chon khi load
+    ["Team"]                = "Marines",     -- Team chon khi load
     ["Ectoplasm Needed"]    = 100,           -- so Ectoplasm can co truoc khi di boss
     ["Boss API"]            = "http://fi12.bot-hosting.cloud:20112/api/name=cursedcaptain",
     ["Boss Name"]           = "Cursed Captain",
