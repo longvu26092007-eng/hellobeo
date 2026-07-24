@@ -246,26 +246,27 @@ local function IsDied(v)
     return (not ok) or r
 end
 
--- Remote attack (encrypted) - tham khao V3.txt
-local remoteAttack, idremote
-local seed = 0
-pcall(function() seed = ReplicatedStorage.Modules.Net.seed:InvokeServer() end)
-task.spawn(function()
-    pcall(function()
-        for _, v in next, ({ReplicatedStorage.Util, ReplicatedStorage.Common, ReplicatedStorage.Remotes, ReplicatedStorage.Assets, ReplicatedStorage.FX}) do
-            for _, n in next, v:GetChildren() do
-                if n:IsA("RemoteEvent") and n:GetAttribute("Id") then
-                    remoteAttack, idremote = n, n:GetAttribute("Id")
-                end
-            end
-            v.ChildAdded:Connect(function(n)
-                if n:IsA("RemoteEvent") and n:GetAttribute("Id") then
-                    remoteAttack, idremote = n, n:GetAttribute("Id")
-                end
-            end)
-        end
+-- ATTACK SETUP (ban moi - manh & ben hon):
+-- Dung ham noi bo cua game SendHitsToServer (_G) + CombatUtil de hit-detect that,
+-- KHONG phu thuoc remote ma hoa bit32.bxor/seed (cach cu de hong khi game doi seed).
+-- Co fallback RE/RegisterHit neu khong lay duoc SendHit.
+local NET_ = ReplicatedStorage:WaitForChild("Modules"):WaitForChild("Net")
+local RegisterAttack = NET_:FindFirstChild("RE/RegisterAttack")
+local RegisterHit    = NET_:FindFirstChild("RE/RegisterHit")
+local CombatUtil = nil
+pcall(function() CombatUtil = require(ReplicatedStorage.Modules.CombatUtil) end)
+-- SendHitsToServer: ham that game dung de gui hit. Poll toi 30s neu chua co.
+local SendHit = nil
+pcall(function() SendHit = getrenv and getrenv()._G and getrenv()._G.SendHitsToServer end)
+if not SendHit then
+    task.spawn(function()
+        local s = tick()
+        repeat
+            task.wait(0.2)
+            pcall(function() SendHit = getrenv and getrenv()._G and getrenv()._G.SendHitsToServer end)
+        until SendHit or tick() - s > 30
     end)
-end)
+end
 
 local lastEquip = tick()
 local function EquipWeapon(v)
@@ -383,39 +384,58 @@ local function EquipMelee()
     end
 end
 
+-- FastAttack (ban moi - tham khao fast attack (1).txt):
+--   - Gom target trong ban kinh 65 (co the loc theo ten x -> chi danh boss)
+--   - RegisterAttack -> CombatUtil AttackStart/RunHitDetection -> SendHit (fallback RegisterHit)
+--   - task.defer de gui hit sau 1 frame (giong client that) -> it bi phat hien, dame chuan
+-- x = ten quai muon loc (nil = danh tat ca quanh). Vi du boss: FastAttack("Cursed Captain").
 local lastCallFA = tick()
 local function FastAttack(x)
     if not HumanoidRootPart or not Character:FindFirstChildWhichIsA("Humanoid")
         or Character.Humanoid.Health <= 0 or not Character:FindFirstChildWhichIsA("Tool") then return end
     if tick() - lastCallFA <= 0.01 then return end
-    local t = {}
-    for _, u in next, {workspace.Characters, workspace.Enemies} do
-        for _, e in next, u:GetChildren() do
-            local h = e:FindFirstChildWhichIsA("Humanoid")
-            local hrp = e:FindFirstChild("HumanoidRootPart")
-            if e ~= Character and (x and e.Name == x or not x) and h and hrp
-                and not IsDied(e) and (hrp.Position - HumanoidRootPart.Position).Magnitude <= 65 then
-                t[#t + 1] = e
+    lastCallFA = tick()
+
+    local hrp = HumanoidRootPart
+    local list = {}
+    for _, v in next, workspace.Enemies:GetChildren() do
+        if v:IsA("Model") and (not x or v.Name == x) then
+            local h = v:FindFirstChild("Humanoid")
+            local vhrp = v:FindFirstChild("HumanoidRootPart")
+            if h and vhrp and v:FindFirstChild("Head") and h.Health > 0
+                and (vhrp.Position - hrp.Position).Magnitude <= 65 then
+                list[#list + 1] = v
             end
         end
     end
-    if #t == 0 then return end
+    if #list == 0 then return end
+
+    local firstPart = nil
+    local hit2 = {}
+    for i = 1, #list do
+        local v = list[i]
+        if not firstPart then firstPart = v:FindFirstChild("HumanoidRootPart") end
+        hit2[i] = { v:FindFirstChild("Head"), v:FindFirstChild("HumanoidRootPart") }
+    end
+    if not firstPart then return end
+
     local ok = pcall(function()
-        local n = ReplicatedStorage.Modules.Net
-        local h = {[2] = {}}
-        for i = 1, #t do
-            local v = t[i]
-            local part = v:FindFirstChild("Head") or v:FindFirstChild("HumanoidRootPart")
-            if not h[1] then h[1] = part end
-            h[2][#h[2] + 1] = {v, part}
-        end
-        n:FindFirstChild("RE/RegisterAttack"):FireServer()
-        n:FindFirstChild("RE/RegisterHit"):FireServer(unpack(h))
-        cloneref(remoteAttack):FireServer(string.gsub("RE/RegisterHit", ".", function(c)
-            return string.char(bit32.bxor(string.byte(c), math.floor(workspace:GetServerTimeNow() / 10 % 10) + 1))
-        end), bit32.bxor(idremote + 909090, seed * 2), unpack(h))
+        if RegisterAttack then RegisterAttack:FireServer() end
+        task.defer(function()
+            pcall(function() if CombatUtil then CombatUtil:AttackStart(firstPart, 1) end end)
+            pcall(function()
+                if CombatUtil then
+                    CombatUtil:RunHitDetection(firstPart.Parent or firstPart, 1,
+                        { ["_Object"] = { ["Length"] = 0.2, ["IsPlaying"] = true } })
+                end
+            end)
+            if SendHit then
+                SendHit(firstPart, hit2)
+            elseif RegisterHit then
+                RegisterHit:FireServer(firstPart, hit2)
+            end
+        end)
     end)
-    lastCallFA = tick()
     return ok
 end
 
@@ -579,6 +599,57 @@ local function FindEnemy(...)
     return nil
 end
 
+-- Dem quai SONG khop ten trong workspace.Enemies (de biet con quai de giet het chua)
+local function CountEnemies(...)
+    local args = {...}
+    local n = 0
+    for _, m in next, workspace.Enemies:GetChildren() do
+        if m:IsA("Model") and not IsDied(m) then
+            for _, nm in next, args do
+                if m.Name == nm then n = n + 1 break end
+            end
+        end
+    end
+    return n
+end
+
+-- GOM QUAI (tham khao V3 BringMonster): keo cac quai khop ten trong tam ve DUNG 1 vi tri
+-- (vi tri quai dau tien) -> danh 1 phat trung ca cum, khong phai chay long vong tung con.
+-- Chi keo duoc con nao minh la network owner (isnetworkowner).
+local function BringMonster(names, count, radius)
+    count = count or 8
+    radius = radius or 2500
+    pcall(function() setscriptable(LocalPlayer, "SimulationRadius", true) end)
+    pcall(function() sethiddenproperty(LocalPlayer, "SimulationRadius", math.huge) end)
+    if not HumanoidRootPart then return nil end
+    -- names = nil -> gom TAT CA quai; names = {..} -> chi gom quai khop ten
+    local nameSet = nil
+    if type(names) == "table" then
+        nameSet = {}
+        for _, nm in ipairs(names) do nameSet[nm] = true end
+    end
+    local anchor
+    local picked = 0
+    for _, v in next, workspace.Enemies:GetChildren() do
+        if v:IsA("Model") and (nameSet == nil or nameSet[v.Name]) and not IsDied(v) then
+            local hrp = v:FindFirstChild("HumanoidRootPart")
+            if hrp and (HumanoidRootPart.Position - hrp.Position).Magnitude <= radius then
+                anchor = anchor or hrp.CFrame
+                if not isnetworkowner or isnetworkowner(hrp) then
+                    pcall(function()
+                        hrp.AssemblyLinearVelocity = Vector3.zero
+                        hrp.AssemblyAngularVelocity = Vector3.zero
+                        hrp.CFrame = anchor * CFrame.new(picked * 2, 0, 0)
+                    end)
+                end
+                picked = picked + 1
+                if picked >= count then break end
+            end
+        end
+    end
+    return anchor
+end
+
 --==================================================================
 --  SEA / MATERIAL HELPERS
 --==================================================================
@@ -729,25 +800,40 @@ local function FarmEctoplasm()
     SetStatus("Farming Ectoplasm...")
     -- BAT BUOC len Cursed Ship truoc: quai Ectoplasm o ngay tren thuyen nay
     EnsureOnCursedShip()
+    -- bat equip-keeper (tai su dung co farmingBoss) de luon cam melee khi farm ecto
+    farmingBoss = true
     while farmingMaterial do
         if ShouldStop() then farmingMaterial = false break end
         if GetEctoplasm() >= CFG["Ectoplasm Needed"] then break end
-        pcall(function()
-            EquipMelee()   -- keeper nen cung lo, day chi de chac chan cam melee
-            local mob = FindEnemy(table.unpack(CFG["Ship Mobs"]))
-            if mob and mob:FindFirstChild("HumanoidRootPart") then
-                -- CHECK gan quai chua: xa -> requestEntrance ra thuyen + tween; gan -> danh
-                local near = ApproachShip(mob.HumanoidRootPart.CFrame)
-                if near then
-                    FastAttack(mob.Name)
-                end
+
+        local mob = FindEnemy(table.unpack(CFG["Ship Mobs"]))
+        if not mob or not mob:FindFirstChild("HumanoidRootPart") then
+            -- HET quai (tren toan Enemies) -> nha hover, tween ve khu farm cho quai spawn.
+            -- Chi den day khi da giet SACH quai -> dung y "giet het moi doi bai".
+            HoverLock(nil)
+            ApproachShip(CFG["Ectoplasm MPos"])
+            task.wait(0.15)
+        else
+            local mhrp = mob.HumanoidRootPart
+            local dist = (HumanoidRootPart.Position - mhrp.Position).Magnitude
+            if dist > CFG["Boss Near Dist"] then
+                -- chua toi cum quai -> nha hover, tween lai gan (khong TP)
+                HoverLock(nil)
+                ApproachShip(mhrp.CFrame)
             else
-                -- khong thay quai -> tien ve khu farm (xa thi entrance ra thuyen + tween)
-                ApproachShip(CFG["Ectoplasm MPos"])
+                -- DA GAN cum quai -> HOVER co dinh (nhu farm boss => KHONG giat len xuong),
+                -- GOM quai ship lai 1 cho, roi danh ca cum.
+                local h = tonumber(CFG["Hover Height"]) or 18
+                HoverLock(mhrp.CFrame * CFrame.new(0, h, 0))   -- pin cung -> muot, khong rung
+                EquipMelee()
+                BringMonster(CFG["Ship Mobs"], 6)  -- gom quai Ship lai 1 cho (tham khao V3), khong keo nham boss
+                FastAttack()                  -- danh TAT CA quai quanh (gom cluster ecto)
             end
-        end)
-        task.wait()   -- moi frame (~60/s) thay vi 0.1s (10/s) -> danh nhanh hon nhieu
+        end
+        task.wait()   -- moi frame (~60/s) -> danh nhanh
     end
+    HoverLock(nil)        -- nha khoa hover khi xong
+    farmingBoss = false   -- tat keeper
     farmingMaterial = false
     SetStatus("Ectoplasm ready: " .. tostring(GetEctoplasm()))
 end
