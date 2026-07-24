@@ -1861,12 +1861,20 @@ GhoulModuleRun = function()
     end
 
     -- ==== helpers Ghoul-rieng ====
+    -- GetEcto: InvokeServer -> CACHE 1s. Vong lap moi frame goi ham nay se KHONG
+    -- block cho server moi frame nua (truoc day block -> cham/dung im).
+    local _ectoT, _ectoV = 0, 0
+    local _torchInvT, _torchInvV = 0, false
     local function GetEcto()
+        if tick() - _ectoT < 1 then return _ectoV end
+        _ectoT = tick()
         local ok, n = pcall(function() return tonumber(COMMF_:InvokeServer("Ectoplasm", "Check")) end)
-        return ok and (n or 0) or 0
+        if ok and n then _ectoV = n end
+        return _ectoV
     end
     local function IsGhoul() return getCurrentRaceName():lower() == "ghoul" end
     local function HasTorch()
+        -- scan Backpack/Character la LOCAL (nhanh) -> luon check truoc
         for _, cont in next, {LocalPlayer.Backpack, Character} do
             if cont then
                 for _, x in next, cont:GetChildren() do
@@ -1876,13 +1884,18 @@ GhoulModuleRun = function()
                 end
             end
         end
-        local ok, inv = pcall(function() return COMMF_:InvokeServer("getInventory") end)
-        if ok and type(inv) == "table" then
-            for _, v in pairs(inv) do
-                if type(v) == "table" and v.Name and tostring(v.Name):find("Hellfire") then return true end
+        -- fallback getInventory la SERVER call -> throttle 2s (khong goi moi frame)
+        if tick() - _torchInvT >= 2 then
+            _torchInvT = tick()
+            _torchInvV = false
+            local ok, inv = pcall(function() return COMMF_:InvokeServer("getInventory") end)
+            if ok and type(inv) == "table" then
+                for _, v in pairs(inv) do
+                    if type(v) == "table" and v.Name and tostring(v.Name):find("Hellfire") then _torchInvV = true break end
+                end
             end
         end
-        return false
+        return _torchInvV
     end
     -- boss/quai CO THUC SU song trong server hien tai? Chi tin workspace.Enemies
     -- (KHONG scan ReplicatedStorage: template luon ton tai -> false positive).
@@ -1902,10 +1915,41 @@ GhoulModuleRun = function()
         return n
     end
 
-    -- da o tren/gan Cursed Ship chua? Chua -> requestEntrance len.
+    -- forward-declare: NearReferenceOnShip goi FindNPC (dinh nghia ben duoi) -> phai khai bao truoc
+    local FindNPC
+
+    -- da o tren/gan Cursed Ship chua?
+    -- KHONG chi dua toa do SHIP_CENTER (cung, de lech -> ket "Not on ship" du da len).
+    -- Coi la DA tren ship neu co DAU HIEU THUC TE quanh minh:
+    --   gan SHIP_CENTER  HOAC  thay Ship Mob / boss / NPC Experimic trong Enemies/workspace gan.
+    local function NearReferenceOnShip()
+        if not HumanoidRootPart then return false end
+        local pos = HumanoidRootPart.Position
+        -- 1) Ship Mob hoac boss song gan (trong Enemies)
+        local en = workspace:FindFirstChild("Enemies")
+        if en then
+            for _, m in next, en:GetChildren() do
+                if m:IsA("Model") then
+                    local isShipMob = (m.Name == BOSS_NAME)
+                    if not isShipMob then
+                        for _, nm in ipairs(SHIP_MOBS) do if m.Name == nm then isShipMob = true break end end
+                    end
+                    if isShipMob then
+                        local hrp = m:FindFirstChild("HumanoidRootPart")
+                        if hrp and (hrp.Position - pos).Magnitude <= 800 then return true end
+                    end
+                end
+            end
+        end
+        -- 2) NPC Experimic gan
+        local _, npcPart = FindNPC()
+        if npcPart and (npcPart.Position - pos).Magnitude <= 800 then return true end
+        return false
+    end
     local function OnShip()
         if not HumanoidRootPart then return false end
-        return (HumanoidRootPart.Position - SHIP_CENTER).Magnitude <= SHIP_RADIUS
+        if (HumanoidRootPart.Position - SHIP_CENTER).Magnitude <= SHIP_RADIUS then return true end
+        return NearReferenceOnShip()
     end
     local function EnsureOnShip()
         if OnShip() then return true end
@@ -1924,7 +1968,8 @@ GhoulModuleRun = function()
     end
 
     -- tim NPC Experimic tren ship theo tu khoa ten
-    local function FindNPC()
+    -- (gan cho forward-declare o tren -> NearReferenceOnShip dung duoc)
+    FindNPC = function()
         local containers = {}
         for _, nm in ipairs({"NPCs", "Npcs", "NPC"}) do
             local f = workspace:FindFirstChild(nm)
