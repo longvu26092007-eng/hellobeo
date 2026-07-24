@@ -694,7 +694,7 @@ task.spawn(function()
         SetStatus("Ectoplasm enough (" .. tostring(GetEctoplasm()) .. ")")
     end
 
-    -- STEP 5 + 6: fetch server, spam join, detect+farm boss, check torch
+    -- STEP 5 + 6: detect+farm boss, check torch. Fetch server CHI khi server hien tai KHONG co boss.
     while not raceDone do
         -- dam bao van du nguyen lieu (co the bi tru khi thu doi)
         if GetEctoplasm() < CFG["Ectoplasm Needed"] then
@@ -703,6 +703,16 @@ task.spawn(function()
             FarmEctoplasm()
         end
 
+        -- CHECK BOSS TRUOC KHI FETCH: neu server dang dung da co boss -> farm luon, khoi hop.
+        if BossPresent() then
+            SetStatus("Boss present in CURRENT server -> farm now (no fetch)")
+            local r = FarmBossInServer()
+            if r == "DONE" or raceDone then break end
+            -- farm xong (boss chet / mat) -> vong lai check tiep, neu het boss se fetch
+        end
+
+        -- server hien tai khong co boss -> fetch danh sach server de hop di tim
+        if raceDone then break end
         local servers = FetchBossServers()
         if #servers == 0 then
             SetStatus("No servers from API, retry in 3s")
