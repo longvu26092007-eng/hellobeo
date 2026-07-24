@@ -481,10 +481,9 @@ end
 
 local RaceFlow = {
     CyborgOwnedRuntime = false,
-    BananaStarted = false,
-    BananaRunning = false,
-    BananaLastAttempt = 0,
-    BananaLastError = nil,
+    GhoulStarted = false,     -- da khoi dong module Ghoul chua (chay 1 lan)
+    GhoulRunning = false,     -- module Ghoul dang chay
+    GhoulStatus = "idle",     -- trang thai hien tai cua module Ghoul (hien UI)
     Completed = safeReadFile(mainfile) == "Completed-done",
 }
 
@@ -517,8 +516,7 @@ local function hasCyborgV1()
     return false
 end
 
--- Theo luồng đã chốt: Banana hoàn tất khi race hiện tại đổi sang Ghoul.
--- Không gọi Ectoplasm Change trong checker và không đoán từ kết quả mơ hồ.
+-- Ghoul hoan tat khi race hien tai == "Ghoul".
 local function hasGhoulV1()
     return getCurrentRaceName():lower() == "ghoul"
 end
@@ -537,60 +535,43 @@ local function writeCompletedDone()
     return false
 end
 
-local function startBananaGetGhoul()
+-- Module Ghoul (build ben duoi - dinh nghia sau vi can dung FastAttack/BringMonster/Tween...).
+-- Forward-declare: GhoulModuleRun se duoc gan o phan MODULE GHOUL phia duoi.
+GhoulModuleRun = GhoulModuleRun or nil
+
+-- Khoi dong module Ghoul tu-build (thay cho BananaHub):
+--   farm Ectoplasm -> farm boss Cursed Captain (hop API) -> mua qua NPC Experimic.
+-- Chi chay khi da co Cyborg V1, chua thanh Ghoul, va chay 1 lan duy nhat.
+local function startGhoulModule()
     if RaceFlow.Completed or hasGhoulV1() then
         return false
     end
 
-    -- Chỉ gọi Banana khi player đang dùng Cyborg, đúng yêu cầu.
+    -- Chi doi sang Ghoul khi dang la Cyborg (dung y: Cyborg xong -> doi luon Ghoul).
     if getCurrentRaceName():lower() ~= "cyborg" then
         return false
     end
 
-    if RaceFlow.BananaRunning or RaceFlow.BananaStarted then
+    if RaceFlow.GhoulRunning or RaceFlow.GhoulStarted then
         return true
     end
 
-    if tick() - RaceFlow.BananaLastAttempt < 15 then
+    if type(GhoulModuleRun) ~= "function" then
+        RaceFlow.GhoulStatus = "module chua san sang"
         return false
     end
 
-    local env = getgenv()
-    if type(env.Key) ~= "string" or env.Key == "" then
-        RaceFlow.BananaLastError = "getgenv().Key is empty"
-        return false
-    end
-
-    RaceFlow.BananaLastAttempt = tick()
-    RaceFlow.BananaStarted = true
-    RaceFlow.BananaRunning = true
-    RaceFlow.BananaLastError = nil
+    RaceFlow.GhoulStarted = true
+    RaceFlow.GhoulRunning = true
+    RaceFlow.GhoulStatus = "starting"
 
     task.spawn(function()
-        local ok, err = xpcall(function()
-            env.Config = {
-                ["Hop Server Get Ghoul"] = true,
-                ["Auto Get Ghoul"] = true,
-            }
-
-            local compiler = loadstring or load
-            assert(type(compiler) == "function", "loadstring/load is unavailable")
-
-            local bananaUrl = "https:" .. "//raw.githubusercontent.com/obiiyeuem/vthangsitink/main/BananaHub.lua"
-            local source = game:HttpGet(bananaUrl)
-            local runner, compileError = compiler(source)
-            assert(runner, tostring(compileError))
-            runner()
-        end, function(message)
-            return tostring(message)
-        end)
-
-        RaceFlow.BananaRunning = false
-
+        local ok, err = xpcall(GhoulModuleRun, function(m) return tostring(m) end)
+        RaceFlow.GhoulRunning = false
         if not ok then
-            RaceFlow.BananaStarted = false
-            RaceFlow.BananaLastError = err
-            warn("[Banana Get Ghoul] " .. tostring(err))
+            RaceFlow.GhoulStarted = false   -- cho phep thu lai
+            RaceFlow.GhoulStatus = "error: " .. tostring(err)
+            warn("[Ghoul Module] " .. tostring(err))
         end
     end)
 
@@ -857,14 +838,13 @@ task.spawn(function()
             or ReplicatedStorage:FindFirstChild("Order")
 
         ItemLabel.Text = string.format(
-            "State: %s | Fist: %s | Microchip: %s | Core Brain: %s | Order: %s\nBanana: %s%s",
+            "State: %s | Fist: %s | Microchip: %s | Core Brain: %s | Order: %s\nGhoul module: %s",
             tostring(CyborgBlockPartUnlocked or readMainState()),
             hasToolForUI("Fist of Darkness") and "yes" or "no",
             hasToolForUI("Microchip") and "yes" or "no",
             hasToolForUI("Core Brain") and "yes" or "no",
             orderExists and "yes" or "no",
-            RaceFlow.BananaRunning and "running" or (RaceFlow.BananaStarted and "started" or "idle"),
-            RaceFlow.BananaLastError and (" | error: " .. tostring(RaceFlow.BananaLastError)) or ""
+            tostring(RaceFlow.GhoulStatus or "idle")
         )
 
         StatusLabel.Text = "Status: " .. tostring(DashboardState.Status)
@@ -1580,26 +1560,26 @@ task.spawn(function()
                 return
             end
 
-            -- Sau khi Banana đổi race sang Ghoul, marker Cyborg đã lưu từ trước
-            -- sẽ cho phép xác nhận đủ cả hai race và ghi file kết quả cuối.
+            -- Sau khi module Ghoul doi race sang Ghoul, marker Cyborg da luu tu truoc
+            -- se cho phep xac nhan du ca hai race va ghi file ket qua cuoi.
             if writeCompletedDone() then
                 Tween(false)
                 SetText("Completed-done | Cyborg V1 + Ghoul V1 confirmed")
                 return
             end
 
+            -- CO Cyborg V1 roi -> DOI LUON sang Ghoul bang module tu-build
+            -- (farm ecto -> boss Cursed Captain -> NPC Experimic mua Ectoplasm/Buy/4).
             if currentRace == "Cyborg" then
                 markCyborgOwned()
-                Tween(false)
-
-                if startBananaGetGhoul() then
-                    SetText("Cyborg V1 confirmed | Running Banana Get Ghoul...")
-                elseif RaceFlow.BananaLastError then
-                    SetText("Cyborg V1 confirmed | Banana waiting: " .. tostring(RaceFlow.BananaLastError))
-                else
-                    SetText("Cyborg V1 confirmed | Banana Get Ghoul already started")
+                -- Khoi dong module Ghoul 1 lan. QUAN TRONG: khi module dang chay thi
+                -- main loop TUYET DOI khong dung toi chuyen dong (KHONG Tween(false)),
+                -- vi module dung Tween de di chuyen -> neu main loop huy moi 0.5s se ket.
+                if not RaceFlow.GhoulStarted then
+                    Tween(false)          -- chi huy tween Cyborg 1 lan truoc khi giao cho module
+                    startGhoulModule()
                 end
-
+                -- module tu lo toan bo flow + status; main loop chi doi, khong can thiep
                 return
             end
 
@@ -1822,7 +1802,10 @@ task.spawn(function()
                 if not CollectionService:HasTag(Character, v) then
                     if LocalPlayer.Data.Beli.Value >= ((function(t)
                         return t == "Geppo" and 1e4 or t == "Buso" and 2.5e4 or t == "Soru" and 1e5 or 0
-                    end)(v)) then SetText("Buy Abilies: ".. v) COMMF_:InvokeServer("BuyHaki", v)
+                    end)(v)) then
+                        -- KHONG de status khi module Ghoul dang chay (tranh nhap nhay UI)
+                        if not RaceFlow.GhoulRunning then SetText("Buy Abilies: ".. v) end
+                        COMMF_:InvokeServer("BuyHaki", v)
                     end
                 end
             end
@@ -1843,3 +1826,297 @@ GuiService.ErrorMessageChanged:Connect(newcclosure(function()
         while true do ReplicatedStorage:WaitForChild("__ServerBrowser"):InvokeServer('teleport', JobId) task.wait(5) end
     end
 end))
+
+--==================================================================
+--  MODULE GHOUL  (tu-build, thay BananaHub)
+--  Flow (chi chay khi da co Cyborg V1 -> doi luon sang Ghoul):
+--    1. Du Ectoplasm chua? thieu -> farm quai Ship tren Cursed Ship (KillMonster)
+--    2. Co Hellfire Torch chua? chua -> farm boss Cursed Captain (hop API tim server)
+--    3. Co Torch -> len Cursed Ship, toi sat NPC Experimic -> Ectoplasm/BuyCheck + Buy(4)
+--  DUNG CHUNG helper Kaitun: KillMonster (gom+FastAttack+Tween+Ken), EquipWeapon,
+--    CheckTool, IsDied, Tween, HopServer, HumanoidRootPart, Character, COMMF_.
+--  Remote mua Ghoul (bat duoc tu hook khi bam tay): CommF_("Ectoplasm","Buy",4).
+--==================================================================
+GhoulModuleRun = function()
+    local GC = getgenv().GhoulConfig or {}
+    local ECTO_NEEDED   = tonumber(GC["Ectoplasm Needed"]) or 100
+    local RACE_ID       = tonumber(GC["Ghoul Race Id"]) or 4
+    local BOSS_NAME     = GC["Boss Name"] or "Cursed Captain"
+    local BOSS_API      = GC["Boss API"] or "http://fi12.bot-hosting.cloud:20112/api/name=cursedcaptain"
+    local FETCH_COUNT   = tonumber(GC["Fetch Count"]) or 10
+    local HOP_DELAY     = tonumber(GC["Hop Delay"]) or 1.5
+    local DETECT_TO     = tonumber(GC["Detect Timeout"]) or 20
+    local SHIP_ENTRANCE = GC["Ship Entrance"] or Vector3.new(923.21252441406, 126.9760055542, 32852.83203125)
+    local SHIP_CENTER   = GC["Ship Center"] or Vector3.new(911.35827636719, 125.95812988281, 33159.5390625)
+    local SHIP_RADIUS   = tonumber(GC["Ship Radius"]) or 3000
+    local SHIP_MOBS     = GC["Ship Mobs"] or {"Ship Deckhand", "Ship Engineer", "Ship Steward", "Ship Officer"}
+    local NPC_KEYWORDS  = GC["Race NPC Keywords"] or {"experim", "ghoul", "ecto"}
+    local NPC_POS       = GC["Race NPC Pos"]
+    local NPC_DIST      = tonumber(GC["Race NPC Dist"]) or 12
+
+    local function GStatus(t)
+        RaceFlow.GhoulStatus = tostring(t)
+        SetText("Ghoul: " .. tostring(t))
+        print("[Ghoul] " .. tostring(t))
+    end
+
+    -- ==== helpers Ghoul-rieng ====
+    local function GetEcto()
+        local ok, n = pcall(function() return tonumber(COMMF_:InvokeServer("Ectoplasm", "Check")) end)
+        return ok and (n or 0) or 0
+    end
+    local function IsGhoul() return getCurrentRaceName():lower() == "ghoul" end
+    local function HasTorch()
+        for _, cont in next, {LocalPlayer.Backpack, Character} do
+            if cont then
+                for _, x in next, cont:GetChildren() do
+                    if x:IsA("Tool") and (x.Name == "Hellfire Torch" or x.Name:find("Hellfire")) then
+                        return true
+                    end
+                end
+            end
+        end
+        local ok, inv = pcall(function() return COMMF_:InvokeServer("getInventory") end)
+        if ok and type(inv) == "table" then
+            for _, v in pairs(inv) do
+                if type(v) == "table" and v.Name and tostring(v.Name):find("Hellfire") then return true end
+            end
+        end
+        return false
+    end
+    -- boss/quai CO THUC SU song trong server hien tai? Chi tin workspace.Enemies
+    -- (KHONG scan ReplicatedStorage: template luon ton tai -> false positive).
+    local function AliveInEnemies(name)
+        local m = workspace.Enemies:FindFirstChild(name)
+        return m and not IsDied(m) and m or nil
+    end
+    local function CountShipMobsAlive()
+        local n = 0
+        for _, m in next, workspace.Enemies:GetChildren() do
+            if m:IsA("Model") and not IsDied(m) then
+                for _, nm in ipairs(SHIP_MOBS) do
+                    if m.Name == nm then n = n + 1 break end
+                end
+            end
+        end
+        return n
+    end
+
+    -- da o tren/gan Cursed Ship chua? Chua -> requestEntrance len.
+    local function OnShip()
+        if not HumanoidRootPart then return false end
+        return (HumanoidRootPart.Position - SHIP_CENTER).Magnitude <= SHIP_RADIUS
+    end
+    local function EnsureOnShip()
+        if OnShip() then return true end
+        GStatus("Not on Cursed Ship -> requestEntrance")
+        for _ = 1, 15 do
+            if getgenv().GHOUL_STOP then return false end
+            if OnShip() then return true end
+            pcall(function() COMMF_:InvokeServer("requestEntrance", SHIP_ENTRANCE) end)
+            task.wait(1)
+            if not OnShip() and HumanoidRootPart then
+                Tween(CFrame.new(SHIP_CENTER) * CFrame.new(0, 12, 0))
+                task.wait(0.5)
+            end
+        end
+        return OnShip()
+    end
+
+    -- tim NPC Experimic tren ship theo tu khoa ten
+    local function FindNPC()
+        local containers = {}
+        for _, nm in ipairs({"NPCs", "Npcs", "NPC"}) do
+            local f = workspace:FindFirstChild(nm)
+            if f then containers[#containers + 1] = f end
+        end
+        if #containers == 0 then containers = {workspace} end
+        for _, cont in ipairs(containers) do
+            for _, m in ipairs(cont:GetChildren()) do
+                if m:IsA("Model") then
+                    local lname = m.Name:lower()
+                    for _, kw in ipairs(NPC_KEYWORDS) do
+                        if lname:find(kw) then
+                            local part = m:FindFirstChild("HumanoidRootPart") or m:FindFirstChildWhichIsA("BasePart")
+                            if part then return m, part end
+                        end
+                    end
+                end
+            end
+        end
+        return nil, nil
+    end
+    local function ApproachNPC()
+        if not HumanoidRootPart then return false end
+        local _, part = FindNPC()
+        local npcCF = part and part.CFrame
+        if not npcCF and NPC_POS then
+            npcCF = (typeof(NPC_POS) == "CFrame") and NPC_POS or CFrame.new(NPC_POS)
+        end
+        if not npcCF then GStatus("NPC Experimic not found on ship") return false end
+        if (HumanoidRootPart.Position - npcCF.Position).Magnitude <= NPC_DIST then return true end
+        GStatus("Move to Experimic NPC")
+        Tween(npcCF * CFrame.new(0, 3, 4))
+        task.wait(0.4)
+        return (HumanoidRootPart.Position - npcCF.Position).Magnitude <= NPC_DIST
+    end
+
+    -- mua Ghoul: len ship -> sat NPC -> BuyCheck + Buy(4). Remote that tu hook.
+    local function TryBuyGhoul()
+        if IsGhoul() then return true end
+        if not HasTorch() then return false end
+        EnsureOnShip()
+        local near = false
+        for _ = 1, 8 do
+            if getgenv().GHOUL_STOP then return false end
+            if ApproachNPC() then near = true break end
+            task.wait(0.4)
+        end
+        if not near then GStatus("Cannot reach Experimic -> retry") return false end
+        GStatus("Near Experimic + Torch -> buy Ghoul")
+        local rC, rB
+        pcall(function()
+            rC = COMMF_:InvokeServer("Ectoplasm", "BuyCheck", RACE_ID)
+            task.wait(0.6)
+            rB = COMMF_:InvokeServer("Ectoplasm", "Buy", RACE_ID)
+        end)
+        print("[Ghoul] BuyCheck ->", tostring(rC), "| Buy ->", tostring(rB))
+        task.wait(1.2)
+        return IsGhoul()
+    end
+
+    -- ==== farm Ectoplasm: quai Ship o tren Cursed Ship, dung KillMonster (proven) ====
+    local function FarmEcto()
+        GStatus("Farm Ectoplasm...")
+        EnsureOnShip()
+        while not getgenv().GHOUL_STOP do
+            if IsGhoul() or HasTorch() then break end
+            if GetEcto() >= ECTO_NEEDED then break end
+            if CountShipMobsAlive() == 0 then
+                -- het quai -> ve tam thuyen cho spawn (chi den day khi giet sach)
+                Tween(CFrame.new(SHIP_CENTER) * CFrame.new(0, 12, 0))
+                task.wait(0.3)
+            else
+                EquipWeapon("Melee")
+                for _, nm in ipairs(SHIP_MOBS) do
+                    if AliveInEnemies(nm) then KillMonster(nm) end
+                end
+                GStatus("Farm Ectoplasm " .. GetEcto() .. "/" .. ECTO_NEEDED)
+            end
+            task.wait()
+        end
+        Tween(false)
+        GStatus("Ectoplasm ready: " .. GetEcto())
+    end
+
+    -- ==== fetch server co boss (API cursedcaptain) + join bang __ServerBrowser ====
+    local function HttpReq(url)
+        local req = request or http_request or (syn and syn.request) or (fluxus and fluxus.request)
+        if type(req) ~= "function" then return nil end
+        for _ = 1, 3 do
+            local ok, res = pcall(function()
+                return req({ Url = url, Method = "GET",
+                    Headers = { ["Accept"] = "application/json", ["User-Agent"] = "Roblox/WinInet" } })
+            end)
+            if ok and type(res) == "table" then return res.Body or res.body end
+            task.wait(1.5)
+        end
+        return nil
+    end
+    local function FetchBossServers()
+        GStatus("Fetch boss servers...")
+        local body = HttpReq(BOSS_API)
+        if not body then return {} end
+        local data
+        pcall(function() data = HttpService:JSONDecode(body) end)
+        if type(data) ~= "table" then return {} end
+        local list = data.data or data.servers or data
+        if type(list) ~= "table" then return {} end
+        local cur = tonumber(game.PlaceId)
+        local out = {}
+        for _, v in ipairs(list) do
+            if type(v) == "table" then
+                local jobId = v.jobid or v.JobId or v.id
+                local placeId = tonumber(v.placeid or v.PlaceId or v.place)
+                -- chi lay server TRUNG dung PlaceId dang dung (tranh Error 773 restricted)
+                if jobId and placeId and placeId == cur and tostring(jobId) ~= tostring(game.JobId) then
+                    out[#out + 1] = tostring(jobId)
+                    if #out >= FETCH_COUNT then break end
+                end
+            end
+        end
+        GStatus("API: " .. #out .. " server(s)")
+        return out
+    end
+    local function JoinJob(jobId)
+        if not jobId or tostring(jobId) == tostring(game.JobId) then return end
+        -- __ServerBrowser: teleport TRONG place hien tai (giu PlaceId) -> tranh 773
+        local sb = ReplicatedStorage:FindFirstChild("__ServerBrowser")
+        if sb then pcall(function() sb:InvokeServer("teleport", tostring(jobId)) end) end
+    end
+
+    -- ==== farm boss Cursed Captain: len ship, co boss thi KillMonster; khong thi hop ====
+    local function FarmBoss()
+        -- len ship truoc (boss o tren thuyen; vua join/travel co the chua load Enemies)
+        EnsureOnShip()
+        task.wait(0.5)
+
+        -- detect boss trong server hien tai
+        local deadline = tick() + DETECT_TO
+        while tick() < deadline and not getgenv().GHOUL_STOP do
+            if HasTorch() then return end
+            if AliveInEnemies(BOSS_NAME) then break end
+            task.wait(0.5)
+        end
+
+        if AliveInEnemies(BOSS_NAME) then
+            GStatus("Boss found -> farm " .. BOSS_NAME)
+            EquipWeapon("Melee")
+            repeat
+                if getgenv().GHOUL_STOP then return end
+                KillMonster(BOSS_NAME)
+                if HasTorch() then Tween(false) return end
+            until not AliveInEnemies(BOSS_NAME) or getgenv().GHOUL_STOP
+            Tween(false)
+            -- boss chet: doi vai giay xem torch co roi vao inv khong
+            for _ = 1, 6 do
+                if HasTorch() then return end
+                task.wait(0.5)
+            end
+        else
+            -- khong co boss -> hop server tim (API cursedcaptain)
+            GStatus("No boss here -> fetch & hop")
+            local servers = FetchBossServers()
+            if #servers == 0 then task.wait(3) return end
+            for _, jid in ipairs(servers) do
+                if getgenv().GHOUL_STOP or HasTorch() then break end
+                GStatus("Join server to find boss...")
+                JoinJob(jid)
+                task.wait(HOP_DELAY)
+            end
+            task.wait(2)
+        end
+    end
+
+    -- ==== MAIN FLOW module Ghoul ====
+    GStatus("start")
+    while not getgenv().GHOUL_STOP do
+        if IsGhoul() then GStatus("DONE - da thanh Ghoul") return end
+
+        -- co Torch -> mua race ngay (khong farm/hop nua)
+        if HasTorch() then
+            if GetEcto() < ECTO_NEEDED then FarmEcto() end
+            if TryBuyGhoul() then GStatus("DONE - da thanh Ghoul") return end
+            task.wait(1.5)
+        else
+            -- chua Torch: du ecto chua? thieu -> farm; du -> di danh boss lay Torch
+            if GetEcto() < ECTO_NEEDED then
+                FarmEcto()
+            else
+                FarmBoss()
+            end
+        end
+        task.wait()
+    end
+    GStatus("stopped")
+end
