@@ -1,10 +1,13 @@
 -- ============================================================
--- MM2 SUMMER 2026 KAITUN - SAFE MOVEMENT FIX
--- Fix Error 267 "Invalid position":
---   * Bỏ toàn bộ teleport root.CFrame tới Coin
---   * Bỏ noclip toàn thân
---   * Di chuyển bằng PathfindingService + Humanoid:MoveTo()
---   * Chỉ touch Coin khi nhân vật đã ở gần
+-- MM2 SUMMER 2026 KAITUN - NEAREST COIN + SMART PATHFINDING v2
+--   * Chọn Coin gần nhất thay vì FIFO
+--   * Chỉ xét Coin trong bán kính cấu hình
+--   * Kiểm tra đường đi trước khi chọn Coin
+--   * Thử nhiều điểm tiếp cận quanh Coin
+--   * Tự tính lại đường khi bị chắn hoặc đứng kẹt
+--   * Blacklist tạm Coin không thể tới
+--   * Tăng WalkSpeed có giới hạn
+--   * Không teleport HumanoidRootPart bằng CFrame
 -- Có thể cấu hình ngoài bằng getgenv().MM2_KAITUN_CONFIG
 -- ============================================================
 
@@ -64,15 +67,25 @@ local DEFAULT_CONFIG = {
     TouchVerticalOffsets = {0, -0.8, 0.8, 0},
     FallbackScanDelay = 2,
 
-    -- SAFE MOVEMENT: không gán HumanoidRootPart.CFrame vào Coin.
+    -- SMART COIN SELECTION + PATHFINDING
     UseSafeMovement = true,
-    ArrivalDistance = 6,
+    CoinWalkSpeed = 22,             -- Khuyến nghị 20-24.
+    CoinScanRadius = 220,           -- Chỉ ưu tiên Coin trong bán kính này.
+    AllowFarCoinFallback = false,   -- false = không chạy tới Coin quá xa.
+    NearestCoinCandidates = 6,      -- Số Coin gần nhất được kiểm tra đường.
+    CoinBlacklistTime = 12,         -- Tạm bỏ Coin không có đường đi.
+    ApproachRadius = 6,             -- Thử đứng quanh Coin trong bán kính này.
+    ArrivalDistance = 5.5,
     TouchDistance = 9,
+    WaypointArrivalDistance = 3.5,
     WaypointTimeout = 4.5,
-    DirectMoveTimeout = 10,
-    PathRecomputeAttempts = 2,
-    PathWaypointSpacing = 5,
-    MaxCoinDistance = 0, -- 0 = không giới hạn khoảng cách.
+    DirectMoveTimeout = 6,
+    PathRecomputeAttempts = 3,
+    PathWaypointSpacing = 3,
+    StuckCheckInterval = 0.15,
+    StuckTimeout = 1.6,
+    StuckMinProgress = 1.1,
+    MaxCoinDistance = 0,            -- 0 = dùng CoinScanRadius làm giới hạn.
 
     AntiAFK = true,
     ShowStatus = true,
@@ -577,6 +590,8 @@ local CoinQueue = {}
 local CoinQueueHead = 1
 local QueuedTargets = setmetatable({}, { __mode = "k" })
 local RetryCount = setmetatable({}, { __mode = "k" })
+local CoinBlacklist = setmetatable({}, { __mode = "k" })
+local buildMovePlan
 
 local function allowedCoinType(coinType)
     return Config.AllowedCoinTypes
@@ -652,20 +667,159 @@ local function enqueueCoin(instance)
     })
 end
 
-local function popCoin()
-    while CoinQueueHead <= #CoinQueue do
-        local entry = CoinQueue[CoinQueueHead]
-        CoinQueueHead += 1
+local function blacklistCoin(target, seconds)
+    if not target then
+        return
+    end
 
-        if entry and entry.Target then
-            QueuedTargets[entry.Target] = nil
-            return entry
+    CoinBlacklist[target] = os.clock()
+        + math.max(1, tonumber(seconds) or tonumber(Config.CoinBlacklistTime) or 12)
+end
+
+local function isCoinBlacklisted(target)
+    local expiresAt = target and CoinBlacklist[target]
+    if not expiresAt then
+        return false
+    end
+
+    if os.clock() >= expiresAt then
+        CoinBlacklist[target] = nil
+        return false
+    end
+
+    return true
+end
+
+local function removeQueueIndex(index)
+    local entry = CoinQueue[index]
+    table.remove(CoinQueue, index)
+
+    if entry and entry.Target then
+        QueuedTargets[entry.Target] = nil
+    end
+
+    return entry
+end
+
+local function pruneCoinQueue()
+    for index = #CoinQueue, 1, -1 do
+        local entry = CoinQueue[index]
+        if not entry
+            or not isCoinUsable(entry.Target, entry.Visual, entry.CoinType)
+        then
+            removeQueueIndex(index)
+        end
+    end
+end
+
+local function popCoin()
+    local _, root = getCharacterParts()
+    if not root then
+        return nil
+    end
+
+    pruneCoinQueue()
+
+    local scanRadius = math.max(20, tonumber(Config.CoinScanRadius) or 220)
+    local maxDistance = tonumber(Config.MaxCoinDistance) or 0
+    if maxDistance > 0 then
+        scanRadius = math.min(scanRadius, maxDistance)
+    end
+
+    local candidates = {}
+    local farCandidates = {}
+
+    for index, entry in ipairs(CoinQueue) do
+        local target = entry and entry.Target
+        if target
+            and target.Parent
+            and not isCoinBlacklisted(target)
+            and isCoinUsable(target, entry.Visual, entry.CoinType)
+        then
+            local distance = (root.Position - target.Position).Magnitude
+            local item = {
+                Index = index,
+                Entry = entry,
+                Distance = distance,
+            }
+
+            if distance <= scanRadius then
+                table.insert(candidates, item)
+            else
+                table.insert(farCandidates, item)
+            end
         end
     end
 
-    CoinQueue = {}
-    CoinQueueHead = 1
-    return nil
+    local function sortNearest(list)
+        table.sort(list, function(a, b)
+            if a.Distance == b.Distance then
+                return tostring(a.Entry.Target) < tostring(b.Entry.Target)
+            end
+            return a.Distance < b.Distance
+        end)
+    end
+
+    sortNearest(candidates)
+
+    if #candidates == 0 and Config.AllowFarCoinFallback == true then
+        sortNearest(farCandidates)
+        candidates = farCandidates
+    end
+
+    if #candidates == 0 then
+        return nil
+    end
+
+    local checks = math.max(1, tonumber(Config.NearestCoinCandidates) or 6)
+    checks = math.min(checks, #candidates)
+
+    local bestCandidate
+    local bestPlan
+    local bestScore = math.huge
+
+    for i = 1, checks do
+        local candidate = candidates[i]
+        local target = candidate.Entry.Target
+        local plan = buildMovePlan and buildMovePlan(target, root.Position)
+
+        if plan then
+            -- Đường đi thực tế quan trọng hơn khoảng cách thẳng.
+            local score = plan.Length + (candidate.Distance * 0.05)
+            if score < bestScore then
+                bestScore = score
+                bestCandidate = candidate
+                bestPlan = plan
+            end
+        else
+            blacklistCoin(target)
+        end
+    end
+
+    if not bestCandidate then
+        return nil
+    end
+
+    -- Tìm lại index vì table có thể đã được dọn trước đó.
+    local selectedIndex
+    for index, entry in ipairs(CoinQueue) do
+        if entry == bestCandidate.Entry then
+            selectedIndex = index
+            break
+        end
+    end
+
+    if not selectedIndex then
+        return nil
+    end
+
+    local entry = removeQueueIndex(selectedIndex)
+    if entry then
+        entry.Distance = bestCandidate.Distance
+        entry.MovePlan = bestPlan
+    end
+
+    return entry
 end
 
 local function scanTaggedCoins()
@@ -805,7 +959,6 @@ local function isValidPosition(position)
         return false
     end
 
-    -- Chặn tọa độ hỏng hoặc bị đẩy ra ngoài phạm vi hợp lý.
     return math.abs(position.X) <= 100000
         and math.abs(position.Y) <= 100000
         and math.abs(position.Z) <= 100000
@@ -818,199 +971,393 @@ local function movementCancelled()
         or State.Hopping
 end
 
-local function getSafeGroundPosition(target, character)
-    if not target or not target.Parent or not target:IsA("BasePart") then
-        return nil
-    end
-
-    local targetPosition = target.Position
-    if not isValidPosition(targetPosition) then
-        return nil
-    end
-
+local function makeRayParams(character, target)
     local rayParams = RaycastParams.new()
     rayParams.FilterType = Enum.RaycastFilterType.Exclude
 
-    local excluded = { target }
+    local excluded = {}
     if character then
         table.insert(excluded, character)
     end
+    if target then
+        table.insert(excluded, target)
+    end
+
     rayParams.FilterDescendantsInstances = excluded
     rayParams.IgnoreWater = false
+    return rayParams
+end
+
+local function projectToGround(position, character, target)
+    if not isValidPosition(position) then
+        return nil
+    end
 
     local result = workspace:Raycast(
-        targetPosition + Vector3.new(0, 25, 0),
-        Vector3.new(0, -100, 0),
-        rayParams
+        position + Vector3.new(0, 24, 0),
+        Vector3.new(0, -90, 0),
+        makeRayParams(character, target)
     )
 
     if not result or not isValidPosition(result.Position) then
         return nil
     end
 
-    -- Đặt điểm đến ở độ cao gần với HumanoidRootPart khi đứng trên sàn.
     return result.Position + Vector3.new(0, 3, 0)
 end
 
-local function waitUntilNear(humanoid, root, destination, timeout, distance)
-    local deadline = os.clock() + math.max(0.5, tonumber(timeout) or 4)
-    local arrivalDistance = math.max(2, tonumber(distance) or 6)
-    local lastMoveCommand = 0
+local function getApproachPositions(target, character)
+    if not target or not target.Parent or not target:IsA("BasePart") then
+        return {}
+    end
 
-    while os.clock() < deadline do
-        if movementCancelled() then
-            return false
-        end
+    local radius = math.clamp(tonumber(Config.ApproachRadius) or 6, 3, 8)
+    local diagonal = radius * 0.70710678
+    local offsets = {
+        Vector3.zero,
+        Vector3.new(radius, 0, 0),
+        Vector3.new(-radius, 0, 0),
+        Vector3.new(0, 0, radius),
+        Vector3.new(0, 0, -radius),
+        Vector3.new(diagonal, 0, diagonal),
+        Vector3.new(-diagonal, 0, diagonal),
+        Vector3.new(diagonal, 0, -diagonal),
+        Vector3.new(-diagonal, 0, -diagonal),
+    }
 
-        if not humanoid
-            or not humanoid.Parent
-            or humanoid.Health <= 0
-            or not root
-            or not root.Parent
+    local positions = {}
+    for _, offset in ipairs(offsets) do
+        local grounded = projectToGround(target.Position + offset, character, target)
+        if grounded
+            and (grounded - target.Position).Magnitude
+                <= (tonumber(Config.TouchDistance) or 9) + 4
         then
-            return false
-        end
-
-        if (root.Position - destination).Magnitude <= arrivalDistance then
-            return true
-        end
-
-        -- Gửi lại MoveTo nếu nhân vật bị vướng nhẹ.
-        if os.clock() - lastMoveCommand >= 0.8 then
-            lastMoveCommand = os.clock()
-            pcall(function()
-                humanoid.Sit = false
-                humanoid.AutoRotate = true
-                humanoid:MoveTo(destination)
-            end)
-        end
-
-        task.wait(0.10)
-    end
-
-    return root
-        and root.Parent
-        and (root.Position - destination).Magnitude <= arrivalDistance
-end
-
-local function followPathTo(destination)
-    local character, root, humanoid = getCharacterParts()
-    if not character or not root or not humanoid then
-        return false
-    end
-    if not isValidPosition(destination) then
-        return false
-    end
-
-    local maxDistance = tonumber(Config.MaxCoinDistance) or 0
-    if maxDistance > 0
-        and (root.Position - destination).Magnitude > maxDistance
-    then
-        return false
-    end
-
-    local arrivalDistance = math.max(2, tonumber(Config.ArrivalDistance) or 6)
-    local recomputeAttempts = math.max(
-        1,
-        tonumber(Config.PathRecomputeAttempts) or 2
-    )
-
-    for _ = 1, recomputeAttempts do
-        if movementCancelled() then
-            return false
-        end
-
-        character, root, humanoid = getCharacterParts()
-        if not character or not root or not humanoid then
-            return false
-        end
-
-        if (root.Position - destination).Magnitude <= arrivalDistance then
-            return true
-        end
-
-        local path = PathfindingService:CreatePath({
-            AgentRadius = 2,
-            AgentHeight = 5,
-            AgentCanJump = true,
-            AgentCanClimb = true,
-            WaypointSpacing = math.max(
-                2,
-                tonumber(Config.PathWaypointSpacing) or 5
-            ),
-        })
-
-        local computed = pcall(function()
-            path:ComputeAsync(root.Position, destination)
-        end)
-
-        if computed and path.Status == Enum.PathStatus.Success then
-            local completed = true
-
-            for _, waypoint in ipairs(path:GetWaypoints()) do
-                if movementCancelled() then
-                    return false
-                end
-
-                character, root, humanoid = getCharacterParts()
-                if not character or not root or not humanoid then
-                    return false
-                end
-
-                if waypoint.Action == Enum.PathWaypointAction.Jump then
-                    humanoid.Jump = true
-                end
-
-                pcall(function()
-                    humanoid.Sit = false
-                    humanoid:MoveTo(waypoint.Position)
-                end)
-
-                local reached = waitUntilNear(
-                    humanoid,
-                    root,
-                    waypoint.Position,
-                    Config.WaypointTimeout,
-                    4.5
-                )
-
-                if not reached then
-                    completed = false
+            local duplicate = false
+            for _, existing in ipairs(positions) do
+                if (existing - grounded).Magnitude <= 1 then
+                    duplicate = true
                     break
                 end
             end
 
-            character, root, humanoid = getCharacterParts()
-            if completed
-                and root
-                and (root.Position - destination).Magnitude <= arrivalDistance
-            then
-                return true
+            if not duplicate then
+                table.insert(positions, grounded)
             end
         end
-
-        task.wait(0.15)
     end
 
-    -- Fallback: đi thẳng bằng Humanoid, vẫn không chỉnh CFrame.
+    return positions
+end
+
+local function computePathPlan(origin, destination)
+    if not isValidPosition(origin) or not isValidPosition(destination) then
+        return nil
+    end
+
+    local path = PathfindingService:CreatePath({
+        AgentRadius = 2.2,
+        AgentHeight = 5,
+        AgentCanJump = true,
+        AgentCanClimb = true,
+        WaypointSpacing = math.max(2, tonumber(Config.PathWaypointSpacing) or 3),
+    })
+
+    local ok = pcall(function()
+        path:ComputeAsync(origin, destination)
+    end)
+
+    if not ok or path.Status ~= Enum.PathStatus.Success then
+        return nil
+    end
+
+    local waypoints = path:GetWaypoints()
+    if #waypoints == 0 then
+        return nil
+    end
+
+    local length = 0
+    local previous = origin
+    for _, waypoint in ipairs(waypoints) do
+        length += (waypoint.Position - previous).Magnitude
+        previous = waypoint.Position
+    end
+
+    return {
+        Path = path,
+        Waypoints = waypoints,
+        Destination = destination,
+        Length = length,
+    }
+end
+
+buildMovePlan = function(target, origin)
+    local character, root = getCharacterParts()
+    if not character or not root or not target or not target.Parent then
+        return nil
+    end
+
+    origin = origin or root.Position
+    local positions = getApproachPositions(target, character)
+    local bestPlan
+    local bestScore = math.huge
+
+    for _, destination in ipairs(positions) do
+        local plan = computePathPlan(origin, destination)
+        if plan then
+            local score = plan.Length
+                + ((destination - target.Position).Magnitude * 0.10)
+
+            if score < bestScore then
+                bestScore = score
+                bestPlan = plan
+            end
+        end
+    end
+
+    return bestPlan
+end
+
+local function applyFarmWalkSpeed(humanoid)
+    if not humanoid then
+        return
+    end
+
+    pcall(function()
+        humanoid.WalkSpeed = math.clamp(
+            tonumber(Config.CoinWalkSpeed) or 22,
+            16,
+            26
+        )
+    end)
+end
+
+local function hasClearRoute(origin, destination, character, target)
+    local direction = destination - origin
+    if direction.Magnitude <= 1 then
+        return true
+    end
+
+    local result = workspace:Raycast(
+        origin,
+        direction,
+        makeRayParams(character, target)
+    )
+
+    return result == nil
+end
+
+local function followPlan(plan, target)
+    local character, root, humanoid = getCharacterParts()
+    if not character or not root or not humanoid or not plan then
+        return false
+    end
+
+    applyFarmWalkSpeed(humanoid)
+
+    local blockedAt
+    local blockedConnection
+    if plan.Path then
+        blockedConnection = plan.Path.Blocked:Connect(function(index)
+            blockedAt = index
+        end)
+    end
+
+    local function cleanup()
+        if blockedConnection then
+            blockedConnection:Disconnect()
+            blockedConnection = nil
+        end
+    end
+
+    for index, waypoint in ipairs(plan.Waypoints or {}) do
+        if movementCancelled() then
+            cleanup()
+            return false
+        end
+
+        if not target or not target.Parent then
+            cleanup()
+            return true
+        end
+
+        character, root, humanoid = getCharacterParts()
+        if not character or not root or not humanoid then
+            cleanup()
+            return false
+        end
+
+        applyFarmWalkSpeed(humanoid)
+
+        if blockedAt and blockedAt >= index then
+            cleanup()
+            return false
+        end
+
+        if waypoint.Action == Enum.PathWaypointAction.Jump then
+            humanoid.Jump = true
+        end
+
+        pcall(function()
+            humanoid.Sit = false
+            humanoid.AutoRotate = true
+            humanoid:MoveTo(waypoint.Position)
+        end)
+
+        local waypointDistance = (root.Position - waypoint.Position).Magnitude
+        local walkSpeed = math.max(8, tonumber(humanoid.WalkSpeed) or 22)
+        local dynamicTimeout = math.clamp(
+            (waypointDistance / walkSpeed) + 2,
+            2,
+            tonumber(Config.WaypointTimeout) or 4.5
+        )
+
+        local deadline = os.clock() + dynamicTimeout
+        local arrivalDistance = math.max(
+            2.5,
+            tonumber(Config.WaypointArrivalDistance) or 3.5
+        )
+        local lastCommand = os.clock()
+        local lastProgressPosition = root.Position
+        local lastProgressTime = os.clock()
+
+        while os.clock() < deadline do
+            if movementCancelled() then
+                cleanup()
+                return false
+            end
+
+            if not target or not target.Parent then
+                cleanup()
+                return true
+            end
+
+            character, root, humanoid = getCharacterParts()
+            if not character or not root or not humanoid then
+                cleanup()
+                return false
+            end
+
+            if blockedAt and blockedAt >= index then
+                cleanup()
+                return false
+            end
+
+            if (root.Position - waypoint.Position).Magnitude <= arrivalDistance then
+                break
+            end
+
+            local progress = (root.Position - lastProgressPosition).Magnitude
+            if progress >= (tonumber(Config.StuckMinProgress) or 1.1) then
+                lastProgressPosition = root.Position
+                lastProgressTime = os.clock()
+            elseif os.clock() - lastProgressTime
+                >= (tonumber(Config.StuckTimeout) or 1.6)
+            then
+                cleanup()
+                return false
+            end
+
+            if os.clock() - lastCommand >= 0.55 then
+                lastCommand = os.clock()
+                applyFarmWalkSpeed(humanoid)
+                pcall(function()
+                    humanoid.Sit = false
+                    humanoid:MoveTo(waypoint.Position)
+                end)
+            end
+
+            task.wait(math.max(
+                0.08,
+                tonumber(Config.StuckCheckInterval) or 0.15
+            ))
+        end
+
+        if (root.Position - waypoint.Position).Magnitude > arrivalDistance + 1 then
+            cleanup()
+            return false
+        end
+    end
+
+    cleanup()
+
     character, root, humanoid = getCharacterParts()
     if not character or not root or not humanoid then
         return false
     end
 
-    pcall(function()
-        humanoid.Sit = false
-        humanoid.AutoRotate = true
-        humanoid:MoveTo(destination)
-    end)
+    local touchDistance = math.max(4, tonumber(Config.TouchDistance) or 9)
+    if target and target.Parent
+        and (root.Position - target.Position).Magnitude <= touchDistance
+    then
+        return true
+    end
 
-    return waitUntilNear(
-        humanoid,
-        root,
-        destination,
-        Config.DirectMoveTimeout,
-        arrivalDistance
-    )
+    -- Chỉ đi thẳng đoạn cuối nếu raycast xác nhận không có tường chắn.
+    if target and target.Parent
+        and hasClearRoute(root.Position, target.Position, character, target)
+    then
+        humanoid:MoveTo(target.Position)
+        local deadline = os.clock() + math.max(
+            1,
+            tonumber(Config.DirectMoveTimeout) or 6
+        )
+
+        while os.clock() < deadline do
+            if movementCancelled() then
+                return false
+            end
+            if not target.Parent then
+                return true
+            end
+            if (root.Position - target.Position).Magnitude <= touchDistance then
+                return true
+            end
+            task.wait(0.10)
+        end
+    end
+
+    return target
+        and target.Parent
+        and (root.Position - target.Position).Magnitude <= touchDistance
+end
+
+local function moveSafelyToCoin(entry)
+    local target = entry and entry.Target
+    if not target or not target.Parent then
+        return false
+    end
+
+    local attempts = math.max(1, tonumber(Config.PathRecomputeAttempts) or 3)
+    local plan = entry.MovePlan
+
+    for _ = 1, attempts do
+        if movementCancelled() then
+            return false
+        end
+
+        if not target.Parent then
+            return true
+        end
+
+        local _, root = getCharacterParts()
+        if not root then
+            return false
+        end
+
+        plan = plan or buildMovePlan(target, root.Position)
+        if not plan then
+            return false
+        end
+
+        if followPlan(plan, target) then
+            return true
+        end
+
+        plan = nil
+        task.wait(0.10)
+    end
+
+    return false
 end
 
 local function touchCoin(entry)
@@ -1029,6 +1376,7 @@ local function touchCoin(entry)
     end
 
     if not isValidPosition(target.Position) then
+        blacklistCoin(target)
         warn("[MM2 KAITUN] Skipped coin: invalid position")
         return false
     end
@@ -1036,30 +1384,16 @@ local function touchCoin(entry)
     local serialBefore = State.CollectionSerial
     local bagBefore = State.BagCurrent
 
-    if Config.UseSafeMovement ~= false then
-        local safePosition = getSafeGroundPosition(target, character)
-        if not safePosition then
-            warn("[MM2 KAITUN] Skipped coin: no safe ground")
-            return false
-        end
+    setStatus(string.format(
+        "Walking to nearest %s | %.0f studs",
+        tostring(entry.CoinType or "Coin"),
+        tonumber(entry.Distance) or (root.Position - target.Position).Magnitude
+    ))
 
-        setStatus("Walking to " .. tostring(entry.CoinType or "Coin"))
-        if not followPathTo(safePosition) then
-            warn("[MM2 KAITUN] Could not safely reach coin")
-            return false
-        end
-    else
-        -- Vẫn chỉ dùng MoveTo; tuyệt đối không gán root.CFrame.
-        humanoid:MoveTo(target.Position)
-        if not waitUntilNear(
-            humanoid,
-            root,
-            target.Position,
-            Config.DirectMoveTimeout,
-            Config.TouchDistance
-        ) then
-            return false
-        end
+    if not moveSafelyToCoin(entry) then
+        blacklistCoin(target)
+        warn("[MM2 KAITUN] Coin unreachable - blacklisted temporarily")
+        return false
     end
 
     character, root, humanoid = getCharacterParts()
@@ -1072,19 +1406,8 @@ local function touchCoin(entry)
 
     local touchDistance = math.max(4, tonumber(Config.TouchDistance) or 9)
     if (root.Position - target.Position).Magnitude > touchDistance then
-        pcall(function()
-            humanoid:MoveTo(target.Position)
-        end)
-
-        if not waitUntilNear(
-            humanoid,
-            root,
-            target.Position,
-            2.5,
-            touchDistance
-        ) then
-            return false
-        end
+        blacklistCoin(target)
+        return false
     end
 
     local touchParts = getTouchParts(character, root)
@@ -1110,6 +1433,7 @@ local function touchCoin(entry)
             return true
         end
         if (root.Position - target.Position).Magnitude > touchDistance + 2 then
+            blacklistCoin(target)
             return false
         end
 
@@ -1117,7 +1441,11 @@ local function touchCoin(entry)
         task.wait(math.max(0.05, tonumber(Config.CollectDelay) or 0.14))
     end
 
-    return coinWasCollected(entry, serialBefore, bagBefore)
+    local collected = coinWasCollected(entry, serialBefore, bagBefore)
+    if not collected then
+        blacklistCoin(target, 5)
+    end
+    return collected
 end
 
 local function retryCoin(entry)
@@ -1142,6 +1470,7 @@ local function cleanCoinQueue()
     CoinQueueHead = 1
     QueuedTargets = setmetatable({}, { __mode = "k" })
     RetryCount = setmetatable({}, { __mode = "k" })
+    CoinBlacklist = setmetatable({}, { __mode = "k" })
 end
 
 local VisitedFile = "MM2_Summer2026_VisitedServers.json"
@@ -1399,19 +1728,25 @@ task.spawn(function()
             and not State.BagFull
             and not State.Hopping
         then
+            if #CoinQueue == 0 then
+                scanTaggedCoins()
+                scanMapCoinContainers()
+            end
+
             local entry = popCoin()
             if entry and isCoinUsable(entry.Target, entry.Visual, entry.CoinType) then
-                setStatus("Collecting " .. entry.CoinType)
                 local collected = touchCoin(entry)
 
                 if not collected
                     and isCoinUsable(entry.Target, entry.Visual, entry.CoinType)
                 then
-                    setStatus("Coin touch failed - retrying")
-                    retryCoin(entry)
+                    setStatus("Nearest Coin unreachable - selecting another")
+                    blacklistCoin(entry.Target)
+                    task.wait(0.08)
                 end
             else
-                task.wait(0.08)
+                setStatus("No reachable Coin nearby - rescanning")
+                task.wait(0.18)
             end
         else
             task.wait(0.25)
