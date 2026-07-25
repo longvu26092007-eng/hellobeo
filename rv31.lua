@@ -6,9 +6,11 @@
       1. Chọn/load team trước khi gọi BananaHub.
       2. Truyền getgenv().Key và getgenv().Config vào BananaHub.
       3. Check V3 bằng đúng phương pháp Title Name từ getTitles.
-      4. Race true + chưa V3: dừng reroll để BananaHub làm V2-V3.
-      5. Race false hoặc đã V3: tiếp tục reroll khi đủ 3000 fragments.
-      6. Khi tất cả race true đều V3:
+      4. Race true + chưa V3: giữ nguyên race để BananaHub làm V2-V3.
+      5. Race false hoặc race true đã V3: đổi tiếp sang race true còn thiếu V3.
+      6. Ưu tiên Human/Mink/Fishman/Skypiea; sau đó mới đổi trực tiếp Cyborg/Ghoul.
+      7. Cyborg dùng CyborgTrainer Buy; Ghoul dùng Ectoplasm Change, không reroll.
+      8. Khi tất cả race true đều V3:
          tạo <PlayerName>.txt theo số race được bật:
            - 1 race: Completed-<Race>
            - 2 race: Completed-2racev3
@@ -27,6 +29,10 @@ local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 local CommF_ =
     ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("CommF_")
+
+-- Bảo vệ config khi loader bên ngoài chưa khởi tạo đủ table.
+getgenv().Config = getgenv().Config or {}
+getgenv().Races = getgenv().Races or {}
 
 repeat
     task.wait(0.2)
@@ -408,6 +414,21 @@ local RACE_ORDER = {
     "Ghoul",
 }
 
+-- Bốn race thường được ưu tiên hoàn thành trước.
+-- Cyborg/Ghoul là race đặc biệt: khi cần tới chúng phải gọi remote đổi race,
+-- tuyệt đối không reroll để mong ngẫu nhiên trúng.
+local STANDARD_RACE_ORDER = {
+    "Human",
+    "Mink",
+    "Fishman",
+    "Skypiea",
+}
+
+local SPECIAL_RACE_ORDER = {
+    "Cyborg",
+    "Ghoul",
+}
+
 local RACE_ALIASES = {
     human = "Human",
     mink = "Mink",
@@ -466,6 +487,28 @@ local function GetMissingEnabledRaces(titleMap)
     end
 
     return enabled, missing
+end
+
+local function GetMissingEnabledFromOrder(order, titleMap)
+    local missing = {}
+
+    for _, raceName in ipairs(order) do
+        if getgenv().Races[raceName] == true
+            and titleMap[raceName] ~= true
+        then
+            missing[#missing + 1] = raceName
+        end
+    end
+
+    return missing
+end
+
+local function JoinRaceNames(races)
+    if type(races) ~= "table" or #races == 0 then
+        return "none"
+    end
+
+    return table.concat(races, ", ")
 end
 
 -- ============================================================
@@ -844,6 +887,22 @@ local lastRerollAt = 0
 local REROLL_COOLDOWN = 3
 local REROLL_COST = 3000
 
+local function WaitForExactRace(targetRace, oldRace, timeoutSeconds)
+    local deadline = tick() + (tonumber(timeoutSeconds) or 8)
+
+    repeat
+        task.wait(0.25)
+    until not controllerRunning
+        or GetCurrentRace() == targetRace
+        or (
+            oldRace ~= nil
+            and GetCurrentRace() ~= oldRace
+        )
+        or tick() >= deadline
+
+    return GetCurrentRace()
+end
+
 local function RerollRace(reason)
     if tick() - lastRerollAt < REROLL_COOLDOWN then
         return false
@@ -867,7 +926,7 @@ local function RerollRace(reason)
 
     SetControllerStatus(
         tostring(reason)
-        .. " | Rerolling "
+        .. " | Rerolling standard race from "
         .. tostring(oldRace)
     )
 
@@ -886,15 +945,7 @@ local function RerollRace(reason)
         return false
     end
 
-    local deadline = tick() + 8
-
-    repeat
-        task.wait(0.25)
-    until not controllerRunning
-        or GetCurrentRace() ~= oldRace
-        or tick() >= deadline
-
-    local newRace = GetCurrentRace()
+    local newRace = WaitForExactRace(nil, oldRace, 8)
 
     SetControllerStatus(
         "Reroll result: "
@@ -904,6 +955,104 @@ local function RerollRace(reason)
     )
 
     return newRace ~= oldRace
+end
+
+local lastSpecialChangeAt = 0
+local SPECIAL_CHANGE_COOLDOWN = 5
+local specialChangeRunning = false
+
+local function ChangeToSpecialRace(targetRace, reason)
+    if targetRace ~= "Cyborg" and targetRace ~= "Ghoul" then
+        return false
+    end
+
+    if specialChangeRunning then
+        return false
+    end
+
+    if tick() - lastSpecialChangeAt < SPECIAL_CHANGE_COOLDOWN then
+        return false
+    end
+
+    local oldRace = GetCurrentRace()
+    if oldRace == targetRace then
+        return true
+    end
+
+    specialChangeRunning = true
+    lastSpecialChangeAt = tick()
+
+    SetControllerStatus(
+        tostring(reason)
+        .. " | Changing "
+        .. tostring(oldRace)
+        .. " -> "
+        .. tostring(targetRace)
+    )
+
+    local ok, resultA, resultB = pcall(function()
+        if targetRace == "Cyborg" then
+            -- Cyborg là race đặc biệt. Dùng trainer để mua/đổi sang Cyborg,
+            -- KHÔNG dùng BlackbeardReward Reroll.
+            return CommF_:InvokeServer("CyborgTrainer", "Buy"), nil
+        end
+
+        -- Ghoul đã mở thì BuyCheck xác nhận và Change đổi về Ghoul.
+        -- Không gọi Buy ở controller V3 vì controller chỉ cần đổi race đã sở hữu.
+        local buyCheck = CommF_:InvokeServer(
+            "Ectoplasm",
+            "BuyCheck",
+            4
+        )
+        task.wait(0.35)
+        local changeResult = CommF_:InvokeServer(
+            "Ectoplasm",
+            "Change",
+            4
+        )
+        return buyCheck, changeResult
+    end)
+
+    if not ok then
+        specialChangeRunning = false
+        SetControllerStatus(
+            "Change "
+            .. tostring(targetRace)
+            .. " error: "
+            .. tostring(resultA)
+        )
+        return false
+    end
+
+    local newRace = WaitForExactRace(targetRace, oldRace, 8)
+    specialChangeRunning = false
+
+    if newRace == targetRace then
+        SetControllerStatus(
+            "Changed race successfully: "
+            .. tostring(oldRace)
+            .. " -> "
+            .. tostring(newRace)
+            .. " | Waiting BananaHub V2-V3"
+        )
+        return true
+    end
+
+    SetControllerStatus(
+        "Could not change to "
+        .. tostring(targetRace)
+        .. " | Current: "
+        .. tostring(newRace)
+        .. " | Remote: "
+        .. tostring(resultA)
+        .. (
+            resultB ~= nil
+            and (" / " .. tostring(resultB))
+            or ""
+        )
+    )
+
+    return false
 end
 
 local function ControllerTick()
@@ -918,6 +1067,7 @@ local function ControllerTick()
         return
     end
 
+    -- Giữ nguyên completion logic đã có sẵn.
     if #missing == 0 then
         WriteCompletedFile()
         return
@@ -929,41 +1079,74 @@ local function ControllerTick()
     local currentDone =
         titleMap[currentRace] == true
 
+    local missingStandard =
+        GetMissingEnabledFromOrder(
+            STANDARD_RACE_ORDER,
+            titleMap
+        )
+    local missingSpecial =
+        GetMissingEnabledFromOrder(
+            SPECIAL_RACE_ORDER,
+            titleMap
+        )
+
     getgenv().BananaRaceV3ControllerDebug = {
         currentRace = currentRace,
         currentEnabled = currentEnabled,
         currentDone = currentDone,
         enabled = enabled,
         missing = missing,
+        missingStandard = missingStandard,
+        missingSpecial = missingSpecial,
         fragments = GetFragments(),
         titleMap = titleMap,
+        specialChangeRunning = specialChangeRunning,
     }
 
+    -- Quy tắc trung tâm:
+    -- Race ON + chưa V3 = đúng target, giữ nguyên để BananaHub nâng.
     if currentEnabled and not currentDone then
         SetControllerStatus(
             "TARGET RACE: "
             .. tostring(currentRace)
-            .. " | Missing V3 | BananaHub upgrading"
+            .. " | Enabled + Missing V3"
+            .. " | BananaHub upgrading"
         )
         return
     end
 
-    if not currentEnabled then
+    -- Nếu còn race thường ON + thiếu V3, chỉ reroll để tìm một trong bốn
+    -- Human/Mink/Fishman/Skypiea. Cyborg/Ghoul hiện tại dù OFF hay DONE
+    -- cũng phải rời đi bằng reroll ở giai đoạn này.
+    if #missingStandard > 0 then
         RerollRace(
-            "Current race "
+            "Seeking enabled standard race missing V3: "
+            .. JoinRaceNames(missingStandard)
+            .. " | Current "
             .. tostring(currentRace)
-            .. " is FALSE"
+            .. (
+                currentEnabled and currentDone
+                and " is enabled but already V3"
+                or " is disabled"
+            )
         )
         return
     end
 
-    if currentDone then
-        RerollRace(
-            "Current race "
-            .. tostring(currentRace)
-            .. " already has V3"
+    -- Bốn race đầu đã OFF hoặc DONE. Bây giờ mới xử lý race đặc biệt
+    -- theo thứ tự Cyborg -> Ghoul. Không reroll ở giai đoạn này.
+    local targetSpecial = missingSpecial[1]
+    if targetSpecial then
+        ChangeToSpecialRace(
+            targetSpecial,
+            "All enabled standard races are completed/off"
         )
+        return
     end
+
+    -- Trường hợp title map thay đổi giữa hai lần đọc: scan lại sớm thay vì
+    -- reroll sai race hoặc ghi completion sai.
+    ScanV3Titles(true)
 end
 
 pcall(function()
