@@ -1,3 +1,13 @@
+-- ============================================================
+-- MM2 SUMMER 2026 KAITUN - SAFE MOVEMENT FIX
+-- Fix Error 267 "Invalid position":
+--   * Bỏ toàn bộ teleport root.CFrame tới Coin
+--   * Bỏ noclip toàn thân
+--   * Di chuyển bằng PathfindingService + Humanoid:MoveTo()
+--   * Chỉ touch Coin khi nhân vật đã ở gần
+-- Có thể cấu hình ngoài bằng getgenv().MM2_KAITUN_CONFIG
+-- ============================================================
+
 repeat task.wait() until game:IsLoaded()
 repeat task.wait() until game:GetService("Players").LocalPlayer
 
@@ -54,6 +64,16 @@ local DEFAULT_CONFIG = {
     TouchVerticalOffsets = {0, -0.8, 0.8, 0},
     FallbackScanDelay = 2,
 
+    -- SAFE MOVEMENT: không gán HumanoidRootPart.CFrame vào Coin.
+    UseSafeMovement = true,
+    ArrivalDistance = 6,
+    TouchDistance = 9,
+    WaypointTimeout = 4.5,
+    DirectMoveTimeout = 10,
+    PathRecomputeAttempts = 2,
+    PathWaypointSpacing = 5,
+    MaxCoinDistance = 0, -- 0 = không giới hạn khoảng cách.
+
     AntiAFK = true,
     ShowStatus = true,
 }
@@ -73,6 +93,13 @@ if type(Previous) == "table" then
         pcall(function()
             Previous.Gui:Destroy()
         end)
+    end
+    if type(Previous.Connections) == "table" then
+        for _, connection in ipairs(Previous.Connections) do
+            pcall(function()
+                connection:Disconnect()
+            end)
+        end
     end
     task.wait(0.2)
 end
@@ -103,6 +130,7 @@ getgenv().__MM2_SUMMER_2026_KAITUN = State
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CollectionService = game:GetService("CollectionService")
+local PathfindingService = game:GetService("PathfindingService")
 local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 local RunService = game:GetService("RunService")
@@ -524,31 +552,8 @@ if Config.AntiAFK then
     end))
 end
 
-local function prepareCharacter(character)
-    if not character then
-        return
-    end
-
-    for _, object in ipairs(character:GetDescendants()) do
-        if object:IsA("BasePart") then
-            object.CanCollide = false
-        end
-    end
-
-    addConnection(character.DescendantAdded:Connect(function(object)
-        if object:IsA("BasePart") then
-            object.CanCollide = false
-        end
-    end))
-end
-
-if LocalPlayer.Character then
-    prepareCharacter(LocalPlayer.Character)
-end
-addConnection(LocalPlayer.CharacterAdded:Connect(function(character)
-    task.wait(0.3)
-    prepareCharacter(character)
-end))
+-- Không tắt CanCollide toàn bộ nhân vật.
+-- Di chuyển bằng Humanoid/Pathfinding để tránh lệch vị trí client-server.
 
 local function getCharacterParts()
     local character = LocalPlayer.Character
@@ -781,75 +786,335 @@ local function pulseTouch(parts, touchTargets)
     end
 end
 
+local function isFiniteNumber(value)
+    return type(value) == "number"
+        and value == value
+        and value ~= math.huge
+        and value ~= -math.huge
+end
+
+local function isValidPosition(position)
+    if typeof(position) ~= "Vector3" then
+        return false
+    end
+
+    if not isFiniteNumber(position.X)
+        or not isFiniteNumber(position.Y)
+        or not isFiniteNumber(position.Z)
+    then
+        return false
+    end
+
+    -- Chặn tọa độ hỏng hoặc bị đẩy ra ngoài phạm vi hợp lý.
+    return math.abs(position.X) <= 100000
+        and math.abs(position.Y) <= 100000
+        and math.abs(position.Z) <= 100000
+end
+
+local function movementCancelled()
+    return State.Stopped
+        or State.TargetFound
+        or State.BagFull
+        or State.Hopping
+end
+
+local function getSafeGroundPosition(target, character)
+    if not target or not target.Parent or not target:IsA("BasePart") then
+        return nil
+    end
+
+    local targetPosition = target.Position
+    if not isValidPosition(targetPosition) then
+        return nil
+    end
+
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+    local excluded = { target }
+    if character then
+        table.insert(excluded, character)
+    end
+    rayParams.FilterDescendantsInstances = excluded
+    rayParams.IgnoreWater = false
+
+    local result = workspace:Raycast(
+        targetPosition + Vector3.new(0, 25, 0),
+        Vector3.new(0, -100, 0),
+        rayParams
+    )
+
+    if not result or not isValidPosition(result.Position) then
+        return nil
+    end
+
+    -- Đặt điểm đến ở độ cao gần với HumanoidRootPart khi đứng trên sàn.
+    return result.Position + Vector3.new(0, 3, 0)
+end
+
+local function waitUntilNear(humanoid, root, destination, timeout, distance)
+    local deadline = os.clock() + math.max(0.5, tonumber(timeout) or 4)
+    local arrivalDistance = math.max(2, tonumber(distance) or 6)
+    local lastMoveCommand = 0
+
+    while os.clock() < deadline do
+        if movementCancelled() then
+            return false
+        end
+
+        if not humanoid
+            or not humanoid.Parent
+            or humanoid.Health <= 0
+            or not root
+            or not root.Parent
+        then
+            return false
+        end
+
+        if (root.Position - destination).Magnitude <= arrivalDistance then
+            return true
+        end
+
+        -- Gửi lại MoveTo nếu nhân vật bị vướng nhẹ.
+        if os.clock() - lastMoveCommand >= 0.8 then
+            lastMoveCommand = os.clock()
+            pcall(function()
+                humanoid.Sit = false
+                humanoid.AutoRotate = true
+                humanoid:MoveTo(destination)
+            end)
+        end
+
+        task.wait(0.10)
+    end
+
+    return root
+        and root.Parent
+        and (root.Position - destination).Magnitude <= arrivalDistance
+end
+
+local function followPathTo(destination)
+    local character, root, humanoid = getCharacterParts()
+    if not character or not root or not humanoid then
+        return false
+    end
+    if not isValidPosition(destination) then
+        return false
+    end
+
+    local maxDistance = tonumber(Config.MaxCoinDistance) or 0
+    if maxDistance > 0
+        and (root.Position - destination).Magnitude > maxDistance
+    then
+        return false
+    end
+
+    local arrivalDistance = math.max(2, tonumber(Config.ArrivalDistance) or 6)
+    local recomputeAttempts = math.max(
+        1,
+        tonumber(Config.PathRecomputeAttempts) or 2
+    )
+
+    for _ = 1, recomputeAttempts do
+        if movementCancelled() then
+            return false
+        end
+
+        character, root, humanoid = getCharacterParts()
+        if not character or not root or not humanoid then
+            return false
+        end
+
+        if (root.Position - destination).Magnitude <= arrivalDistance then
+            return true
+        end
+
+        local path = PathfindingService:CreatePath({
+            AgentRadius = 2,
+            AgentHeight = 5,
+            AgentCanJump = true,
+            AgentCanClimb = true,
+            WaypointSpacing = math.max(
+                2,
+                tonumber(Config.PathWaypointSpacing) or 5
+            ),
+        })
+
+        local computed = pcall(function()
+            path:ComputeAsync(root.Position, destination)
+        end)
+
+        if computed and path.Status == Enum.PathStatus.Success then
+            local completed = true
+
+            for _, waypoint in ipairs(path:GetWaypoints()) do
+                if movementCancelled() then
+                    return false
+                end
+
+                character, root, humanoid = getCharacterParts()
+                if not character or not root or not humanoid then
+                    return false
+                end
+
+                if waypoint.Action == Enum.PathWaypointAction.Jump then
+                    humanoid.Jump = true
+                end
+
+                pcall(function()
+                    humanoid.Sit = false
+                    humanoid:MoveTo(waypoint.Position)
+                end)
+
+                local reached = waitUntilNear(
+                    humanoid,
+                    root,
+                    waypoint.Position,
+                    Config.WaypointTimeout,
+                    4.5
+                )
+
+                if not reached then
+                    completed = false
+                    break
+                end
+            end
+
+            character, root, humanoid = getCharacterParts()
+            if completed
+                and root
+                and (root.Position - destination).Magnitude <= arrivalDistance
+            then
+                return true
+            end
+        end
+
+        task.wait(0.15)
+    end
+
+    -- Fallback: đi thẳng bằng Humanoid, vẫn không chỉnh CFrame.
+    character, root, humanoid = getCharacterParts()
+    if not character or not root or not humanoid then
+        return false
+    end
+
+    pcall(function()
+        humanoid.Sit = false
+        humanoid.AutoRotate = true
+        humanoid:MoveTo(destination)
+    end)
+
+    return waitUntilNear(
+        humanoid,
+        root,
+        destination,
+        Config.DirectMoveTimeout,
+        arrivalDistance
+    )
+end
+
 local function touchCoin(entry)
     local character, root, humanoid = getCharacterParts()
     local target = entry and entry.Target
     local visual = entry and entry.Visual
 
-    if not character or not root or not humanoid or not target or not target.Parent then
+    if not character
+        or not root
+        or not humanoid
+        or not target
+        or not target.Parent
+        or not target:IsA("BasePart")
+    then
+        return false
+    end
+
+    if not isValidPosition(target.Position) then
+        warn("[MM2 KAITUN] Skipped coin: invalid position")
         return false
     end
 
     local serialBefore = State.CollectionSerial
     local bagBefore = State.BagCurrent
+
+    if Config.UseSafeMovement ~= false then
+        local safePosition = getSafeGroundPosition(target, character)
+        if not safePosition then
+            warn("[MM2 KAITUN] Skipped coin: no safe ground")
+            return false
+        end
+
+        setStatus("Walking to " .. tostring(entry.CoinType or "Coin"))
+        if not followPathTo(safePosition) then
+            warn("[MM2 KAITUN] Could not safely reach coin")
+            return false
+        end
+    else
+        -- Vẫn chỉ dùng MoveTo; tuyệt đối không gán root.CFrame.
+        humanoid:MoveTo(target.Position)
+        if not waitUntilNear(
+            humanoid,
+            root,
+            target.Position,
+            Config.DirectMoveTimeout,
+            Config.TouchDistance
+        ) then
+            return false
+        end
+    end
+
+    character, root, humanoid = getCharacterParts()
+    if not character or not root or not humanoid then
+        return false
+    end
+    if not target.Parent then
+        return true
+    end
+
+    local touchDistance = math.max(4, tonumber(Config.TouchDistance) or 9)
+    if (root.Position - target.Position).Magnitude > touchDistance then
+        pcall(function()
+            humanoid:MoveTo(target.Position)
+        end)
+
+        if not waitUntilNear(
+            humanoid,
+            root,
+            target.Position,
+            2.5,
+            touchDistance
+        ) then
+            return false
+        end
+    end
+
     local touchParts = getTouchParts(character, root)
     local touchTargets = { target }
 
-    if visual and visual:IsA("BasePart") and visual ~= target then
+    if visual
+        and visual:IsA("BasePart")
+        and visual ~= target
+        and visual.Parent
+    then
         table.insert(touchTargets, visual)
-    end
-
-    pcall(function()
-        humanoid.Sit = false
-        root.AssemblyLinearVelocity = Vector3.zero
-        root.AssemblyAngularVelocity = Vector3.zero
-    end)
-
-    local offsets = Config.TouchVerticalOffsets
-    if type(offsets) ~= "table" or #offsets == 0 then
-        offsets = {0, -0.8, 0.8, 0}
     end
 
     local attempts = math.max(1, tonumber(Config.TouchAttempts) or 3)
     for _ = 1, attempts do
-        for _, offsetY in ipairs(offsets) do
-            if State.Stopped or State.TargetFound or State.BagFull then
-                return false
-            end
-            if not target.Parent then
-                return true
-            end
-
-            pcall(function()
-                root.CFrame = target.CFrame * CFrame.new(0, tonumber(offsetY) or 0, 0)
-                root.AssemblyLinearVelocity = Vector3.zero
-                root.AssemblyAngularVelocity = Vector3.zero
-            end)
-
-            pulseTouch(touchParts, touchTargets)
-
-            if coinWasCollected(entry, serialBefore, bagBefore) then
-                return true
-            end
+        if movementCancelled() then
+            return false
         end
-    end
-
-    local deadline = os.clock() + math.max(0.4, tonumber(Config.TouchHoldTime) or 1.1)
-    while os.clock() < deadline do
         if coinWasCollected(entry, serialBefore, bagBefore) then
             return true
         end
-        if State.Stopped or State.TargetFound or State.BagFull or not target.Parent then
-            break
+        if not target.Parent then
+            return true
+        end
+        if (root.Position - target.Position).Magnitude > touchDistance + 2 then
+            return false
         end
 
-        pcall(function()
-            root.CFrame = target.CFrame
-            root.AssemblyLinearVelocity = Vector3.zero
-            root.AssemblyAngularVelocity = Vector3.zero
-        end)
-
         pulseTouch(touchParts, touchTargets)
+        task.wait(math.max(0.05, tonumber(Config.CollectDelay) or 0.14))
     end
 
     return coinWasCollected(entry, serialBefore, bagBefore)
