@@ -3563,7 +3563,7 @@ startGameReadyGate = function()
 end
 
 --[[ ============================================================================
- [27b2] MAINRACE REROLL — getgenv().MainRace → tự reroll race đúng loại.
+ [27b2] MAINRACE REROLL — Main / Ally1 / Ally2 tự check race của CHÍNH MÌNH.
    Mapping cố định:
      Angel  → Ally1 Human,  Ally2 Rabbit
      Rabbit → Ally1 Human,  Ally2 Angel
@@ -3571,148 +3571,637 @@ end
      Human  → Ally1 Angel,  Ally2 Rabbit
      Cyborg → Ally1 Angel,  Ally2 Rabbit
      Shark  → Ally1 Angel,  Ally2 Rabbit
-   Role xác định theo thứ tự Config: MainAccount[1] = main, Allies[1] = ally1, Allies[2] = ally2.
-   Check ở giây 0, 5, 15 sau khi game ready. Gameplay bị chặn trong khi reroll;
-   network/UI/heartbeat/team recovery tiếp tục bình thường.
+
+   QUY TẮC:
+     1. Mọi account trong MainAccount = role "main", target = getgenv().MainRace.
+     2. Allies[1] = Ally1, Allies[2] = Ally2, target lấy từ mapping trên.
+     3. Mỗi account đọc LocalPlayer.Data.Race.Value của chính nó.
+     4. Nếu race hiện tại trùng target sau normalize alias → KHÔNG reroll.
+     5. Chỉ khi không trùng mới gọi reroll.
+     6. Alias được coi là cùng race:
+          Angel = Skypiea
+          Rabbit = Mink
+          Shark = Fishman
+     7. Main chạy trong phase checking 8 giây đầu.
+     8. Nếu hết 8 giây mà race vẫn chưa đúng thì tiếp tục blocking/reroll.
+     9. Chỉ khi race của chính account trùng target mới dừng.
 ============================================================================ ]]
 local MainRaceReroll = {}
 do
-    -- mapping race → { ally1, ally2 }
-    local ALLY_MAP = {
-        Angel  = { "Human",  "Rabbit" },
-        Rabbit = { "Human",  "Angel"  },
-        Ghoul  = { "Angel",  "Rabbit" },
-        Human  = { "Angel",  "Rabbit" },
-        Cyborg = { "Angel",  "Rabbit" },
-        Shark  = { "Angel",  "Rabbit" },
+    -- Chuẩn hóa về đúng tên race nội bộ trong Data.Race.Value.
+    -- Điều này ngăn lỗi Data.Race.Value="Skypiea" nhưng target="Angel"
+    -- bị hiểu sai là khác race và reroll oan.
+    local RACE_ALIAS_TO_CANONICAL = {
+        human   = "Human",
+
+        mink    = "Mink",
+        rabbit  = "Mink",
+
+        fishman = "Fishman",
+        shark   = "Fishman",
+
+        skypiea = "Skypiea",
+        angel   = "Skypiea",
+
+        ghoul   = "Ghoul",
+        cyborg  = "Cyborg",
     }
 
-    -- Resolve role của account này dựa theo thứ tự Config
+    local CANONICAL_TO_DISPLAY = {
+        Human   = "Human",
+        Mink    = "Rabbit",
+        Fishman = "Shark",
+        Skypiea = "Angel",
+        Ghoul   = "Ghoul",
+        Cyborg  = "Cyborg",
+    }
+
+    local function normalizeRace(value)
+        local key = tostring(value or "")
+            :lower()
+            :gsub("^%s+", "")
+            :gsub("%s+$", "")
+            :gsub("[^%a]", "")
+
+        return RACE_ALIAS_TO_CANONICAL[key]
+    end
+
+    local function displayRace(value)
+        local canonical = normalizeRace(value) or tostring(value or "?")
+        return CANONICAL_TO_DISPLAY[canonical] or canonical
+    end
+
+    -- Mapping dùng canonical names để so sánh chính xác với Data.Race.Value.
+    local ALLY_MAP = {
+        Skypiea = { "Human",   "Mink"     }, -- MainRace Angel
+        Mink    = { "Human",   "Skypiea"  }, -- MainRace Rabbit
+        Ghoul   = { "Skypiea", "Mink"     },
+        Human   = { "Skypiea", "Mink"     },
+        Cyborg  = { "Skypiea", "Mink"     },
+        Fishman = { "Skypiea", "Mink"     }, -- MainRace Shark
+    }
+
+    local function listContains(list, wanted)
+        for _, name in ipairs(list or {}) do
+            if tostring(name) == tostring(wanted) then
+                return true
+            end
+        end
+        return false
+    end
+
+    -- Main = mọi account có tên trong Config.mains.
+    -- Ally1/Ally2 vẫn xác định đúng theo thứ tự Config.allies.
     local function resolveMyRole()
         local me = Config.myName
-        if Config.mains[1] == me then return "main" end
-        if Config.allies[1] == me then return "ally1" end
-        if Config.allies[2] == me then return "ally2" end
+
+        if listContains(Config.mains, me) then
+            return "main"
+        end
+
+        if Config.allies[1] == me then
+            return "ally1"
+        end
+
+        if Config.allies[2] == me then
+            return "ally2"
+        end
+
         return nil
     end
 
-    -- Lấy race hiện tại (pcall an toàn)
+    -- Đọc race hiện tại của CHÍNH LocalPlayer.
     local function getCurrentRace()
-        local ok, v = pcall(function()
-            return LocalPlayer.Data.Race.Value
+        local ok, value = pcall(function()
+            local data = LocalPlayer:FindFirstChild("Data")
+            local race = data and data:FindFirstChild("Race")
+            return race and race.Value
         end)
-        return ok and v or nil
+
+        if not ok or value == nil then
+            return nil, nil
+        end
+
+        return normalizeRace(value), tostring(value)
     end
 
-    -- Reroll race về target (chuỗi race name).
-    -- Standard: BlackbeardReward Reroll 1 → 2.
-    -- Ghoul: Ectoplasm → Change → 4.
-    -- Cyborg: CyborgTrainer → Buy.
+    local function isCurrentRaceTarget(targetRace)
+        local currentCanonical, currentRaw = getCurrentRace()
+        local targetCanonical = normalizeRace(targetRace)
+
+        if not currentCanonical or not targetCanonical then
+            return false, currentCanonical, currentRaw, targetCanonical
+        end
+
+        return currentCanonical == targetCanonical,
+            currentCanonical,
+            currentRaw,
+            targetCanonical
+    end
+
+    -- Reroll race về target.
+    -- Trước khi gọi remote sẽ check LẠI một lần để tránh race vừa đổi xong
+    -- nhưng coroutine cũ vẫn gọi reroll.
     local function doReroll(targetRace)
-        Logger.info("[MAINRACE] reroll → " .. tostring(targetRace), "mainrace_reroll")
-        local R = ReplicatedStorage.Remotes.CommF_
-        if targetRace == "Ghoul" then
-            pcall(function() SafeRemote.invoke(3, "UpgradeRace", "Ectoplasm") end)
-            task.wait(0.3)
-            pcall(function() SafeRemote.invoke(3, "UpgradeRace", "Change") end)
-            task.wait(0.3)
-            pcall(function() SafeRemote.invoke(3, "UpgradeRace", "Buy", 4) end)
-        elseif targetRace == "Cyborg" then
-            pcall(function() SafeRemote.invoke(3, "CyborgTrainer") end)
-            task.wait(0.3)
-            pcall(function() SafeRemote.invoke(3, "CyborgTrainer", "Buy") end)
-        else
-            pcall(function() R:InvokeServer("BlackbeardReward", "Reroll", "1") end)
-            task.wait(0.3)
-            pcall(function() R:InvokeServer("BlackbeardReward", "Reroll", "2") end)
+        local targetCanonical = normalizeRace(targetRace)
+        if not targetCanonical then
+            return false, "invalid_target"
         end
+
+        local alreadyMatch = isCurrentRaceTarget(targetCanonical)
+        if alreadyMatch then
+            Logger.ok(
+                "[MAINRACE] Race đã trùng "
+                    .. displayRace(targetCanonical)
+                    .. " → SKIP reroll",
+                "mainrace_skip_remote"
+            )
+            return true, "already_match"
+        end
+
+        Logger.info(
+            "[MAINRACE] gọi reroll → "
+                .. displayRace(targetCanonical)
+                .. " (canonical="
+                .. tostring(targetCanonical)
+                .. ")",
+            "mainrace_reroll"
+        )
+
+        local R =
+            ReplicatedStorage:FindFirstChild("Remotes")
+            and ReplicatedStorage.Remotes:FindFirstChild("CommF_")
+
+        if not R then
+            return false, "CommF_missing"
+        end
+
+        if targetCanonical == "Ghoul" then
+            -- Giữ nguyên chuỗi remote Ghoul của bản gốc.
+            pcall(function()
+                SafeRemote.invoke(3, "UpgradeRace", "Ectoplasm")
+            end)
+            task.wait(0.3)
+
+            -- Check lại: nếu remote trước đã đổi đúng thì dừng, không gọi tiếp.
+            if isCurrentRaceTarget(targetCanonical) then
+                return true, "matched_after_ectoplasm"
+            end
+
+            pcall(function()
+                SafeRemote.invoke(3, "UpgradeRace", "Change")
+            end)
+            task.wait(0.3)
+
+            if isCurrentRaceTarget(targetCanonical) then
+                return true, "matched_after_change"
+            end
+
+            pcall(function()
+                SafeRemote.invoke(3, "UpgradeRace", "Buy", 4)
+            end)
+
+        elseif targetCanonical == "Cyborg" then
+            -- Giữ nguyên chuỗi remote Cyborg của bản gốc.
+            pcall(function()
+                SafeRemote.invoke(3, "CyborgTrainer")
+            end)
+            task.wait(0.3)
+
+            if isCurrentRaceTarget(targetCanonical) then
+                return true, "matched_after_check"
+            end
+
+            pcall(function()
+                SafeRemote.invoke(3, "CyborgTrainer", "Buy")
+            end)
+
+        else
+            -- Race thường là reroll ngẫu nhiên bằng fragments.
+            -- Check trước từng remote để không reroll thêm nếu race đã đúng.
+            if isCurrentRaceTarget(targetCanonical) then
+                return true, "matched_before_reroll_1"
+            end
+
+            pcall(function()
+                R:InvokeServer(
+                    "BlackbeardReward",
+                    "Reroll",
+                    "1"
+                )
+            end)
+            task.wait(0.3)
+
+            if isCurrentRaceTarget(targetCanonical) then
+                return true, "matched_after_reroll_1"
+            end
+
+            pcall(function()
+                R:InvokeServer(
+                    "BlackbeardReward",
+                    "Reroll",
+                    "2"
+                )
+            end)
+        end
+
+        return true, "remote_sent"
     end
 
-    -- Kiểm tra + reroll nếu cần. Trả true nếu race đúng (hoặc không cần reroll).
-    local function checkAndReroll(targetRace)
-        local cur = getCurrentRace()
-        if not cur then return false end          -- chưa load data
-        if cur == targetRace then return true end  -- đã đúng
-        Logger.warn("[MAINRACE] race hiện tại=" .. cur .. " cần=" .. targetRace .. " → reroll", "mainrace_wrong")
-        status("[MAINRACE] Đang reroll race " .. cur .. " → " .. targetRace .. "...")
-        doReroll(targetRace)
-        task.wait(1)
-        local after = getCurrentRace()
-        local ok = (after == targetRace)
-        if ok then
-            Logger.ok("[MAINRACE] reroll thành công: " .. tostring(after), "mainrace_ok")
-            status("[MAINRACE] Race đúng: " .. tostring(after))
-        else
-            Logger.warn("[MAINRACE] reroll xong nhưng race=" .. tostring(after) .. " (chưa đúng)", "mainrace_fail")
+    local function waitForRaceResult(
+        targetRace,
+        oldCanonical,
+        timeoutSeconds
+    )
+        local deadline = tick() + (tonumber(timeoutSeconds) or 4)
+
+        repeat
+            local matched, currentCanonical =
+                isCurrentRaceTarget(targetRace)
+
+            if matched then
+                return true, currentCanonical
+            end
+
+            -- Race thường reroll ngẫu nhiên: nếu đã đổi sang race khác,
+            -- trả kết quả để vòng check sau quyết định reroll tiếp.
+            if currentCanonical
+                and oldCanonical
+                and currentCanonical ~= oldCanonical
+            then
+                return false, currentCanonical
+            end
+
+            task.wait(0.2)
+        until not Runtime.alive or tick() >= deadline
+
+        local matched, currentCanonical =
+            isCurrentRaceTarget(targetRace)
+
+        return matched, currentCanonical
+    end
+
+    -- MỖI ACCOUNT tự check race hiện tại của chính mình.
+    -- Trùng target = return true ngay và tuyệt đối không gọi doReroll().
+    local function checkAndReroll(targetRace, role)
+        local targetCanonical = normalizeRace(targetRace)
+        if not targetCanonical then
+            Logger.warn(
+                "[MAINRACE] target không hợp lệ: "
+                    .. tostring(targetRace),
+                "mainrace_invalid_target"
+            )
+            return false
         end
+
+        local matched, currentCanonical, currentRaw =
+            isCurrentRaceTarget(targetCanonical)
+
+        if not currentCanonical then
+            Logger.warn(
+                "[MAINRACE]["
+                    .. tostring(role)
+                    .. "] chưa đọc được Data.Race.Value",
+                "mainrace_data_not_ready"
+            )
+            return false
+        end
+
+        -- ĐÚNG RACE: không gọi bất kỳ remote reroll nào.
+        if matched then
+            Logger.ok(
+                "[MAINRACE]["
+                    .. tostring(role)
+                    .. "] current="
+                    .. tostring(currentRaw)
+                    .. " | target="
+                    .. displayRace(targetCanonical)
+                    .. " → TRÙNG, KHÔNG REROLL",
+                "mainrace_already_correct_" .. tostring(role)
+            )
+
+            status(
+                "[MAINRACE]["
+                    .. tostring(role)
+                    .. "] Race đúng: "
+                    .. displayRace(targetCanonical)
+                    .. " → không reroll"
+            )
+
+            return true
+        end
+
+        Logger.warn(
+            "[MAINRACE]["
+                .. tostring(role)
+                .. "] current="
+                .. tostring(currentRaw)
+                .. " ("
+                .. tostring(currentCanonical)
+                .. ") | target="
+                .. displayRace(targetCanonical)
+                .. " ("
+                .. tostring(targetCanonical)
+                .. ") → KHÔNG TRÙNG, reroll",
+            "mainrace_wrong_" .. tostring(role)
+        )
+
+        status(
+            "[MAINRACE]["
+                .. tostring(role)
+                .. "] Đang reroll "
+                .. displayRace(currentCanonical)
+                .. " → "
+                .. displayRace(targetCanonical)
+                .. "..."
+        )
+
+        -- Race có thể đổi giữa lúc check và lúc gọi remote.
+        -- doReroll() có check lại lần cuối trước remote.
+        local sent = doReroll(targetCanonical)
+        if not sent then
+            return false
+        end
+
+        local ok, afterCanonical =
+            waitForRaceResult(
+                targetCanonical,
+                currentCanonical,
+                5
+            )
+
+        if ok then
+            Logger.ok(
+                "[MAINRACE]["
+                    .. tostring(role)
+                    .. "] reroll thành công: "
+                    .. displayRace(afterCanonical),
+                "mainrace_ok_" .. tostring(role)
+            )
+            status(
+                "[MAINRACE]["
+                    .. tostring(role)
+                    .. "] Race đúng: "
+                    .. displayRace(afterCanonical)
+            )
+        else
+            Logger.warn(
+                "[MAINRACE]["
+                    .. tostring(role)
+                    .. "] sau reroll race="
+                    .. displayRace(afterCanonical)
+                    .. " | vẫn cần="
+                    .. displayRace(targetCanonical),
+                "mainrace_fail_" .. tostring(role)
+            )
+        end
+
         return ok
     end
 
-    -- Xác định race target của account này
+    -- Xác định target riêng cho Main / Ally1 / Ally2.
     local function resolveTargetRace()
         local rawTarget = getgenv().MainRace
-        if not rawTarget or rawTarget == "" or rawTarget == "off" or rawTarget == "nil" then
-            return nil -- disabled
+        local rawText = tostring(rawTarget or ""):lower()
+
+        if rawTarget == nil
+            or rawText == ""
+            or rawText == "off"
+            or rawText == "nil"
+        then
+            return nil, nil
         end
-        local mainRace = tostring(rawTarget)
-        local entry = ALLY_MAP[mainRace]
-        if not entry then
-            Logger.warn("[MAINRACE] MainRace=" .. mainRace .. " không hợp lệ (Angel/Shark/Human/Ghoul/Cyborg/Rabbit)", "mainrace_invalid")
-            return nil
+
+        local mainRace = normalizeRace(rawTarget)
+        local entry = mainRace and ALLY_MAP[mainRace] or nil
+
+        if not mainRace or not entry then
+            Logger.warn(
+                "[MAINRACE] MainRace="
+                    .. tostring(rawTarget)
+                    .. " không hợp lệ "
+                    .. "(Angel/Shark/Human/Ghoul/Cyborg/Rabbit)",
+                "mainrace_invalid"
+            )
+            return nil, nil
         end
+
         local role = resolveMyRole()
-        if role == "main"  then return mainRace   end
-        if role == "ally1" then return entry[1]   end
-        if role == "ally2" then return entry[2]   end
-        return nil -- role không xác định → bỏ qua
+
+        if role == "main" then
+            return mainRace, role
+        end
+
+        if role == "ally1" then
+            return entry[1], role
+        end
+
+        if role == "ally2" then
+            return entry[2], role
+        end
+
+        Logger.warn(
+            "[MAINRACE] "
+                .. tostring(Config.myName)
+                .. " không thuộc MainAccount/Allies[1]/Allies[2] → bỏ qua",
+            "mainrace_role_unknown"
+        )
+
+        return nil, nil
     end
 
-    -- Biến chặn gameplay trong khi reroll
     MainRaceReroll._blocking = false
+    MainRaceReroll._resolved = false
+    MainRaceReroll._target = nil
+    MainRaceReroll._role = nil
+    MainRaceReroll._currentRace = nil
+    MainRaceReroll._startedAt = 0
+    MainRaceReroll._attempt = 0
+
+    -- Khoảng nghỉ giữa hai lần reroll.
+    -- checkAndReroll đã chờ kết quả đổi race; khoảng này chỉ chống gọi remote dồn.
+    local MAINRACE_RETRY_INTERVAL = 0.75
 
     function MainRaceReroll.isBlocking()
         return MainRaceReroll._blocking == true
     end
 
-    -- Chạy check ở 0s, 5s, 15s sau khi game ready. Chặn gameplay cho tới khi race đúng
-    -- hoặc check cuối cùng (giây 15) fail → nhả guard để không kẹt vĩnh viễn.
+    function MainRaceReroll.isResolved()
+        return MainRaceReroll._resolved == true
+    end
+
+    function MainRaceReroll.getRole()
+        return MainRaceReroll._role
+    end
+
+    function MainRaceReroll.getTarget()
+        return MainRaceReroll._target
+    end
+
+    function MainRaceReroll.getCurrentRace()
+        local currentCanonical, currentRaw = getCurrentRace()
+        MainRaceReroll._currentRace =
+            currentCanonical or currentRaw
+        return currentCanonical, currentRaw
+    end
+
+    function MainRaceReroll.getStatusText()
+        local currentCanonical, currentRaw =
+            MainRaceReroll.getCurrentRace()
+
+        return "[MAINRACE]["
+            .. tostring(MainRaceReroll._role or "?")
+            .. "] Checking race | current="
+            .. displayRace(currentRaw or currentCanonical)
+            .. " | target="
+            .. displayRace(MainRaceReroll._target)
+            .. " | attempt="
+            .. tostring(MainRaceReroll._attempt or 0)
+    end
+
+    -- Worker chạy cho tới khi race của CHÍNH account trùng target.
+    --
+    -- Main:
+    --   mọi account nằm trong Config.mains đều target getgenv().MainRace.
+    --
+    -- Ally:
+    --   Allies[1] target mapping Ally1;
+    --   Allies[2] target mapping Ally2.
+    --
+    -- Không còn fail-safe 15 giây:
+    -- race chưa đúng thì tiếp tục reroll; chỉ khi đúng mới nhả blocking.
     function MainRaceReroll.start()
-        local target = resolveTargetRace()
-        if not target then return end -- disabled hoặc role không xác định
+        local target, role = resolveTargetRace()
+        if not target or not role then
+            MainRaceReroll._blocking = false
+            MainRaceReroll._resolved = true
+            return
+        end
+
+        MainRaceReroll._target = target
+        MainRaceReroll._role = role
 
         task.spawn(function()
-            -- Chờ game ready
+            -- Chờ game/data/team sẵn sàng.
             local t0 = tick()
-            repeat task.wait(0.2) until _G.gameReady or (tick() - t0) > 60
-
-            local checks = { 0, 5, 15 }
-            local startT = tick()
-            local resolved = false
-
-            MainRaceReroll._blocking = true
-            Logger.info("[MAINRACE] bắt đầu check race, target=" .. target, "mainrace_start")
-
-            for idx, delay in ipairs(checks) do
-                local waitFor = delay - (tick() - startT)
-                if waitFor > 0 then task.wait(waitFor) end
-                if not Runtime.alive then break end
-
-                Logger.info("[MAINRACE] check #" .. idx .. " (+" .. delay .. "s)", "mainrace_check")
-                local ok = checkAndReroll(target)
-                if ok then
-                    resolved = true
+            repeat
+                task.wait(0.2)
+                local data = LocalPlayer:FindFirstChild("Data")
+                local race = data and data:FindFirstChild("Race")
+                if _G.gameReady and LocalPlayer.Team and race then
                     break
                 end
+            until not Runtime.alive or (tick() - t0) > 90
+
+            if not Runtime.alive then
+                return
             end
 
-            -- Nhả guard dù thành công hay không (check cuối = fail-safe)
-            MainRaceReroll._blocking = false
-            if resolved then
-                Logger.ok("[MAINRACE] race resolved → gameplay unblocked", "mainrace_done")
-            else
-                Logger.warn("[MAINRACE] check cuối fail → nhả gameplay guard (tránh kẹt)", "mainrace_guard_release")
-                status("[MAINRACE] Không reroll được sau 15s → tiếp tục")
+            MainRaceReroll._blocking = true
+            MainRaceReroll._resolved = false
+            MainRaceReroll._startedAt = tick()
+            MainRaceReroll._attempt = 0
+
+            Logger.info(
+                "[MAINRACE]["
+                    .. tostring(role)
+                    .. "] continuous self-check start | player="
+                    .. tostring(Config.myName)
+                    .. " | target="
+                    .. displayRace(target)
+                    .. " | canonical="
+                    .. tostring(target),
+                "mainrace_continuous_start_" .. tostring(role)
+            )
+
+            while Runtime.alive do
+                local matched, currentCanonical, currentRaw =
+                    isCurrentRaceTarget(target)
+
+                MainRaceReroll._currentRace =
+                    currentCanonical or currentRaw
+
+                -- Race của chính account đã đúng:
+                -- dừng ngay và tuyệt đối không gọi thêm reroll.
+                if matched then
+                    MainRaceReroll._resolved = true
+                    MainRaceReroll._blocking = false
+
+                    Logger.ok(
+                        "[MAINRACE]["
+                            .. tostring(role)
+                            .. "] current="
+                            .. tostring(currentRaw or currentCanonical)
+                            .. " | target="
+                            .. displayRace(target)
+                            .. " → MATCH, STOP REROLL",
+                        "mainrace_until_match_done_" .. tostring(role)
+                    )
+
+                    status(
+                        "[MAINRACE]["
+                            .. tostring(role)
+                            .. "] Race đúng: "
+                            .. displayRace(target)
+                            .. " → dừng reroll"
+                    )
+                    return
+                end
+
+                MainRaceReroll._attempt =
+                    (MainRaceReroll._attempt or 0) + 1
+
+                -- Mọi Main đều giữ status checking trong lúc chưa đúng race.
+                -- State.reportStatus dùng được cả khi /init chưa kịp set myMainIndex.
+                if role == "main" then
+                    State.reportStatus("checking")
+                end
+
+                status(
+                    "[MAINRACE]["
+                        .. tostring(role)
+                        .. "] current="
+                        .. displayRace(currentRaw or currentCanonical)
+                        .. " ≠ target="
+                        .. displayRace(target)
+                        .. " → reroll attempt "
+                        .. tostring(MainRaceReroll._attempt)
+                )
+
+                -- checkAndReroll luôn check lại race ngay trước remote.
+                -- Nếu race vừa đổi đúng giữa hai nhịp thì remote sẽ được skip.
+                checkAndReroll(target, role)
+
+                -- Kiểm tra ngay sau lần gọi, không chờ sang chu kỳ kế nếu đã đúng.
+                local nowMatched = isCurrentRaceTarget(target)
+                if nowMatched then
+                    MainRaceReroll._resolved = true
+                    MainRaceReroll._blocking = false
+
+                    Logger.ok(
+                        "[MAINRACE]["
+                            .. tostring(role)
+                            .. "] target reached after attempt "
+                            .. tostring(MainRaceReroll._attempt)
+                            .. " → stop",
+                        "mainrace_reached_after_attempt_" .. tostring(role)
+                    )
+
+                    status(
+                        "[MAINRACE]["
+                            .. tostring(role)
+                            .. "] Race đúng: "
+                            .. displayRace(target)
+                            .. " → dừng reroll"
+                    )
+                    return
+                end
+
+                task.wait(MAINRACE_RETRY_INTERVAL)
             end
+
+            -- Runtime tắt thì chỉ nhả lock nội bộ; không đánh dấu resolved giả.
+            MainRaceReroll._blocking = false
         end)
     end
 end
@@ -4268,6 +4757,18 @@ do
         local isMain = State.isMain[me] == true
         _G.ShouldSendData = false
 
+        -- MAINRACE SELF-CHECK:
+        -- Ally1/Ally2 không có checking-window riêng như Main, nên khi race chưa đúng
+        -- phải chặn ngay mọi trial/hop/training cho tới khi worker đạt target.
+        -- Main được phép đi tiếp xuống checking gate 8 giây ở dưới để giữ đúng status
+        -- "checking"; sau 8 giây nếu vẫn chưa đúng sẽ bị chặn tiếp ở guard thứ hai.
+        if MainRaceReroll.isBlocking()
+            and MainRaceReroll.getRole() ~= "main"
+        then
+            status(MainRaceReroll.getStatusText())
+            return
+        end
+
         -- ===== CHECKING GATE (user 2026-07-02): giai đoạn ĐẦU sau khi load team xong chỉ CHECK phase =====
         -- Mốc _G.teamReadyAt = lần đầu thấy LocalPlayer.Team (sau ChooseTeam). Trong CHECK_WINDOW: KHÔNG
         -- join/trial/train, chỉ để 3-strike đọc remote xác định phase; xong window tự chạy tiếp status thật.
@@ -4361,9 +4862,56 @@ do
         -- phase), nhưng CHƯA hành động (join/trial/train). Báo status "checking" để dashboard thấy đang dò.
         -- Hết 5s tick sau tự chạy tiếp theo status thật. CHỈ áp main (ally có loop hold/getsever riêng).
         if isMain and inCheckWindow then
-            -- chỉ POST khi status server chưa phải "checking" (tránh spam ~20 POST/lần vào server suốt 8s)
-            if AB ~= "done" and State.getMainStatus(me) ~= "checking" then State.reportStatus("checking") end
-            status("[MAIN " .. tostring(myStt) .. "] Checking phase (" .. string.format("%.1f", tick() - _G.teamReadyAt) .. "/" .. tostring(CHECK_WINDOW) .. "s)...")
+            -- Trong 8 giây đầu:
+            -- 1) 3-strike phase-check gốc vẫn chạy;
+            -- 2) MainRaceReroll worker đồng thời tự check/reroll race;
+            -- 3) Main chưa được join/trial/train.
+            if AB ~= "done" and State.getMainStatus(me) ~= "checking" then
+                State.reportStatus("checking")
+            end
+
+            if MainRaceReroll.isBlocking()
+                and MainRaceReroll.getRole() == "main"
+            then
+                status(
+                    "[MAIN "
+                        .. tostring(myStt)
+                        .. "] Checking phase "
+                        .. string.format("%.1f", tick() - _G.teamReadyAt)
+                        .. "/"
+                        .. tostring(CHECK_WINDOW)
+                        .. "s | "
+                        .. MainRaceReroll.getStatusText()
+                )
+            else
+                status(
+                    "[MAIN "
+                        .. tostring(myStt)
+                        .. "] Checking phase ("
+                        .. string.format("%.1f", tick() - _G.teamReadyAt)
+                        .. "/"
+                        .. tostring(CHECK_WINDOW)
+                        .. "s)..."
+                )
+            end
+            return
+        end
+
+        -- Hết checking-window 8 giây nhưng MainRace vẫn chưa đúng:
+        -- tiếp tục giữ status checking và chặn gameplay; KHÔNG nhả sau timeout.
+        -- Chỉ worker MainRaceReroll khi thấy exact target mới nhả blocking.
+        if MainRaceReroll.isBlocking()
+            and MainRaceReroll.getRole() == "main"
+        then
+            if State.getMainStatus(me) ~= "checking" then
+                State.reportStatus("checking")
+            end
+            status(
+                "[MAIN "
+                    .. tostring(myStt)
+                    .. "] Checking race after 8s | "
+                    .. MainRaceReroll.getStatusText()
+            )
             return
         end
 
