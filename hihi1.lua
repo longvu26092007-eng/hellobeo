@@ -1,9 +1,9 @@
 --[[
 ================================================================================
- KaitunV4 — CLEAN MAX (BEHAVIOR-PRESERVING) — PORT ĐẦY ĐỦ HÀNH VI TỪ FILE A
+ KaitunV4 — BẢN 2 (CLEAN ARCHITECTURE) — PORT ĐẦY ĐỦ HÀNH VI TỪ FILE A
 ================================================================================
  NGUYÊN TẮC: File A (KaitunV4(2).lua) là SOURCE OF TRUTH về hành vi.
- File này GIỮ nguyên RUỘT (logic) từ bản đã kiểm thử, đồng thời dọn dead code và state nội bộ
+ File này GIỮ kiến trúc module sạch của bản 2, nhưng RUỘT (logic) lấy y chang
  File A — cùng luồng, cùng điều kiện, cùng cách đọc/ghi file sync, cùng cách
  active ability (CommE:FireServer("ActivateAbility")), cùng trial/training/
  post-trial. Chỉ KHÁC ở chỗ: code gọn hơn, ít lỗi hơn, hot-path không HTTP,
@@ -107,29 +107,6 @@ do
     Config.baseUrl         = getgenv().API_URL or "http://127.0.0.1:20425"
     Config.myName          = LocalPlayer.Name
 
-    -- [STANDARD PATCH] Expose geometry-derived FFA observer margins without changing defaults/flow.
-    -- Loader may set:
-    --   getgenv().FFA_ZONE = { innerMargin=70, outerMargin=160, innerMarginY=40, outerMarginY=90 }
-    -- Invalid/missing values fall back to the exact previous defaults; outer is always > inner.
-    do
-        local rawZone = getgenv().FFA_ZONE
-        if type(rawZone) ~= "table" then rawZone = {} end
-        local inner  = tonumber(rawZone.innerMargin)  or 70
-        local outer  = tonumber(rawZone.outerMargin)  or 160
-        local innerY = tonumber(rawZone.innerMarginY) or 40
-        local outerY = tonumber(rawZone.outerMarginY) or 90
-        if inner <= 0 then inner = 70 end
-        if innerY <= 0 then innerY = 40 end
-        if outer <= inner then outer = math.max(160, inner + 1) end
-        if outerY <= innerY then outerY = math.max(90, innerY + 1) end
-        Config.ffaZone = {
-            innerMargin = inner,
-            outerMargin = outer,
-            innerMarginY = innerY,
-            outerMarginY = outerY,
-        }
-    end
-
     -- File A 16-17
     Config.SEA3_PLACEIDS = { [7449423635] = true, [100117331123089] = true }
     Config.SEA2_PLACEIDS = { [4442272183] = true, [79091703265657] = true }
@@ -145,7 +122,6 @@ do
     Config.UI_THROTTLE        = 0.2    -- File A live status 0.2s
     Config.DEAD_JOB_TTL       = 1800   -- File A 2175
     Config.MAIN_TURN_TIMEOUT  = 300    -- File A 1752
-    Config.TRIAL_ACTIVE_TIMEOUT = 60   -- timeout riêng cho một lần Trial Race (không phải toàn lượt Main)
     Config.TRAIN_WINDOW       = 300    -- File A 1612
     Config.HELPRESET_TIMEOUT  = 25     -- File A 2005
     -- CLEAN JOIN: fullmoon-join LUÔN do server + 2 Ally điều phối (bỏ tự-hop). Method chỉ là hành vi sau trial.
@@ -153,13 +129,6 @@ do
     Config.RALLY_HOP_THROTTLE = 5      -- giây: chống spam teleport tới 1 jobid
     Config.FM_JOIN_BACKOFF    = 8      -- giây: sau khi hop vào FM gặp GameFull (server đầy) → ngừng spam join, chờ slot
     Config.MOON_CONCURRENT_MAX = 5     -- stt tối đa được "moon"/spam-join cùng lúc (stt1=Main1 ready; stt2-5 moon). >5 → waiting chờ slot
-
-    -- ===== FEATURE FLAGS CLIENT — protocol V2 MẶC ĐỊNH BẬT =====
-    -- Event protocol client (gửi /event critical FIFO + /sync long-poll). MẶC ĐỊNH BẬT.
-    --   Client tự fallback route cũ (/curmain 0.7s + /helpreset + /lockmoon) nếu server trả disabled/404/lỗi liên tục.
-    --   Tắt tay: getgenv().ENABLE_EVENT_PROTOCOL=false.
-    Config.enableEventProtocol = getgenv().ENABLE_EVENT_PROTOCOL ~= false  -- MẶC ĐỊNH true
-    Config.enableLongPoll       = getgenv().ENABLE_LONG_POLL ~= false       -- MẶC ĐỊNH true
 end
 
 --[[ ============================================================================
@@ -188,74 +157,13 @@ local function nonEmpty(v)
 end
 
 --[[ ============================================================================
- [03] DIAGNOSTICS / LOGGER
-============================================================================ ]]
--- Diagnostics là state quan sát nội bộ. Mỗi lần ghi vẫn mirror sang _G để giữ
--- tương thích UI/executor cũ, nhưng core không còn phụ thuộc trực tiếp vào _G.
-local _diagnosticsData = {}
-local Diagnostics = setmetatable({}, {
-    __index = function(_, key)
-        return _diagnosticsData[key]
-    end,
-    __newindex = function(_, key, value)
-        _diagnosticsData[key] = value
-        rawset(_G, key, value)
-    end,
-})
-
-local DIAGNOSTIC_KEYS = {
-    "dbgLog", "dbgSeq", "statusnow", "lastRaceI", "lastDoorDist",
-    "lastDoorSrc", "lastSameSrv", "lastDoorName", "lastDoorTouchReason",
-    "netDiag", "netGetOk", "netPostOk", "fullStatus",
-}
-for _, key in ipairs(DIAGNOSTIC_KEYS) do
-    Diagnostics[key] = rawget(_G, key)
-end
-
--- RuntimeState owns mutable coordination flags that used to be scattered across _G.
--- The bridge mirrors writes to the legacy global names and observes external writes,
--- preserving compatibility while giving the core one explicit state owner.
-local _runtimeStateData = {}
-local RuntimeState = setmetatable({}, {
-    __index = function(_, key)
-        local externalValue = rawget(_G, key)
-        if externalValue ~= nil and externalValue ~= _runtimeStateData[key] then
-            _runtimeStateData[key] = externalValue
-        end
-        return _runtimeStateData[key]
-    end,
-    __newindex = function(_, key, value)
-        _runtimeStateData[key] = value
-        rawset(_G, key, value)
-    end,
-})
-
-local RUNTIME_STATE_KEYS = {
-    "teamReadyAt", "trainKills", "trialableStreak", "fmJoinBackoffUntil",
-    "trainWinStart", "trainNeedStreak", "inTrial", "allyLastFire",
-    "uncertainStreak", "allyHopArmedT", "myFireEpoch", "syncStart",
-    "allyKillReset", "teamLostAt", "myTurnStart", "_tsCacheValue",
-    "trainHopArmedT", "rallyHopArmedT", "myDoorReady", "myStartEpoch",
-    "didTrialInFM", "checkDoneForJob", "trainCheckLastT",
-    "_deathGuardConnection", "_tsCacheTime", "lastTempleReparent",
-    "lastReqEntrance", "lastRallyJob", "trainGrindLastT", "templeDoorOK",
-    "isAllyLeader", "__leaderOnFmLost", "__leaderSetTarget",
-    "trainingHopped", "changeFileWritten", "loopTick", "loopLastT",
-    "minkLastTrial", "minkStartPoint", "skyFinish", "checkJobId",
-    "firstLoopHit", "jobidinput", "gameReady", "isScoutAlly",
-}
-for _, key in ipairs(RUNTIME_STATE_KEYS) do
-    RuntimeState[key] = rawget(_G, key)
-end
-
---[[ ============================================================================
  [03] LOGGER / DEBUG — ring buffer 200 dòng, chống spam cùng key 15s. (File A 1331-1368)
 ============================================================================ ]]
 local Logger = {}
 do
     Logger.logs = {}
-    Diagnostics.dbgLog = Logger.logs
-    Diagnostics.dbgSeq = 0
+    _G.dbgLog   = Logger.logs
+    _G.dbgSeq   = 0
     Logger._lastKey = {}
     local MAX, SPAM_TTL = 200, 15
 
@@ -268,14 +176,14 @@ do
         local t = tick()
         if Logger._lastKey[key] and (t - Logger._lastKey[key]) < SPAM_TTL then return end
         Logger._lastKey[key] = t
-        Diagnostics.dbgSeq = Diagnostics.dbgSeq + 1
+        _G.dbgSeq = _G.dbgSeq + 1
         local hm = "--:--:--"
         pcall(function()
             local base = Logger.timeFn()
             local s = math.floor(base + 7 * 3600) % 86400   -- giờ Việt Nam (UTC+7)
             hm = string.format("%02d:%02d:%02d", math.floor(s / 3600), math.floor((s % 3600) / 60), s % 60)
         end)
-        Logger.logs[#Logger.logs + 1] = { seq = Diagnostics.dbgSeq, text = "[" .. hm .. "] " .. tostring(msg), level = level }
+        Logger.logs[#Logger.logs + 1] = { seq = _G.dbgSeq, text = "[" .. hm .. "] " .. tostring(msg), level = level }
         while #Logger.logs > MAX do table.remove(Logger.logs, 1) end
         if level == "err" or level == "warn" then warn("[KaitunV4] " .. tostring(msg)) end
     end
@@ -288,25 +196,6 @@ end
 -- DBG/status: tương thích tên File A (một số chỗ port giữ nguyên cách gọi).
 local function DBG(msg, level, key) Logger.log(msg, level, key) end
 
-local Safe = {}
-function Safe.call(label, fn, ...)
-    local ok, result = pcall(fn, ...)
-    if not ok then
-        Logger.warn("[SAFE] " .. tostring(label) .. ": " .. tostring(result), "safe_" .. tostring(label))
-        return false, result
-    end
-    return true, result
-end
-function Safe.disconnect(connection, label)
-    if not connection then return true end
-    local ok, err = pcall(function() connection:Disconnect() end)
-    if not ok then
-        Logger.warn("[SAFE] disconnect " .. tostring(label or "connection") .. ": " .. tostring(err),
-            "safe_disconnect_" .. tostring(label or "connection"))
-    end
-    return ok
-end
-
 --[[ ============================================================================
  [04] RUNTIME / LIFECYCLE — alive flag, teleport guard, offline-once. (File A 362-456)
 ============================================================================ ]]
@@ -316,7 +205,6 @@ local Runtime = {
     startedAt    = tick(),
     _offlineSent = false,
     _started     = false,
-    startedModules = {},
 }
 function Runtime.stop(reason)
     Runtime.alive = false
@@ -324,13 +212,13 @@ function Runtime.stop(reason)
 end
 
 --[[ ============================================================================
- [05] STATUS — Diagnostics.statusnow + đẩy vào Debug log (File A 1357-1368)
+ [05] STATUS — _G.statusnow + đẩy vào Debug log (File A 1357-1368)
 ============================================================================ ]]
 local function status(v)
-    Diagnostics.statusnow = tostring(v)
-        .. ((Diagnostics.lastRaceI ~= nil) and ("  [i=" .. tostring(Diagnostics.lastRaceI) .. "]") or "")
-        .. ((Diagnostics.lastDoorDist ~= nil) and ("  [d=" .. tostring(math.floor(Diagnostics.lastDoorDist))
-            .. (Diagnostics.lastDoorSrc or "?") .. (Diagnostics.lastSameSrv and "/same" or "/diff") .. "]") or "")
+    _G.statusnow = tostring(v)
+        .. ((_G.lastRaceI ~= nil) and ("  [i=" .. tostring(_G.lastRaceI) .. "]") or "")
+        .. ((_G.lastDoorDist ~= nil) and ("  [d=" .. tostring(math.floor(_G.lastDoorDist))
+            .. (_G.lastDoorSrc or "?") .. (_G.lastSameSrv and "/same" or "/diff") .. "]") or "")
     local sv = tostring(v)
     local lvl = "info"
     if sv:find("Lỗi") or sv:find("⚠") or sv:find("FAIL") or sv:find("Died") then lvl = "err"
@@ -357,10 +245,132 @@ function FileStore.writeJson(path, tbl)
 end
 
 --[[ ============================================================================
- [06b] LEGACY CLEANUP
+[06b] CHANGEFOLDER — gọi getgenv().client:ChangeToFolder khi main DONE.
+     Config ngoài loader:
+         getgenv().change = true|false   (bật/tắt)
+         getgenv().id1 = "..."            (bắt buộc)
+         getgenv().id2 = "..."            (bắt buộc)
+         getgenv().id3 = "..." | "........." | "nil"   (optional, truyền nil nếu trống)
+     Lock + cooldown chống spam; success → Disconnect + Shutdown.
 ============================================================================ ]]
--- ChangeFolder/Disconnect/Shutdown sau khi DONE đã bị loại khỏi runtime.
--- Không giữ dead hook trong core để tránh vô tình bật lại flow cũ.
+local Hooks = {}   -- BS-6: expose nội bộ (thay cho _G) — StateMachine gọi Hooks.ChangeFolderAfterCompleted
+do
+    -- lock chống gọi ChangeToFolder trùng lặp
+    local _ChangeFolderLock          = false
+    local _LastChangeFolderFailAt    = 0
+    local _ChangeFolderRetryCooldown = 10
+
+    -- id3 optional: bỏ trống / "........." / "nil" → trả về nil THẬT
+    local function NormalizeFolderId(value, allowNil)
+        if value == nil then
+            return (allowNil and nil or nil), false
+        end
+
+        local s = tostring(value)
+        s = s:gsub("^%s+", ""):gsub("%s+$", "")
+
+        if s == "" or s == "........." or s:match("^%.+$") then
+            return (allowNil and nil or nil), false
+        end
+
+        if s:lower() == "nil" then
+            return (allowNil and nil or nil), false
+        end
+
+        return s, true
+    end
+
+    local function ChangeFolderAfterCompleted(reason)
+        if not getgenv().change then return false end
+        if _ChangeFolderLock then return false end
+
+        if _LastChangeFolderFailAt > 0
+            and (tick() - _LastChangeFolderFailAt) < _ChangeFolderRetryCooldown then
+            return false
+        end
+
+        local client = getgenv().client
+        if type(client) ~= "table" and type(client) ~= "userdata" then
+            warn("[ChangeFolder] getgenv().client không tồn tại")
+            _LastChangeFolderFailAt = tick()
+            return false
+        end
+
+        if type(client.ChangeToFolder) ~= "function" then
+            warn("[ChangeFolder] getgenv().client:ChangeToFolder không tồn tại")
+            _LastChangeFolderFailAt = tick()
+            return false
+        end
+
+        local id1, ok1 = NormalizeFolderId(getgenv().id1, false)
+        local id2, ok2 = NormalizeFolderId(getgenv().id2, false)
+        local id3      = NormalizeFolderId(getgenv().id3, true)
+
+        if not ok1 or not ok2 then
+            warn("[ChangeFolder] Thiếu id1/id2, không gọi ChangeToFolder")
+            _LastChangeFolderFailAt = tick()
+            return false
+        end
+
+        _ChangeFolderLock = true
+
+        warn("[ChangeFolder] Completed -> gọi ChangeToFolder, reason=" .. tostring(reason))
+
+        pcall(function()
+            status("[ChangeFolder] Completed -> changing folder...")
+        end)
+
+        local ok, ret = pcall(function()
+            return client:ChangeToFolder(id1, id2, true, id3)
+        end)
+
+        if not ok then
+            warn("[ChangeFolder] Lỗi khi gọi ChangeToFolder: " .. tostring(ret))
+            pcall(function()
+                status("[ChangeFolder] Failed, retry later")
+            end)
+            _ChangeFolderLock = false
+            _LastChangeFolderFailAt = tick()
+            return false
+        end
+
+        local changed = ret and true or false
+
+        if changed then
+            warn("[ChangeFolder] Successfully changed folder, disconnecting to apply changes...")
+            pcall(function()
+                status("[ChangeFolder] Changed folder -> shutdown")
+            end)
+
+            pcall(function()
+                if getgenv().client and type(getgenv().client.Disconnect) == "function" then
+                    getgenv().client:Disconnect()
+                end
+            end)
+
+            task.wait(5)
+
+            pcall(function()
+                game:Shutdown()
+            end)
+
+            return true
+        else
+            warn("[ChangeFolder] Failed to change folder")
+            pcall(function()
+                status("[ChangeFolder] Failed, retry later")
+            end)
+            _ChangeFolderLock = false
+            _LastChangeFolderFailAt = tick()
+            task.wait(10)
+            return false
+        end
+    end
+
+    -- BS-6: expose qua Hooks (KHÔNG dùng _G) — chỉ trong file
+    Hooks.ChangeFolderAfterCompleted = ChangeFolderAfterCompleted
+    Hooks.NormalizeFolderId          = NormalizeFolderId
+end
 
 -- File A 1-3: xoá cache module cũ (giờ module nhúng thẳng).
 pcall(function()
@@ -553,64 +563,6 @@ do
             end
         end
     end
-
-    -- [FINAL §8.1] Net.postJSONSync — POST JSON ĐỒNG BỘ, đọc body + decode, trả ACK thật.
-    --   return: ok(bool), decoded(table|nil), statusCode(number), errorMessage(string|nil)
-    --   KHÁC postJSON (fire-and-forget): dùng cho CRITICAL event cần ACK. KHÔNG coi 200-body-sai là ok.
-    --   Có semaphore để không mở quá nhiều request đồng thời, nhưng KHÔNG block MainTick (gọi trong worker riêng).
-    function Net.postJSONSync(url, payload, timeoutSeconds)
-        local bodyStr
-        local encOk = pcall(function() bodyStr = HttpService:JSONEncode(payload or {}) end)
-        if not encOk then return false, nil, 0, "json_encode_fail" end
-        acquirePost()
-        -- [§XXIII-13] TIMEOUT HỮU HẠN: chạy request trong thread con, thread chính chờ tối đa timeoutSeconds.
-        --   httprequest yield trong thread con; nếu quá hạn → trả timeout cho caller (KHÔNG treo worker vô hạn).
-        local tmo = tonumber(timeoutSeconds) or 8
-        if not (tmo > 0) then tmo = 8 end
-        local done, ok, status_, respBody, err = false, nil, nil, nil, nil
-        task.spawn(function()
-            local a, b, c, d = rawRequest("POST", url, bodyStr)
-            ok, status_, respBody, err = a, b, c, d
-            done = true
-        end)
-        local t0 = tick()
-        while not done and (tick() - t0) < tmo do task.wait() end
-        releasePost()
-        if not done then return false, nil, 0, "post_timeout" end
-        if not ok then return false, nil, status_ or 0, tostring(err or "request_fail") end
-        -- HTTP status ngoài 2xx → coi là lỗi (server disabled trả 4xx…)
-        if status_ and (status_ < 200 or status_ >= 300) then
-            -- vẫn thử decode để lấy reason (vd disabled/404 body JSON)
-            local d2 = nil
-            pcall(function() d2 = HttpService:JSONDecode(respBody or "") end)
-            return false, d2, status_, "http_" .. tostring(status_)
-        end
-        if type(respBody) ~= "string" or #respBody == 0 then
-            return false, nil, status_ or 0, "empty_body"
-        end
-        local decoded
-        local decOk = pcall(function() decoded = HttpService:JSONDecode(respBody) end)
-        if not decOk or type(decoded) ~= "table" then
-            return false, nil, status_ or 0, "json_decode_fail"
-        end
-        return true, decoded, status_ or 200, nil
-    end
-    -- [FINAL §10] Net.getJSONSync — GET JSON đồng bộ đọc body (dùng cho /sync long-poll + /curmain fallback).
-    function Net.getJSONSync(url)
-        acquireGet()
-        local ok, status_, respBody, err = rawRequest("GET", url, nil)
-        releaseGet()
-        if not ok then return false, nil, status_ or 0, tostring(err or "request_fail") end
-        if status_ and (status_ < 200 or status_ >= 300) then
-            return false, nil, status_, "http_" .. tostring(status_)
-        end
-        if type(respBody) ~= "string" or #respBody == 0 then return false, nil, status_ or 0, "empty_body" end
-        local decoded
-        local decOk = pcall(function() decoded = HttpService:JSONDecode(respBody) end)
-        if not decOk or type(decoded) ~= "table" then return false, nil, status_ or 0, "json_decode_fail" end
-        return true, decoded, status_ or 200, nil
-    end
-
     local function worker()
         while Runtime.alive do
             local job = qPop()
@@ -668,47 +620,7 @@ do
     -- CLEAN JOIN: chống "chưa trial đã done" — chỉ set done/training khi thật sự đã vào trial lượt này
     State.didEnterTrialThisTurn = false
     State.trialStartedAt        = 0
-    State.trialStartedCycleId   = nil  -- cycle mà timer Trial 60s đang đo
-    State.trialTimeoutCycleId   = nil  -- latch chặn cùng cycle tự bật lại in_trail sau timeout
     State._lastCurrentMain      = nil  -- BS-5: theo dõi current đổi cycle
-    -- [FINAL §7.2] session do server cấp
-    State.sessionToken      = nil
-    State.sessionGeneration = 0
-    State.eventSequence     = 0
-    State._sessionStale     = false
-    -- [FIX #1] Character token: KHÔNG dùng tostring(Character) (hai Character cũ/mới thường trùng tên account
-    --   → old==new → server reject character_unchanged, helpreset không ghi, Main không bao giờ đủ điều kiện thắng).
-    --   clientBootId ổn định theo phiên script; characterGeneration tăng ĐÚNG 1 lần mỗi Character mới (một
-    --   lifecycle manager duy nhất — xem CharacterTracker). Token = sessionGeneration:clientBootId:characterGeneration.
-    --   KHÔNG nhét trialCycleId vào token (token đại diện Character, không đại diện cycle).
-    State.clientBootId       = State.clientBootId or nil  -- sinh 1 lần ở CharacterTracker.init
-    State.characterGeneration = 0
-    State.characterToken     = nil
-    -- [FINAL §12] post-trial per-cycle state (thay State.postTrialDeathDetected bị reset mỗi tick)
-    State.activeCycleId          = nil
-    State.postTrialPhase         = "idle"
-    State.postTrialStartedAt     = nil
-    State.postTrialCycleId       = nil  -- cycle canon của grace/kill phase
-    State.postTrialHoldCFrame    = nil  -- vị trí giữ Main đứng im đủ 4 giây
-    State.postTrialEliminated    = {}   -- userId đã chết trong cycle; respawn không đánh lại
-    State.postTrialSeen          = {}   -- userId từng được thấy trong FFA
-    State.postTrialCharacters    = {}   -- userId -> Character đầu tiên của participant trong cycle
-    State.postTrialDeathDetected = false
-    State.intentionalPostTrialReset = false
-    State.intentionalResetCycleId    = nil   -- [§XIV] cycle của intentional reset (chỉ set khi win_confirmed)
-    State.intentionalResetCharacter  = nil   -- [§XIV] Character tại thời điểm intentional reset
-    State.winCandidateEventId    = nil
-    State.winConfirmed           = false
-    State.lastCycleResult        = nil
-    -- [FINAL §10] state từ /sync long-poll
-    State.stateRevision     = 0
-    State.trialCycleId      = nil
-    State.trialCycleState   = "idle"
-    State.trialResult       = nil       -- final result của cycle (win_confirmed/loss/cancelled)
-    State.trialResultCycle  = nil
-    State.fullmoonUnlockPending = false
-    State._syncActive       = false     -- có 1 long-poll đang chạy?
-    State._syncHealthy      = false     -- /sync ổn định → tắt fast /curmain
 
     for _, v in ipairs(Config.allies) do State.isAlly[v] = true end
 
@@ -806,7 +718,6 @@ do
     Logger.timeFn = ServerSync.now
 
     -- /init: gộp identify + allmains 1 request, retry 8 lần (File A 283-313)
-    -- [FINAL §7.1] server cấp session_token + session_generation → lưu vào State cho CriticalEvents dùng.
     function ServerSync.init()
         local allies_str = table.concat(Config.allies, ",")
         local mains_str  = table.concat(Config.mains, ",")
@@ -833,32 +744,10 @@ do
                     end
                 end
             end
-            -- [FINAL §7.2] lưu session do server cấp. Chỉ khi có token mới bật gửi event V2.
-            if type(data.session_token) == "string" and #data.session_token > 0 then
-                State.sessionToken = data.session_token
-                State.sessionGeneration = tonumber(data.session_generation) or 1
-                State._sessionStale = false
-                State.eventSequence = 0
-                -- [FIX #1] session đổi → rebuild characterToken để nhét sessionGeneration mới (token cũ tự vô hiệu).
-                if _G.KaitunRebuildToken then pcall(_G.KaitunRebuildToken) end
-                Net.log("INFO", "/init session gen=" .. tostring(State.sessionGeneration))
-            end
             Net.log("INFO", "/init OK role=" .. tostring(State.myRole) .. " index=" .. tostring(State.myMainIndex))
         else
             Net.log("ERR", "/init thất bại hoàn toàn — sẽ retry qua warmer")
         end
-        return data ~= nil
-    end
-
-    -- [FINAL §8.3] re-init khi session client bị server báo stale (token/generation cũ).
-    ServerSync._lastReinitAt = 0
-    function ServerSync.reinitIfStale()
-        if not State._sessionStale then return end
-        if (tick() - (ServerSync._lastReinitAt or 0)) < 3 then return end -- cooldown chống spam re-init
-        ServerSync._lastReinitAt = tick()
-        Net.log("WARN", "session stale → re-init lấy token mới")
-        State._sessionStale = false
-        ServerSync.init()
     end
 
     -- Heartbeat kèm cờ fullmoon (File A 368-373). isfullmoon là global khai báo dưới → pcall.
@@ -885,12 +774,6 @@ do
     function ServerSync.sendOffline()
         if Runtime._offlineSent then return end
         Runtime._offlineSent = true
-        -- [FINAL §9/A4] báo offline qua event (main offline giữa FFA = loss ở server) — best-effort, không chờ.
-        pcall(function()
-            if Config.enableEventProtocol and CriticalEvents.enabled() and State.trialCycleId then
-                CriticalEvents.emit("offline", { cycle_id = State.trialCycleId })
-            end
-        end)
         -- BS-8: GỬI offline TRƯỚC, tắt runtime SAU (tránh worker loop thoát trước khi gửi kịp)
         local url = endpoint("/offline", { name = Config.myName })
         pcall(function()
@@ -924,7 +807,6 @@ do
         task.spawn(function()
             while Runtime.alive do
                 ServerSync.sendHeartbeat()
-                pcall(ServerSync.reinitIfStale) -- [FINAL §8.3] re-init nếu session bị server báo stale
                 for _ = 1, Config.HEARTBEAT_INTERVAL do
                     if not Runtime.alive then break end
                     task.wait(1)
@@ -932,167 +814,70 @@ do
             end
         end)
         -- warmer /curmain ~0.7s: 1 request lấy order + status MỌI main + jobid main stt1 (File A 493-519)
-        -- [FINAL §10/A8] khi /sync long-poll ổn định (State._syncHealthy) → GIÃN poll này ra (0.7s→2.5s)
-        --   để KHÔNG chạy fast-poll + long-poll song song lâu dài. /sync lỗi → tự về nhịp cũ.
         task.spawn(function()
             while Runtime.alive do
                 pcall(function()
                     local data = ServerSync.fetchCurMain()
                     if data and type(data.order) == "table" then
-                        ServerSync.applyCurMain(data)
+                        State.serverMainOrder = data.order
+                        State.serverCurMain   = data.current
+                        State.serverCurJobid  = data.current_jobid
+                        State._lastCurMainOK  = tick()
+                        -- BS-5: reset didEnterTrialThisTurn khi (a) fullmoon UNLOCK, (b) current main đổi cycle
+                        if State.isMain[State.myName] then
+                            local prevLocked = State.fullmoonLocked
+                            if prevLocked and (data.fullmoon_locked ~= true) then State.didEnterTrialThisTurn = false end
+                            if State._lastCurrentMain ~= nil and data.current ~= State._lastCurrentMain then
+                                State.didEnterTrialThisTurn = false
+                            end
+                        end
+                        State._lastCurrentMain = data.current
+                        -- CLEAN JOIN: field điều hướng
+                        State.fullmoonLocked    = data.fullmoon_locked == true
+                        State.gateOpenedOnce    = data.gate_opened_once == true
+                        State.gateOpen          = data.gate_open == true
+                        State.trialPhase        = tostring(data.trial_phase or "idle")
+                        State.fullmoonJobid     = nonEmpty(data.fullmoon_jobid)
+                        State.allyTargetJobid   = nonEmpty(data.ally_target_jobid)
+                        State.main1Name         = nonEmpty(data.main1_name)
+                        State.requiredAllies    = tonumber(data.required_allies or 2) or 2
+                        State.allyLeader        = nonEmpty(data.ally_leader)
+                        State.fullmoonAllyCount = tonumber(data.fullmoon_ally_count or 0) or 0
+                        State.candidateAllyCount= tonumber(data.candidate_ally_count or 0) or 0
+                        State.joinSpamInterval  = tonumber(data.join_spam_interval or 5) or 5
+                        State.mainJoinTimeout   = tonumber(data.main_join_timeout or 45) or 45
+                        State.partyOrder        = (type(data.party_order) == "table") and data.party_order or {}
+                        if State.fullmoonJobid or State.allyTargetJobid then State.lastScoutSignalAt = tick() end
+                        _G.srvMainOrder    = data.order
+                        _G.srvCurMain      = data.current
+                        _G.srvCurMainJobid = data.current_jobid
+                        -- nóng statusCache cho TẤT CẢ main TRỪ chính mình (self do setMyMainStatus quản lý)
+                        if type(data.mains) == "table" then
+                            for _, m in ipairs(data.mains) do
+                                if m.name and m.name ~= State.myName then
+                                    State.statusCache[m.name] = { t = tick(), status = m.status or "waiting" }
+                                end
+                            end
+                        end
+                        local curr = data.current
+                        if curr and curr ~= State.myName and data.current_jobid and data.current_jobid ~= "" then
+                            -- dùng gettimeserver() thay data.current_time để freshness reset mỗi lần poll
+                            State.mainJobCache[curr] = { jobid = data.current_jobid, time = gettimeserver(), t = tick() }
+                        end
                     end
                 end)
-                if State._syncHealthy then task.wait(2.5) else task.wait(Config.CURMAIN_INTERVAL) end
+                task.wait(Config.CURMAIN_INTERVAL)
             end
-        end)
-        -- [FINAL §10/A8] /sync LONG-POLL: 1 request duy nhất, chờ tối đa 20s, áp state từ /sync.
-        if Config.enableLongPoll then ServerSync.startSyncLoop() end
-    end
-
-    -- [FINAL] tách áp dụng dữ liệu /curmain ra hàm riêng để cả fast-poll và /sync tái dùng.
-    function ServerSync.applyCurMain(data)
-        if not (data and type(data.order) == "table") then return end
-        State.serverMainOrder = data.order
-        State.serverCurMain   = data.current
-        State.serverCurJobid  = data.current_jobid
-        State._lastCurMainOK  = tick()
-        if State.isMain[State.myName] then
-            local prevLocked = State.fullmoonLocked
-            if prevLocked and (data.fullmoon_locked ~= true) then State.didEnterTrialThisTurn = false end
-            if State._lastCurrentMain ~= nil and data.current ~= State._lastCurrentMain then
-                State.didEnterTrialThisTurn = false
-            end
-        end
-        State._lastCurrentMain = data.current
-        State.fullmoonLocked    = data.fullmoon_locked == true
-        State.gateOpenedOnce    = data.gate_opened_once == true
-        State.gateOpen          = data.gate_open == true
-        State.trialPhase        = tostring(data.trial_phase or "idle")
-        State.fullmoonJobid     = nonEmpty(data.fullmoon_jobid)
-        State.allyTargetJobid   = nonEmpty(data.ally_target_jobid)
-        State.main1Name         = nonEmpty(data.main1_name)
-        State.requiredAllies    = tonumber(data.required_allies or 2) or 2
-        State.allyLeader        = nonEmpty(data.ally_leader)
-        State.fullmoonAllyCount = tonumber(data.fullmoon_ally_count or 0) or 0
-        State.candidateAllyCount= tonumber(data.candidate_ally_count or 0) or 0
-        State.joinSpamInterval  = tonumber(data.join_spam_interval or 5) or 5
-        State.mainJoinTimeout   = tonumber(data.main_join_timeout or 45) or 45
-        State.partyOrder        = (type(data.party_order) == "table") and data.party_order or {}
-        -- [FINAL §10] trial cycle + revision (additive fields; nil-safe)
-        if data.state_revision ~= nil then State.stateRevision = tonumber(data.state_revision) or State.stateRevision end
-        if data.trial_cycle_id ~= nil then
-            -- cycle đổi → cho phép TrialEvents emit lại lượt mới (dedup theo cycle)
-            if data.trial_cycle_id ~= State.trialCycleId and TrialEvents then
-                pcall(function() TrialEvents.resetForNewCycle() end)
-                State.winConfirmed = false
-                State.trialStartedAt = 0
-                State.trialStartedCycleId = nil
-                State.trialTimeoutCycleId = nil
-                State.postTrialStartedAt = nil
-                State.postTrialCycleId = nil
-                State.postTrialHoldCFrame = nil
-                -- [FIX #5] KHÔNG clear intentional-reset flags ở đây (đường /sync–/curmain). Nếu /curmain tới
-                --   đúng lúc Main vừa Health=0 mà Humanoid.Died chưa chạy, clear ở đây → death thật bị hiểu là
-                --   death (không phải intentional) → gửi main_died oan. Chỉ processAfterRespawn() được clear.
-            end
-            State.trialCycleId = data.trial_cycle_id
-        end
-        if data.trial_state ~= nil then State.trialCycleState = tostring(data.trial_state) end
-        -- [§XXIII-8] Server cycle về IDLE (cycle_id null hoặc state idle) → clear cycle cũ ở client để không
-        --   giữ trialCycleId chết (event cycle-bound gửi sau sẽ bị server reject; guard/flag phải dọn sạch).
-        if (data.trial_cycle_id == nil and data.trial_state == nil) then
-            -- không có field trial trong response này → bỏ qua (giữ nguyên)
-        elseif data.trial_cycle_id == nil or (data.trial_state ~= nil and tostring(data.trial_state) == "idle") then
-            if State.trialCycleId ~= nil and TrialEvents then pcall(function() TrialEvents.resetForNewCycle() end) end
-            State.trialCycleId = nil
-            State.winConfirmed = false
-            State.trialStartedAt = 0
-            State.trialStartedCycleId = nil
-            State.trialTimeoutCycleId = nil
-            State.postTrialStartedAt = nil
-            State.postTrialCycleId = nil
-            State.postTrialHoldCFrame = nil
-            -- [FIX #5] KHÔNG clear intentional-reset flags ở idle-sync (lý do như trên). processAfterRespawn()
-            --   sẽ clear sau khi Character mới sống. Giữ flag ở đây để Humanoid.Died đang chờ vẫn nhận diện
-            --   đúng intentional reset thay vì loss.
-        end
-        if data.fullmoon_unlock_pending ~= nil then State.fullmoonUnlockPending = data.fullmoon_unlock_pending == true end
-        if State.fullmoonJobid or State.allyTargetJobid then State.lastScoutSignalAt = tick() end
-        _G.srvMainOrder    = data.order
-        _G.srvCurMain      = data.current
-        _G.srvCurMainJobid = data.current_jobid
-        if type(data.mains) == "table" then
-            for _, m in ipairs(data.mains) do
-                if m.name and m.name ~= State.myName then
-                    State.statusCache[m.name] = { t = tick(), status = m.status or "waiting" }
-                end
-            end
-        end
-        local curr = data.current
-        if curr and curr ~= State.myName and data.current_jobid and data.current_jobid ~= "" then
-            State.mainJobCache[curr] = { jobid = data.current_jobid, time = gettimeserver(), t = tick() }
-        end
-    end
-
-    -- [FINAL §10/A8] /sync long-poll loop — 1 loop DUY NHẤT. Áp revision/trial state/result.
-    --   Ổn định → set _syncHealthy (fast-poll giãn nhịp). Lỗi liên tục → tắt healthy, fallback /curmain.
-    function ServerSync.startSyncLoop()
-        if State._syncActive then return end
-        State._syncActive = true
-        task.spawn(function()
-            local failStreak = 0
-            local COOLDOWN_AFTER_FAILS = 5
-            while Runtime.alive do
-                if not Config.enableLongPoll then State._syncHealthy = false; task.wait(2); else
-                    local url = endpoint("/sync", { name = Config.myName, since_revision = State.stateRevision or 0, wait = 20 })
-                    local ok, res = Net.getJSONSync(url)
-                    if ok and res and res.ok ~= false then
-                        failStreak = 0
-                        State._syncHealthy = true
-                        -- áp revision + trial state/result từ /sync (không phá field cũ)
-                        if res.state_revision ~= nil then
-                            local rev = tonumber(res.state_revision) or 0
-                            -- bỏ response revision CŨ hơn local §10
-                            if rev >= (State.stateRevision or 0) then State.stateRevision = rev end
-                        end
-                        if res.trial_cycle_id ~= nil then State.trialCycleId = res.trial_cycle_id end
-                        if res.trial_state ~= nil then State.trialCycleState = tostring(res.trial_state) end
-                        if res.fullmoon_unlock_pending ~= nil then State.fullmoonUnlockPending = res.fullmoon_unlock_pending == true end
-                        if res.trial_result ~= nil and res.trial_result ~= false then
-                            State.trialResult = res.trial_result
-                            State.trialResultCycle = res.final_cycle_id or res.trial_cycle_id
-                        end
-                        -- khi có delta (keepalive=false) → refresh /curmain 1 lần để đồng bộ order/current chi tiết
-                        if res.keepalive == false then
-                            pcall(function()
-                                local data = ServerSync.fetchCurMain()
-                                if data then ServerSync.applyCurMain(data) end
-                            end)
-                        end
-                    else
-                        failStreak = failStreak + 1
-                        State._syncHealthy = false
-                        if failStreak >= COOLDOWN_AFTER_FAILS then
-                            -- lỗi liên tục → cooldown trước khi thử /sync lại (fast-poll /curmain gánh trong lúc này)
-                            task.wait(3)
-                            failStreak = 0
-                        else
-                            task.wait(0.7)
-                        end
-                    end
-                end
-            end
-            State._syncActive = false
         end)
     end
 
     -- Net probe (File A 405-429)
     function ServerSync.startNetProbe()
-        Diagnostics.netDiag = "NET: đang kiểm tra…"
+        _G.netDiag = "NET: đang kiểm tra…"
         task.spawn(function()
             while Runtime.alive do
                 pcall(function()
-                    if not Net.raw then Diagnostics.netDiag = "NET: thiếu Net.raw"; return end
+                    if not Net.raw then _G.netDiag = "NET: thiếu Net.raw"; return end
                     local g0 = tick()
                     local gok = Net.raw("GET", B .. "/timeserver", nil)
                     local gms = math.floor((tick() - g0) * 1000)
@@ -1102,9 +887,9 @@ do
                         pok = Net.raw("POST", endpoint("/heartbeat", { name = Config.myName }), HttpService:JSONEncode({ role = State.myRole }))
                         pms = math.floor((tick() - p0) * 1000)
                     end
-                    Diagnostics.netGetOk  = gok and true or false
-                    Diagnostics.netPostOk = Net.hasReq and (pok and true or false) or nil
-                    Diagnostics.netDiag = ("req=%s | GET %s %dms | POST %s"):format(
+                    _G.netGetOk  = gok and true or false
+                    _G.netPostOk = Net.hasReq and (pok and true or false) or nil
+                    _G.netDiag = ("req=%s | GET %s %dms | POST %s"):format(
                         tostring(Net.hasReq), gok and "OK" or "FAIL", gms,
                         Net.hasReq and ((pok and "OK " or "FAIL ") .. pms .. "ms") or "N/A (thiếu request)")
                 end)
@@ -1119,304 +904,9 @@ local function serverNow() return ServerSync.now() end
 local function gettimeserver() return ServerSync.now() end
 
 --[[ ============================================================================
- [10c] CRITICAL EVENT QUEUE — [PROD REFACTOR §PHẦN II.A] FIFO 1 worker, idempotent, retry.
-   OPT-IN: chỉ hoạt động khi Config.enableEventProtocol=true (getgenv().ENABLE_EVENT_PROTOCOL=true)
-   VÀ server bật ENABLE_EVENT_PROTOCOL. MẶC ĐỊNH TẮT → CriticalEvents.emit() là no-op, client giữ
-   NGUYÊN hành vi cũ (/lockmoon, /fmlost, /helpreset, /mainstatus như trước). Đây là hạ tầng sẵn sàng
-   để bật dần, KHÔNG đổi luồng nghiệp vụ hiện tại.
-
-   Đặc điểm (khi bật):
-     - 1 session_id ngẫu nhiên/lần load; sequence đơn điệu tăng.
-     - event_id = session_id .. ":" .. sequence (server dedupe).
-     - 1 worker FIFO duy nhất — KHÔNG gửi song song cùng event, KHÔNG spawn worker mỗi retry.
-     - Retry theo lịch §RETRY: 0 / 0.20 / 0.35 / 0.70 / 1.50s rồi backoff nền có giới hạn.
-     - ACK có accepted/duplicate/accepted_sequence/state_revision.
-============================================================================ ]]
---[[ ============================================================================
- [10c] CRITICAL EVENT QUEUE — [FINAL §8] FIFO 1 worker, session do SERVER cấp, ACK thật.
-   MẶC ĐỊNH BẬT (§37). Client tự fallback route cũ nếu server trả disabled/404/lỗi liên tục.
-
-   Đặc điểm:
-     - Session do SERVER cấp (§7.1): /init trả session_token + session_generation. Client KHÔNG tự tạo.
-     - Chưa có token → KHÔNG gửi event V2 (giữ trong queue, re-init lấy token, hoặc fallback legacy).
-     - sequence đơn điệu tăng; event_id = session_token .. ":" .. sequence (server dedupe).
-     - 1 worker FIFO DUY NHẤT — KHÔNG gửi song song, KHÔNG spawn worker mỗi retry, KHÔNG coalesce critical.
-     - postJSONSync đọc ACK thật; chỉ xoá event khi accepted=true HOẶC duplicate=true có result.
-     - Retry cùng event_id §8.3: 0 / 0.20 / 0.35 / 0.70 / 1.50s rồi backoff nền có giới hạn.
-     - stale_session → dừng worker, báo ServerSync re-init; huỷ event thuộc session/cycle cũ.
-     - disabled/404 liên tục → tắt protocol V2 tạm thời (cooldown), fallback route cũ.
-============================================================================ ]]
-local CriticalEvents = {}
-do
-    local B = Config.baseUrl
-    local seq = 0
-    -- FIFO queue O(1) head/tail
-    local q = {}          -- array of jobs {event_id, payload, attempts, cycleId, generation}
-    local head, tail = 1, 0
-    local workerAlive = false
-    local RETRY_SCHEDULE = { 0.20, 0.35, 0.70, 1.50 } -- sau lần gửi đầu (attempt 0)
-    local BACKOFF_MAX = 8
-    -- trạng thái protocol V2 (fallback khi server disabled/404 liên tục)
-    local v2Disabled = false          -- true → emit no-op, dùng route legacy
-    local v2DisabledUntil = 0         -- cooldown (tick) trước khi thử lại V2
-    local disabledStreak = 0
-    local DISABLED_STREAK_MAX = 5
-    local V2_COOLDOWN = 30            -- giây tắt V2 trước khi thử lại
-
-    local function nextSeq() seq = seq + 1; return seq end
-
-    -- lấy session hiện tại từ State (do ServerSync.init cấp)
-    local function haveSession()
-        return type(State.sessionToken) == "string" and #State.sessionToken > 0 and (State.sessionGeneration or 0) > 0
-    end
-
-    -- [STANDARD PATCH] Event tạo trước /init có token Character dạng 0:<bootId>:<charGen>.
-    -- Khi bind event vào session đầu tiên, chỉ rebind token DO CharacterTracker của chính boot này sinh;
-    -- chuỗi tùy ý/legacy không khớp format+bootId được giữ nguyên. Không đổi token của event session thật cũ.
-    local TRACKED_TOKEN_FIELDS = {
-        "character_id", "character_token",
-        "old_character_id", "new_character_id",
-        "old_character_token", "new_character_token",
-    }
-    local function rebindTrackedCharacterToken(value, targetGeneration)
-        if type(value) ~= "string" then return value end
-        local oldGen, bootId, charGen = value:match("^([^:]+):([^:]+):([^:]+)$")
-        if not oldGen or not bootId or not charGen then return value end
-        if tonumber(oldGen) == nil or tonumber(charGen) == nil then return value end
-        if bootId ~= tostring(State.clientBootId or "") then return value end
-        return table.concat({ tostring(targetGeneration), bootId, charGen }, ":")
-    end
-    local function bindPreInitJobToSession(job, targetGeneration)
-        for _, field in ipairs(TRACKED_TOKEN_FIELDS) do
-            local value = job.payload[field]
-            if value ~= nil then
-                job.payload[field] = rebindTrackedCharacterToken(value, targetGeneration)
-            end
-        end
-        -- event_id cũng phải thuộc session thật thay vì prefix "nosession".
-        local reboundEventId = tostring(State.sessionToken) .. ":" .. tostring(job.payload.sequence)
-        job.payload.event_id = reboundEventId
-        job.event_id = reboundEventId
-    end
-
-    -- gửi 1 job qua /event (đồng bộ, đọc ACK). trả (removed, ack, hardFail)
-    --   removed=true  → xoá khỏi queue (accepted / duplicate-with-result / bỏ qua vĩnh viễn)
-    --   removed=false → giữ lại retry
-    local function sendOnce(job)
-        local curGen = State.sessionGeneration or 0
-        -- [FIX #4] Guard generation-0. Trong Lua số 0 là TRUTHY → guard cũ `if job.generation and ...`
-        --   coi event pre-init (generation=0) là "thuộc generation" rồi so 0 ~= 1 → HUỶ oan
-        --   (mất trial_entered/ffa_entered/main_died/helpreset nếu init chậm).
-        --   Đúng: (a) session CHƯA sẵn (curGen<=0) → GIỮ chờ /init, KHÔNG gửi, KHÔNG huỷ.
-        --         (b) event chưa đóng dấu generation thật (job.generation<=0) → đóng dấu generation hiện tại
-        --             rồi gửi (event pre-init được bind vào session đầu tiên).
-        --         (c) chỉ HUỶ khi event mang generation THẬT (>0) KHÁC session hiện tại (session cũ sau re-init).
-        if curGen <= 0 then
-            return false, { pending_session = true }, false  -- chờ /init; worker retry
-        end
-        if job.generation and job.generation > 0 and job.generation ~= curGen then
-            -- event thuộc generation THẬT cũ → huỷ (không gửi event session cũ sang session mới) §8.3
-            return true, { stale_local = true }, false
-        end
-        if not job.generation or job.generation <= 0 then
-            bindPreInitJobToSession(job, curGen)
-            job.generation = curGen  -- đóng dấu generation thật cho event pre-init
-        end
-        job.payload.session_token = State.sessionToken
-        job.payload.session_generation = State.sessionGeneration
-        local ok, ack, status_, err = Net.postJSONSync(B .. "/event", job.payload, 8)
-        if not ok then
-            -- server disabled/404 → đếm streak để fallback
-            if status_ == 404 or (ack and ack.error == "event_protocol_disabled") then
-                disabledStreak = disabledStreak + 1
-                if disabledStreak >= DISABLED_STREAK_MAX then
-                    v2Disabled = true
-                    v2DisabledUntil = tick() + V2_COOLDOWN
-                    if Net.log then Net.log("WARN", "V2 event protocol disabled/404 → fallback legacy (cooldown " .. V2_COOLDOWN .. "s)") end
-                end
-                return true, ack, true -- bỏ event này (server không nhận V2)
-            end
-            return false, ack, false -- lỗi mạng → retry
-        end
-        disabledStreak = 0
-        -- ACK hợp lệ. accepted / duplicate → xoá. stale_session → xử lý riêng.
-        if ack and ack.reason == "stale_session" then
-            -- session client đã cũ → cần re-init. Đánh dấu để ServerSync re-init, giữ event? → huỷ event cũ.
-            State._sessionStale = true
-            return true, ack, false
-        end
-        if ack and (ack.accepted == true or ack.duplicate == true) then
-            -- lưu result cuối (win_confirmed/loss...) nếu có, cho caller đọc
-            if ack.result then job._ackResult = ack.result end
-            job._ack = ack
-            return true, ack, false
-        end
-        -- accepted=false nhưng KHÔNG stale (vd win_waiting, not_cycle_member) → coi như đã xử lý (không retry vô hạn)
-        if ack and ack.accepted == false then
-            job._ack = ack
-            return true, ack, false
-        end
-        return false, ack, false
-    end
-
-    local function runWorker()
-        if workerAlive then return end
-        workerAlive = true
-        task.spawn(function()
-            while Runtime and Runtime.alive and head <= tail do
-                -- chưa có session → chờ ServerSync cấp (KHÔNG gửi event V2 khi thiếu token §7.2/A3)
-                if not haveSession() then
-                    task.wait(0.3)
-                else
-                    local job = q[head]
-                    if job then
-                        local removed, ack, _hard = sendOnce(job)
-                        -- callback ACK cho caller (win result...) nếu đăng ký
-                        if removed and job.onAck then pcall(job.onAck, ack) end
-                        if removed then
-                            q[head] = nil
-                            head = head + 1
-                        else
-                            job.attempts = (job.attempts or 0) + 1
-                            local idx = job.attempts
-                            local waitS = RETRY_SCHEDULE[idx]
-                            if not waitS then
-                                waitS = math.min(BACKOFF_MAX, 1.50 * (idx - #RETRY_SCHEDULE + 1))
-                            end
-                            task.wait(waitS)
-                        end
-                    else
-                        head = head + 1
-                    end
-                end
-            end
-            workerAlive = false
-        end)
-    end
-
-    -- Public: đẩy 1 critical event vào FIFO. opts.onAck(ack) gọi khi có ACK cuối.
-    function CriticalEvents.emit(eventName, extra, opts)
-        if not Config.enableEventProtocol then return nil end
-        -- V2 tạm tắt (fallback) → thử bật lại sau cooldown
-        if v2Disabled then
-            if tick() >= v2DisabledUntil then v2Disabled = false; disabledStreak = 0
-            else return nil end
-        end
-        local s = nextSeq()
-        local payload = {
-            event_id   = (State.sessionToken or "nosession") .. ":" .. tostring(s),
-            session_token = State.sessionToken,
-            session_generation = State.sessionGeneration,
-            sequence   = s,
-            name       = Config.myName,
-            event      = eventName,
-            role       = State.myRole,
-            jobid      = game.JobId,
-            placeid    = game.PlaceId,
-            client_time = math.floor((ServerSync.now and ServerSync.now()) or 0),
-        }
-        if extra then
-            for k, v in pairs(extra) do payload[k] = v end
-        end
-        tail = tail + 1
-        q[tail] = {
-            event_id = payload.event_id, payload = payload, attempts = 0,
-            cycleId = extra and extra.cycle_id or nil,
-            generation = State.sessionGeneration,
-            onAck = opts and opts.onAck or nil,
-        }
-        runWorker()
-        return payload.event_id
-    end
-
-    -- huỷ mọi event thuộc cycle cũ (khi cycle cancel/end + reconnect) §8.3
-    function CriticalEvents.dropCycle(cycleId)
-        for i = head, tail do
-            local job = q[i]
-            if job and job.cycleId == cycleId then q[i] = false end -- đánh dấu bỏ (worker skip false)
-        end
-    end
-    function CriticalEvents.pending() return (tail - head + 1) end
-    function CriticalEvents.sessionToken() return State.sessionToken end
-    function CriticalEvents.enabled() return Config.enableEventProtocol == true and not v2Disabled end
-    function CriticalEvents.isV2Disabled() return v2Disabled end
-end
-
--- [FINAL §9] TrialEvents được ĐỊNH NGHĨA SAU templeState/WorldProbe (xem [10d] bên dưới) để tránh
---   tham chiếu local chưa khai báo. Forward-declare ở đây cho các module trung gian nếu cần.
-local TrialEvents
-
-
---[[ ============================================================================
- [11] LIFECYCLE HOOKS — teleport guard, offline-once, [FIX-BUG2] death guard.
+ [11] LIFECYCLE HOOKS — teleport guard, offline-once. (File A 431-456)
 ============================================================================ ]]
 do
-    -- [FIX #1] CharacterTracker — nguồn DUY NHẤT sinh characterToken. Tăng characterGeneration ĐÚNG 1 lần
-    --   mỗi Character mới. Token = sessionGeneration:clientBootId:characterGeneration (KHÔNG có trialCycleId).
-    --   Nếu script khởi động khi Character đã tồn tại → bind Character hiện tại thành generation đầu tiên.
-    --   Khi sessionGeneration đổi (re-init) token tự khác ở lần rebuild kế → không giữ token session cũ.
-    do
-        if not State.clientBootId then
-            local ok, guid = pcall(function() return HttpService:GenerateGUID(false) end)
-            State.clientBootId = ok and guid or ("boot-" .. tostring(tick()))
-        end
-        local function rebuildToken()
-            State.characterToken = table.concat({
-                tostring(State.sessionGeneration or 0),
-                tostring(State.clientBootId),
-                tostring(State.characterGeneration or 0),
-            }, ":")
-            return State.characterToken
-        end
-        -- một hàm bump duy nhất; mọi CharacterAdded (kể cả bind ban đầu) đi qua đây
-        local function onNewCharacter()
-            State.characterGeneration = (State.characterGeneration or 0) + 1
-            rebuildToken()
-            -- Character mới = đã rời lifecycle Trial cũ; cho phép retry cùng lượt sạch timer/latch.
-            State.trialStartedAt = 0
-            State.trialStartedCycleId = nil
-            State.trialTimeoutCycleId = nil
-            State.postTrialHoldCFrame = nil
-        end
-        _G.KaitunCharacterToken = function() return State.characterToken or rebuildToken() end
-        _G.KaitunRebuildToken   = rebuildToken   -- gọi lại sau /init để nhét sessionGeneration mới vào token
-        -- bind Character hiện có (nếu đã tồn tại) = generation đầu
-        if LocalPlayer and LocalPlayer.Character then onNewCharacter() end
-        pcall(function()
-            LocalPlayer.CharacterAdded:Connect(function() onNewCharacter() end)
-        end)
-    end
-
-    -- [FIX-BUG2] Global death guard: reset trial flag when MAIN dies anywhere
-    pcall(function()
-        local function setupDeathGuard()
-            local char = LocalPlayer.Character
-            if not char then return end
-            local hum = char:FindFirstChild("Humanoid")
-            if not hum then return end
-
-            -- Disconnect old connection if any
-            if RuntimeState._deathGuardConnection then
-                pcall(function() RuntimeState._deathGuardConnection:Disconnect() end)
-            end
-
-            RuntimeState._deathGuardConnection = hum.Died:Connect(function()
-                DBG("[DEATH-GUARD] Character died → reset didEnterTrialThisTurn", "warn", "death_guard")
-                State.didEnterTrialThisTurn = false
-                RuntimeState.inTrial = false
-            end)
-        end
-
-        -- Setup on initial character
-        setupDeathGuard()
-
-        -- Re-setup on each respawn
-        LocalPlayer.CharacterAdded:Connect(function()
-            task.wait(1)  -- Wait for character to fully load
-            setupDeathGuard()
-        end)
-    end)
-
     pcall(function()
         LocalPlayer.OnTeleport:Connect(function(stateEnum)
             if stateEnum == Enum.TeleportState.Started or stateEnum == Enum.TeleportState.InProgress then
@@ -1701,12 +1191,12 @@ do
     -- templeState: cache 0.5s, reparent MapStash throttle 5s, trả loading/ffup/ffdown (File A 911-942)
     function TempleManager.templeState()
         local t = tick()
-        if RuntimeState._tsCacheTime and (t - RuntimeState._tsCacheTime) < 0.5 then return RuntimeState._tsCacheValue end
-        RuntimeState._tsCacheTime = t
+        if _G._tsCacheTime and (t - _G._tsCacheTime) < 0.5 then return _G._tsCacheValue end
+        _G._tsCacheTime = t
         local temple = WorldProbe.getTemple()
         if not temple then
-            if not RuntimeState.lastTempleReparent or (tick() - RuntimeState.lastTempleReparent) > 5 then
-                RuntimeState.lastTempleReparent = tick()
+            if not _G.lastTempleReparent or (tick() - _G.lastTempleReparent) > 5 then
+                _G.lastTempleReparent = tick()
                 pcall(function()
                     local stash = ReplicatedStorage:FindFirstChild("MapStash")
                     local m = stash and stash:FindFirstChild("Temple of Time")
@@ -1714,12 +1204,12 @@ do
                     if m and map then m.Parent = map end
                 end)
             end
-            RuntimeState._tsCacheValue = "loading"
+            _G._tsCacheValue = "loading"
             return "loading"
         end
         local ff = WorldProbe.getForcefieldState()
-        if ff == 0 then RuntimeState._tsCacheValue = "ffup"; return "ffup" end
-        RuntimeState._tsCacheValue = "ffdown"
+        if ff == 0 then _G._tsCacheValue = "ffup"; return "ffup" end
+        _G._tsCacheValue = "ffdown"
         return "ffdown"
     end
 
@@ -1753,13 +1243,13 @@ do
     -- CHỈ fallback getDoorForRace() nếu không có manualCf. Snap sát cửa khi d<=35.
     function TempleManager.goToMyDoor()
         if Movement.getdis(CFrame.new(TEMPLE_ENTRY)) >= 3000 then
-            if not RuntimeState.lastReqEntrance or (tick() - RuntimeState.lastReqEntrance) > 4 then
-                RuntimeState.lastReqEntrance = tick()
+            if not _G.lastReqEntrance or (tick() - _G.lastReqEntrance) > 4 then
+                _G.lastReqEntrance = tick()
                 pcall(function()
                     ReplicatedStorage.Remotes.CommF_:InvokeServer("requestEntrance", TEMPLE_ENTRY)
                 end)
             end
-            Diagnostics.lastDoorSrc = "far"
+            _G.lastDoorSrc = "far"
             return false
         end
         local manualCf = WorldProbe.getTrialDoorCFrame()
@@ -1768,7 +1258,7 @@ do
             targetCf, src, doorName = manualCf, "C", WorldProbe.normalizeRace(WorldProbe.getRace()) or "manual"
         else
             local door = WorldProbe.getDoorForRace()
-            if not door then Diagnostics.lastDoorSrc = "noload"; return false end
+            if not door then _G.lastDoorSrc = "noload"; return false end
             targetCf, src, doorName = door.CFrame, "R", door.Name
         end
         local char = LocalPlayer.Character
@@ -1786,7 +1276,7 @@ do
             end)
             d = Movement.getdis(targetCf)
         end
-        Diagnostics.lastDoorSrc, Diagnostics.lastDoorName, Diagnostics.lastDoorDist = src, doorName, d
+        _G.lastDoorSrc, _G.lastDoorName, _G.lastDoorDist = src, doorName, d
         -- FIX (user 2026-07-04) — sau snap d<=35, quẹt trigger cửa 1 lần (áp dụng cả main + ally)
         -- để phòng ghost door (door load xong nhưng Touched event chưa register đúng frame).
         if d <= 25 then
@@ -1824,129 +1314,12 @@ do
             end
             hrp.CFrame = targetCf
         end)
-        Diagnostics.lastDoorSrc = "touch"
-        if reason then Diagnostics.lastDoorTouchReason = reason end
+        _G.lastDoorSrc = "touch"
+        if reason then _G.lastDoorTouchReason = reason end
     end
 end
 local function goToMyDoor() return TempleManager.goToMyDoor() end
 local function templeState() return TempleManager.templeState() end
--- [FIX #7] phơi templeState cho CombatActions.observeCharacterInFFA (khai báo sau, dùng qua _G).
-_G.KaitunTempleState = templeState
-
---[[ ============================================================================
- [10d] TRIALEVENTS — [FINAL §9/A4-A7] caller THẬT của CriticalEvents.emit tại lifecycle.
-   Định nghĩa SAU templeState/WorldProbe để tham chiếu local hợp lệ. Đã forward-declare `TrialEvents`.
-   - trial_entered / ffa_entered / ffa_left: gửi 1 lần / cycle (dedup theo cycleId + character).
-   - ffa_presence: MỘT loop DUY NHẤT (~1s), tự dừng khi rời FFA/chết/teleport/đổi cycle/runtime stop.
-   Tất cả no-op khi Config.enableEventProtocol=false hoặc V2 disabled (fallback route cũ).
-============================================================================ ]]
-do
-    TrialEvents = {}
-    local emittedTrialEntered = {}   -- key: cycleId..":"..charId
-    local emittedFfaEntered   = {}
-    local presenceRunning = false
-
-    local function canV2()
-        return Config.enableEventProtocol and CriticalEvents.enabled()
-    end
-    -- [FIX #1] charId() trả characterToken THẬT (không dùng tostring(Character) — trùng tên account →
-    --   old==new → server reject). Fallback token nếu tracker chưa sẵn (không bao giờ trả tên account).
-    local function charId()
-        if _G.KaitunCharacterToken then
-            local ok, tok = pcall(_G.KaitunCharacterToken)
-            if ok and tok then return tok end
-        end
-        return State.characterToken or "nochar"
-    end
-    local function cid() return State.trialCycleId end
-
-    -- §9.1 trial_entered — account xác nhận ĐÃ vào Trial Race (không chỉ đứng cửa).
-    function TrialEvents.trialEntered(extra)
-        if not canV2() then return end
-        local c = cid()
-        local key = tostring(c) .. ":" .. charId()
-        if emittedTrialEntered[key] then return end
-        emittedTrialEntered[key] = true
-        local payload = {
-            cycle_id = c, character_id = charId(),
-            race = (WorldProbe and WorldProbe.getRace and WorldProbe.getRace()) or nil,
-            gate_open = State.gateOpen == true,
-            current_main = State.serverCurMain,
-        }
-        if extra then for k, v in pairs(extra) do payload[k] = v end end
-        CriticalEvents.emit("trial_entered", payload)
-    end
-
-    -- §9.2 ffa_entered — CHỈ khi thật sự vào vùng FFA (templeState ffup). Account ngoài trio server reject.
-    function TrialEvents.ffaEntered()
-        if not canV2() then return end
-        local c = cid()
-        local key = tostring(c) .. ":" .. charId()
-        if emittedFfaEntered[key] then return end
-        emittedFfaEntered[key] = true
-        State.postTrialPhase = "ffa"
-        CriticalEvents.emit("ffa_entered", { cycle_id = c, character_id = charId() })
-        TrialEvents.startPresence()
-    end
-
-    function TrialEvents.ffaLeft()
-        if not canV2() then return end
-        CriticalEvents.emit("ffa_left", { cycle_id = cid(), character_id = charId() })
-    end
-
-    -- §9.3/A7 FFA PRESENCE — MỘT loop duy nhất ~1s. Tự dừng đúng điều kiện.
-    function TrialEvents.startPresence()
-        if not canV2() then return end
-        if presenceRunning then return end
-        presenceRunning = true
-        local myCycle = cid()
-        local myChar = LocalPlayer.Character
-        task.spawn(function()
-            while Runtime.alive and presenceRunning do
-                local c = LocalPlayer.Character
-                local hum = c and c:FindFirstChild("Humanoid")
-                local inFfa = (templeState() == "ffup")
-                local alive = hum ~= nil and hum.Health > 0
-                -- điều kiện dừng: rời FFA / chết / teleport / đổi cycle / đổi character / runtime stop
-                if (not inFfa) or (not alive) or Runtime.teleporting
-                   or cid() ~= myCycle or c ~= myChar then
-                    if canV2() and cid() == myCycle then
-                        CriticalEvents.emit("ffa_presence", {
-                            cycle_id = myCycle, in_ffa = false, alive = alive,
-                            character_id = charId(),   -- [FIX #1] token thật, không tostring(Character)
-                        })
-                    end
-                    break
-                end
-                -- [FIX #2/#7] visible_allies TRI-STATE: chỉ gửi key khi observe ra true/false; thiếu = unknown.
-                --   Ý nghĩa: true = Main xác nhận Ally trong FFA geometry, false = Ally ngoài FFA/mất server.
-                --   KHÔNG dùng Players:FindFirstChild ~= nil (Player object sống dai qua respawn → luôn true).
-                local visible = nil
-                pcall(function()
-                    visible = {}
-                    for _, allyName in ipairs(Config.allies) do
-                        local ap = Players:FindFirstChild(allyName)
-                        local observed = _G.KaitunObserveAllyFFA and _G.KaitunObserveAllyFFA(ap) or nil
-                        if observed ~= nil then visible[allyName] = observed end
-                    end
-                end)
-                CriticalEvents.emit("ffa_presence", {
-                    cycle_id = myCycle, in_ffa = true, alive = alive,
-                    character_id = charId(), visible_allies = visible,  -- [FIX #1] token thật
-                })
-                task.wait(1)
-            end
-            presenceRunning = false
-        end)
-    end
-    function TrialEvents.stopPresence() presenceRunning = false end
-    function TrialEvents.presenceRunning() return presenceRunning end
-
-    function TrialEvents.resetForNewCycle()
-        emittedTrialEntered = {}
-        emittedFfaEntered = {}
-    end
-end
 
 --[[ ============================================================================
  [15] WORLD HELPERS — isnight / isfullmoon / isSamePlace. (File A 1130-1144)
@@ -2071,7 +1444,7 @@ do
             Filtered = ArrayServers
         end
         local ServerData = Filtered[math.random(1, #Filtered)]
-        RuntimeState.trainHopArmedT = tick()
+        _G.trainHopArmedT = tick()
         DBG(("[HOP] %s → teleport %s (Players=%d)"):format(tostring(Reason), tostring(ServerData.JobId), ServerData.Players), "ok")
         local ok = pcall(function()
             ReplicatedStorage:WaitForChild("__ServerBrowser", 10):InvokeServer("teleport", ServerData.JobId)
@@ -2096,8 +1469,8 @@ do
         end
         if _lastJobHop[jobid] and (tick() - _lastJobHop[jobid]) < Config.RALLY_HOP_THROTTLE then return false end
         _lastJobHop[jobid] = tick()
-        RuntimeState.rallyHopArmedT = tick()
-        RuntimeState.lastRallyJob   = jobid
+        _G.rallyHopArmedT = tick()
+        _G.lastRallyJob   = jobid
         DBG(("[RALLY] %s -> teleport %s"):format(tostring(reason), tostring(jobid)), "ok", "rally_hop")
         local ok = pcall(function()
             ReplicatedStorage:WaitForChild("__ServerBrowser", 10):InvokeServer("teleport", jobid)
@@ -2116,10 +1489,10 @@ do
             if player ~= LocalPlayer then return end
             Runtime.teleporting = false   -- chống kẹt teleporting=true khi fail
             -- (RALLY) Teleport tới jobid server chỉ định fail → báo Node reject (server tự tìm server khác)
-            if RuntimeState.rallyHopArmedT and (tick() - RuntimeState.rallyHopArmedT) < 15 then
-                local failedJob = RuntimeState.lastRallyJob
-                RuntimeState.rallyHopArmedT = nil
-                RuntimeState.lastRallyJob = nil
+            if _G.rallyHopArmedT and (tick() - _G.rallyHopArmedT) < 15 then
+                local failedJob = _G.lastRallyJob
+                _G.rallyHopArmedT = nil
+                _G.lastRallyJob = nil
                 -- FIX (user 2026-07-02) — GameFull = CHỜ SLOT, KHÔNG phá FullMoon:
                 -- Main2-6 (hoặc Main1) hop vào full moon ĐÃ LOCK mà Roblox báo server ĐẦY (GameFull) →
                 -- server chỉ đầy chứ KHÔNG chết. Nếu POST /rally/reject thì server sẽ XÓA fullmoonJobid +
@@ -2132,7 +1505,7 @@ do
                     and failedJob and failedJob ~= ""
                     and State.fullmoonJobid and failedJob == State.fullmoonJobid
                 then
-                    RuntimeState.fmJoinBackoffUntil = tick() + Config.FM_JOIN_BACKOFF
+                    _G.fmJoinBackoffUntil = tick() + Config.FM_JOIN_BACKOFF
                     State.setMyMainStatus("waiting")
                     DBG("[FM-JOIN] Server FULL @ " .. tostring(failedJob)
                         .. " → chờ slot (waiting + backoff " .. tostring(Config.FM_JOIN_BACKOFF)
@@ -2153,8 +1526,8 @@ do
                 return
             end
             -- (2) HOP ÍT NGƯỜI fail
-            if RuntimeState.trainHopArmedT and (tick() - RuntimeState.trainHopArmedT) < 15 then
-                RuntimeState.trainHopArmedT = nil
+            if _G.trainHopArmedT and (tick() - _G.trainHopArmedT) < 15 then
+                _G.trainHopArmedT = nil
                 if teleportResult == Enum.TeleportResult.GameFull then
                     DBG("[HOP] Server đầy → thử hop lại", "err")
                     task.delay(HOP_CONFIG.RetryDelay, function() TeleportManager.hopLowPlayer("Retry - Server đầy") end)
@@ -2165,8 +1538,8 @@ do
                 return
             end
             -- (3) ALLY hop fail → chỉ nhả cờ, vòng sau ally tự hop lại (không cướp retry khác)
-            if RuntimeState.allyHopArmedT and (tick() - RuntimeState.allyHopArmedT) < 15 then
-                RuntimeState.allyHopArmedT = nil
+            if _G.allyHopArmedT and (tick() - _G.allyHopArmedT) < 15 then
+                _G.allyHopArmedT = nil
                 DBG("[ALLY] Teleport fail (" .. tostring(teleportResult) .. ") → vòng sau hop lại", "err", "ally_tpfail")
             end
         end)
@@ -2260,52 +1633,6 @@ do
         CFrame.new(28742.4688, 14887.5596, -18.2120056, 0.92051065, 0, 0.390717506, 0, 1, 0, -0.390717506, 0, 0.92051065),
     }
 
-    -- [FIX #2/#7] observeCharacterInFFA — TRI-STATE quan sát 1 Ally có ĐANG trong vùng FFA hay không.
-    --   Trả:  true  = chắc chắn trong FFA (Character sống + trong INNER box)
-    --         false = chắc chắn NGOÀI FFA / không còn server (Player object mất, HOẶC Character sống ngoài OUTER box)
-    --         nil   = KHÔNG đủ dữ liệu (Character nil/đang respawn, HRP/Humanoid thiếu, FF toàn cục chưa ffup,
-    --                 hoặc đứng ở VÙNG ĐỆM giữa inner/outer) → server coi là "unknown", KHÔNG phải false.
-    --   Geometry-derived heuristic từ 6 CombatActions.pos_plr_trial (KHÔNG dùng FFABorder — chưa rõ Part/Model).
-    --   Margins để trong Config.ffaZone để chỉnh trong Roblox mà không sửa flow. ROBLOX-RUNTIME UNVERIFIED.
-    do
-        -- bounding box của 6 ô player + margin (studs). Y gần phẳng nên margin Y rộng riêng.
-        local zoneCfg = (Config and Config.ffaZone) or {}
-        local INNER = zoneCfg.innerMargin or 70    -- trong box+70 → chắc chắn trong FFA
-        local OUTER = zoneCfg.outerMargin or 160   -- ngoài box+160 → chắc chắn ngoài FFA
-        local YIN   = zoneCfg.innerMarginY or 40
-        local YOUT  = zoneCfg.outerMarginY or 90
-        local minX, minY, minZ = math.huge, math.huge, math.huge
-        local maxX, maxY, maxZ = -math.huge, -math.huge, -math.huge
-        for _, cf in ipairs(CombatActions.pos_plr_trial) do
-            local p = cf.Position
-            if p.X < minX then minX = p.X end; if p.X > maxX then maxX = p.X end
-            if p.Y < minY then minY = p.Y end; if p.Y > maxY then maxY = p.Y end
-            if p.Z < minZ then minZ = p.Z end; if p.Z > maxZ then maxZ = p.Z end
-        end
-        local function inBox(pos, mX, mY, mZ)
-            return pos.X >= (minX - mX) and pos.X <= (maxX + mX)
-               and pos.Y >= (minY - mY) and pos.Y <= (maxY + mY)
-               and pos.Z >= (minZ - mZ) and pos.Z <= (maxZ + mZ)
-        end
-        function CombatActions.observeCharacterInFFA(player)
-            if not player then return false end          -- không còn trong server → chắc chắn ngoài FFA
-            local character = player.Character
-            if not character then return nil end          -- đang respawn / chưa replicate
-            local humanoid = character:FindFirstChildOfClass("Humanoid")
-            local root = character:FindFirstChild("HumanoidRootPart")
-            if not humanoid or not root then return nil end
-            if humanoid.Health <= 0 then return nil end    -- đang chết → chưa kết luận
-            -- FF toàn cục chưa bật → không kết luận (trận FFA chưa/không diễn ra)
-            local ts = _G.KaitunTempleState and _G.KaitunTempleState() or nil
-            if ts ~= "ffup" then return nil end
-            local pos = root.Position
-            if inBox(pos, INNER, YIN, INNER) then return true end       -- trong inner → true
-            if not inBox(pos, OUTER, YOUT, OUTER) then return false end  -- ngoài outer → false
-            return nil                                                   -- vùng đệm → unknown
-        end
-        _G.KaitunObserveAllyFFA = CombatActions.observeCharacterInFFA
-    end
-
     function CombatActions.getmob1(pos)
         local allmobs = {}
         for _, v in pairs(workspace.Enemies:GetChildren()) do
@@ -2324,117 +1651,32 @@ do
         if State.isAlly[v.Name] then return false end
         return true
     end
-    -- Quét động người còn sống trong toàn vùng FFA.
-    -- Trả record { player, character }, nhờ vậy Character đầu cycle được giữ ổn định khi target chết/respawn.
-    -- eliminated[userId]=true: người đã chết trong lượt này, respawn cũng KHÔNG đánh lại.
-    -- seen[userId]=true: từng quan sát thấy trong FFA; Character nil tạm thời được tính unknown để chặn thắng giả.
-    function CombatActions.getplayers(eliminated, seen, participantCharacters, opts)
-        eliminated = eliminated or {}
-        seen = seen or {}
-        participantCharacters = participantCharacters or {}
-        opts = opts or {}
-        -- Post-trial fallback: Ally bình thường tự reset, nhưng nếu sau grace vẫn còn sống trong FFA
-        -- thì Main phải được phép đánh họ để không đứng im/kẹt lượt. Các Main khác vẫn luôn bị loại.
-        local includeAllies = opts.includeAllies == true
-        local targets = {}
-        local unknown = 0
-        local myRoot = Movement.getHRP()
-
-        for _, player in ipairs(Players:GetPlayers()) do
-            local userId = player.UserId
-            local includeAllPlayers = opts.includeAllPlayers == true
-            if player ~= LP
-                and (includeAllPlayers or not State.isMain[player.Name])
-                and (includeAllies or noideaforname(player))
-                and not eliminated[userId] then
-                local character = player.Character
-                local knownCharacter = participantCharacters[userId]
-
-                -- Cùng Player nhưng Character đã đổi: Character cũ đã chết và người này đã bị loại.
-                if knownCharacter and character ~= knownCharacter then
-                    eliminated[userId] = true
-                else
-                    local hum = character and character:FindFirstChildOfClass("Humanoid")
-                    local root = character and character:FindFirstChild("HumanoidRootPart")
-
-                    if hum and root then
-                        if hum.Health > 0 then
-                            local observed = CombatActions.observeCharacterInFFA(player)
-                            -- Fallback kiểu kkv4: nếu geometry báo false nhưng Player vẫn ở gần khu Trial,
-                            -- vẫn nhận target. Điều này xử lý Character bị lệch Y/ở dưới nền sau FFA.
-                            local nearLegacyTrial = false
-                            for _, trialPos in ipairs(CombatActions.pos_plr_trial) do
-                                if Movement.getdis(root.CFrame, trialPos) < 350 then
-                                    nearLegacyTrial = true
-                                    break
-                                end
-                            end
-                            if observed ~= false or nearLegacyTrial then
-                                seen[userId] = true
-                                participantCharacters[userId] = participantCharacters[userId] or character
-                                targets[#targets + 1] = { player = player, character = participantCharacters[userId] }
-                            end
-                        elseif seen[userId] then
-                            eliminated[userId] = true
+    function CombatActions.getplayers()
+        local plrs = {}
+        for _, v in pairs(Players:GetPlayers()) do
+            if v ~= LP and v.Character and not State.isMain[v.Name] and noideaforname(v) then
+                local hum = v.Character:FindFirstChild("Humanoid")
+                local hrp = v.Character:FindFirstChild("HumanoidRootPart")
+                if hum and hrp and hum.Health > 0 then
+                    for _, pos in pairs(CombatActions.pos_plr_trial) do
+                        if Movement.getdis(hrp.CFrame, pos) < 10 then
+                            plrs[v.Character] = true
                         end
-                    elseif seen[userId] then
-                        unknown = unknown + 1
                     end
                 end
             end
         end
-
-        -- Chọn người gần Main trước để giảm tween chéo và tránh đổi target lung tung.
-        table.sort(targets, function(a, b)
-            local ar = a.character and a.character:FindFirstChild("HumanoidRootPart")
-            local br = b.character and b.character:FindFirstChild("HumanoidRootPart")
-            if not myRoot then return a.player.UserId < b.player.UserId end
-            local ad = ar and (ar.Position - myRoot.Position).Magnitude or math.huge
-            local bd = br and (br.Position - myRoot.Position).Magnitude or math.huge
-            if ad == bd then return a.player.UserId < b.player.UserId end
-            return ad < bd
-        end)
-
-        return targets, unknown
+        return plrs
     end
-    function CombatActions.countplayers(eliminated, seen, participantCharacters, opts)
-        local targets, unknown = CombatActions.getplayers(eliminated, seen, participantCharacters, opts)
-        return #targets, unknown
+    function CombatActions.countplayers()
+        local c = 0
+        for _ in pairs(CombatActions.getplayers()) do c = c + 1 end
+        return c
     end
 
-    -- [FINAL §J1] attackTick: KHÔNG spam M1 toàn cục nữa. Mặc định chỉ di chuyển + equip/haki + FastAttack nền.
-    --   M1 (Tool:Activate + LeftClickRemote) CHỈ chạy khi caller truyền opts.m1=true (post-trial PVP / boss fallback)
-    --   VÀ khoảng cách thật <= M1_RANGE studs. Throttle chung 0.14s (§J4).
+    -- attackTick: offset random đổi mỗi 0.3s, eq/haki throttle 0.4s (File A 1256-1277)
     local _atkOff, _atkT, _atkEqT = CFrame.new(0, 3, 0), 0, 0
-    local _atkMoveT = 0
-    local _lastM1Tick = 0
-    local M1_RANGE = 11        -- §J4: chỉ M1 khi <= 9–12 studs
-    local M1_THROTTLE = 0.14   -- §J4: 0.10–0.18s throttle chung
-    -- Helper M1 dùng chung (throttle + equip đúng Tool). Trả true nếu đã bấm.
-    function CombatActions.doM1(target)
-        if (tick() - _lastM1Tick) <= M1_THROTTLE then return false end
-        local char = LP.Character
-        local hrp = target and target:FindFirstChild("HumanoidRootPart")
-        local myHrp = char and char:FindFirstChild("HumanoidRootPart")
-        if not (char and hrp and myHrp) then return false end
-        -- §J4: chỉ M1 khi khoảng cách thật <= M1_RANGE
-        if (hrp.Position - myHrp.Position).Magnitude > M1_RANGE then return false end
-        _lastM1Tick = tick()
-        pcall(function()
-            local tool = char:FindFirstChildOfClass("Tool")
-            if tool then
-                tool:Activate()
-                local remote = tool:FindFirstChild("LeftClickRemote")
-                if remote then
-                    local direction = (hrp.Position - char:GetPivot().Position).Unit
-                    remote:FireServer(direction, 1)
-                end
-            end
-        end)
-        return true
-    end
-
-    function CombatActions.attackTick(target, opts)
+    function CombatActions.attackTick(target)
         if tick() - _atkT > 0.3 then
             _atkT = tick()
             local x, z = math.random(1, 4), math.random(1, 4)
@@ -2449,81 +1691,7 @@ do
             pcall(function() Movement.haki() end)
         end
         local hrp = target and target:FindFirstChild("HumanoidRootPart")
-        local myHrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
-        if hrp and myHrp then
-            -- Không gọi topos mỗi frame: Movement.topos() luôn cancel tween cũ, gọi quá dày sẽ
-            -- khiến tween bị restart liên tục và nhìn như Main đứng im. Ở gần thì đặt sát target;
-            -- ở xa chỉ cập nhật tween theo nhịp 0.18s.
-            local targetCFrame = hrp.CFrame * _atkOff
-            local dist = (targetCFrame.Position - myHrp.Position).Magnitude
-            if dist <= 10 then
-                Movement.cancel()
-                myHrp.CFrame = CFrame.lookAt(targetCFrame.Position, hrp.Position)
-                myHrp.AssemblyLinearVelocity = Vector3.zero
-                myHrp.AssemblyAngularVelocity = Vector3.zero
-            elseif (tick() - _atkMoveT) >= 0.18 then
-                _atkMoveT = tick()
-                pcall(function() topos(CFrame.lookAt(targetCFrame.Position, hrp.Position)) end)
-            end
-
-            if opts and opts.skillAim then
-                CombatActions.setSkillAimTarget(hrp.Position + Vector3.new(0, 2, 0))
-            end
-        end
-        -- [FINAL §J1] M1 CHỈ khi được yêu cầu rõ (opts.m1) — KHÔNG mặc định spam cho mọi target mỗi 0.1s.
-        if opts and opts.m1 then CombatActions.doM1(target) end
-    end
-
-    -- Kill Player After Trial: cách đánh lấy từ kkv4.lua.txt, nhưng thêm throttle để
-    -- Movement.topos() không cancel/restart tween ở mọi frame. Mỗi tick: equip + haki,
-    -- bay sát Player với offset ngẫu nhiên, bật spam skill, aim vào target và M1 khi đủ gần.
-    local _kkv4PvpOffset = CFrame.new(0, 3, 0)
-    local _kkv4PvpOffsetAt = 0
-    local _kkv4PvpMoveAt = 0
-    local _kkv4PvpEquipAt = 0
-    function CombatActions.attackPlayerKKV4Tick(target)
-        local targetRoot = target and target:FindFirstChild("HumanoidRootPart")
-        local targetHumanoid = target and target:FindFirstChildOfClass("Humanoid")
-        local myChar = LP.Character
-        local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-        if not (targetRoot and targetHumanoid and targetHumanoid.Health > 0 and myRoot) then
-            return false
-        end
-
-        _G.SHOULDSPAMSKILLS = true
-        CombatActions.setSkillAimTarget(targetRoot.Position + Vector3.new(0, 2, 0))
-
-        if (tick() - _kkv4PvpEquipAt) >= 0.35 then
-            _kkv4PvpEquipAt = tick()
-            pcall(function() Movement.equip() end)
-            pcall(function() Movement.haki() end)
-        end
-
-        if (tick() - _kkv4PvpOffsetAt) >= 0.30 then
-            _kkv4PvpOffsetAt = tick()
-            local x = math.random(1, 4)
-            local z = math.random(1, 4)
-            if math.random(1, 2) == 1 then x = -x end
-            if math.random(1, 2) == 1 then z = -z end
-            _kkv4PvpOffset = CFrame.new(x, 3, z)
-        end
-
-        local targetCFrame = targetRoot.CFrame * _kkv4PvpOffset
-        local dist = (targetCFrame.Position - myRoot.Position).Magnitude
-        if dist <= 9 then
-            Movement.cancel()
-            myRoot.CFrame = CFrame.lookAt(targetCFrame.Position, targetRoot.Position)
-            myRoot.AssemblyLinearVelocity = Vector3.zero
-            myRoot.AssemblyAngularVelocity = Vector3.zero
-        elseif (tick() - _kkv4PvpMoveAt) >= 0.18 then
-            _kkv4PvpMoveAt = tick()
-            pcall(function()
-                topos(CFrame.lookAt(targetCFrame.Position, targetRoot.Position))
-            end)
-        end
-
-        CombatActions.doM1(target)
-        return true
+        if hrp then pcall(function() topos(hrp.CFrame * _atkOff) end) end
     end
 
     -- weapon / spam-skills (File A 2039-2123)
@@ -2556,153 +1724,6 @@ do
         if thua and LP.Character and LP.Character:FindFirstChild("Humanoid") then
             LP.Character.Humanoid:EquipTool(thua)
         end
-    end
-
-    -- Fish Trial only: ưu tiên kiếm đang CẦM, sau đó Backpack, cuối cùng mới LoadItem.
-    -- Nhận diện tên không phân biệt hoa/thường; LoadItem giữ các fallback theo yêu cầu.
-    local FISH_TRIAL_LOAD_NAMES = { "Tushita", "tushita", "Yama", "yama" }
-    local fishTrialSwordState = {
-        cycleKey = nil,
-        character = nil,
-        selectedName = nil, -- tên Tool thật trong game
-        active = false,     -- khi true, spam-skills chỉ dùng đúng kiếm Fish Trial
-        lastMissingTryAt = 0,
-    }
-
-    local function isFishTrialSwordName(name)
-        local lower = tostring(name or ""):lower()
-        return lower == "tushita" or lower == "yama"
-    end
-
-    local function findFishTrialSword(container, preferredName)
-        if not container then return nil end
-        local children = container:GetChildren()
-        local preferred = preferredName and tostring(preferredName):lower() or nil
-
-        if preferred then
-            for _, child in ipairs(children) do
-                if child:IsA("Tool") and child.Name:lower() == preferred and isFishTrialSwordName(child.Name) then
-                    return child
-                end
-            end
-            return nil
-        end
-
-        -- Khi có cả hai trong Backpack, luôn ưu tiên Tushita trước Yama.
-        for _, wanted in ipairs({ "tushita", "yama" }) do
-            for _, child in ipairs(children) do
-                if child:IsA("Tool") and child.Name:lower() == wanted then
-                    return child
-                end
-            end
-        end
-        return nil
-    end
-
-    local function resetFishSwordStateForCycle(char)
-        local cycleKey = tostring(
-            State.trialStartedCycleId
-            or State.trialCycleId
-            or State.trialStartedAt
-            or game.JobId
-        )
-        if fishTrialSwordState.character ~= char or fishTrialSwordState.cycleKey ~= cycleKey then
-            fishTrialSwordState.character = char
-            fishTrialSwordState.cycleKey = cycleKey
-            fishTrialSwordState.selectedName = nil
-            fishTrialSwordState.active = false
-            fishTrialSwordState.lastMissingTryAt = 0
-        end
-    end
-
-    function CombatActions.equipFishTrialSword()
-        local char = LP.Character
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if not (char and hum and hum.Health > 0) then return nil end
-        resetFishSwordStateForCycle(char)
-
-        -- 1) Đang cầm Tushita/Yama: dùng luôn, tuyệt đối không gọi LoadItem.
-        local held = findFishTrialSword(char, fishTrialSwordState.selectedName)
-            or findFishTrialSword(char)
-        if held then
-            fishTrialSwordState.selectedName = held.Name
-            fishTrialSwordState.active = true
-            return held.Name
-        end
-
-        -- 2) Có trong Backpack: EquipTool trực tiếp, không gọi LoadItem.
-        local bp = LP:FindFirstChild("Backpack")
-        local stored = findFishTrialSword(bp, fishTrialSwordState.selectedName)
-            or findFishTrialSword(bp)
-        if stored then
-            pcall(function() hum:EquipTool(stored) end)
-            task.wait()
-            local equipped = findFishTrialSword(char, stored.Name) or findFishTrialSword(char)
-            if equipped then
-                fishTrialSwordState.selectedName = equipped.Name
-                fishTrialSwordState.active = true
-                Logger.info("Fish Trial sword: equipped from Backpack " .. equipped.Name, "fish_trial_sword_ok")
-                return equipped.Name
-            end
-        end
-
-        -- 3) Chỉ khi Character + Backpack đều không có mới thử LoadItem.
-        -- Cooldown tránh doTrialForMyRace() gọi lặp và spam remote khi account không sở hữu kiếm.
-        if fishTrialSwordState.lastMissingTryAt > 0
-            and (tick() - fishTrialSwordState.lastMissingTryAt) < 8 then
-            fishTrialSwordState.active = false
-            return nil
-        end
-        fishTrialSwordState.lastMissingTryAt = tick()
-
-        for _, loadName in ipairs(FISH_TRIAL_LOAD_NAMES) do
-            SafeRemote.invoke(0.8, "LoadItem", loadName)
-            task.wait(0.12)
-
-            char = LP.Character
-            hum = char and char:FindFirstChildOfClass("Humanoid")
-            bp = LP:FindFirstChild("Backpack")
-            if not (char and hum and hum.Health > 0) then break end
-
-            held = findFishTrialSword(char)
-            stored = findFishTrialSword(bp)
-            if not held and stored then
-                pcall(function() hum:EquipTool(stored) end)
-                task.wait()
-                held = findFishTrialSword(char, stored.Name) or findFishTrialSword(char)
-            end
-
-            if held then
-                fishTrialSwordState.selectedName = held.Name
-                fishTrialSwordState.active = true
-                Logger.info("Fish Trial sword: loaded and equipped " .. held.Name, "fish_trial_sword_ok")
-                return held.Name
-            end
-        end
-
-        fishTrialSwordState.selectedName = nil
-        fishTrialSwordState.active = false
-        Logger.warn("Fish Trial sword: không có Tushita/Yama, tiếp tục bằng vũ khí hiện có", "fish_trial_sword_missing")
-        return nil
-    end
-
-    function CombatActions.endFishTrialSwordMode()
-        fishTrialSwordState.active = false
-    end
-
-    local function getFishTrialSwordForSpam(char)
-        if not (fishTrialSwordState.active and fishTrialSwordState.selectedName) then return nil end
-        local held = findFishTrialSword(char, fishTrialSwordState.selectedName)
-        if held then return held end
-
-        local bp = LP:FindFirstChild("Backpack")
-        local stored = findFishTrialSword(bp, fishTrialSwordState.selectedName)
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if stored and hum and hum.Health > 0 then
-            pcall(function() hum:EquipTool(stored) end)
-            return findFishTrialSword(char, stored.Name) or stored
-        end
-        return nil
     end
 
     -- GetMobPosition / TweenObject / BringMob (File A 1457-1517)
@@ -2912,209 +1933,21 @@ do
         end)
     end
 
-    -- [FISH TRIAL AIM] Aim target tạm thời cho skill do LocalScript của game gửi Remote.
-    -- Hook chỉ sửa Vector3/CFrame khi: target đang bật + SHOULDSPAMSKILLS=true + call đến từ game
-    -- (checkcaller=false). Vì vậy BuySharkman/HTTP/remote do chính script gọi không bị đụng.
-    do
-        local aimState = { target = nil, installed = false, installFailed = false }
-
-        local function resolveAimPosition(target)
-            local kind = typeof(target)
-            if kind == "Vector3" then return target end
-            if kind == "CFrame" then return target.Position end
-            if kind == "Instance" then
-                if target:IsA("BasePart") then return target.Position end
-                if target:IsA("Model") then
-                    local part = target:FindFirstChild("HumanoidRootPart")
-                        or target.PrimaryPart
-                        or target:FindFirstChildWhichIsA("BasePart", true)
-                    return part and part.Position or nil
-                end
-            end
-            return nil
-        end
-
-        local function rewriteAimArgs(oldNamecall, self, ...)
-            local method = getnamecallmethod()
-            local target = aimState.target
-            if target and _G.SHOULDSPAMSKILLS and not checkcaller()
-                and (method == "FireServer" or method == "InvokeServer") then
-                local args = { ... }
-                for i = 1, #args do
-                    local kind = typeof(args[i])
-                    if kind == "Vector3" then
-                        args[i] = target
-                        return oldNamecall(self, unpack(args))
-                    elseif kind == "CFrame" then
-                        args[i] = CFrame.new(target)
-                        return oldNamecall(self, unpack(args))
-                    end
-                end
-            end
-            return oldNamecall(self, ...)
-        end
-
-        function CombatActions.installSkillAim()
-            if aimState.installed then return true end
-            if aimState.installFailed then return false end
-            if type(newcclosure) ~= "function" or type(getnamecallmethod) ~= "function"
-                or type(checkcaller) ~= "function" then
-                aimState.installFailed = true
-                Logger.warn("Fish Trial aim: executor thiếu metamethod API; vẫn hạ độ cao nhưng không khóa remote aim", "fish_aim_api")
-                return false
-            end
-
-            local ok, err = pcall(function()
-                if type(hookmetamethod) == "function" then
-                    local oldNamecall
-                    oldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
-                        return rewriteAimArgs(oldNamecall, self, ...)
-                    end))
-                else
-                    if type(getrawmetatable) ~= "function" or type(setreadonly) ~= "function" then
-                        error("missing hookmetamethod/getrawmetatable")
-                    end
-                    local mt = getrawmetatable(game)
-                    local oldNamecall = mt.__namecall
-                    setreadonly(mt, false)
-                    mt.__namecall = newcclosure(function(self, ...)
-                        return rewriteAimArgs(oldNamecall, self, ...)
-                    end)
-                    setreadonly(mt, true)
-                end
-            end)
-
-            if not ok then
-                aimState.installFailed = true
-                Logger.warn("Fish Trial aim hook fail: " .. tostring(err), "fish_aim_hook")
-                return false
-            end
-            aimState.installed = true
-            return true
-        end
-
-        function CombatActions.setSkillAimTarget(target)
-            aimState.target = resolveAimPosition(target)
-            if aimState.target then CombatActions.installSkillAim() end
-            return aimState.target ~= nil
-        end
-
-        function CombatActions.clearSkillAimTarget()
-            aimState.target = nil
-        end
-    end
-
     -- spam-skills loop: BẬT theo _G.SHOULDSPAMSKILLS, 1 instance, check Runtime.alive (File A 2071-2123)
-    -- [FISH TRIAL ONLY] Chu kỳ cố định theo yêu cầu:
-    --   Melee Z/X/C x2 trong ~3 giây -> Sword Z/X x2 trong ~1 giây -> quay lại Melee.
-    -- Dành nhiều thời gian hơn cho Melee để skill kịp nhận phím/cast trước khi đổi sang Sword.
-    -- Nhánh ngoài Fish Trial giữ nguyên cơ chế cooldown cũ.
-    local FISH_MELEE_KEYS = { "Z", "X", "C" }
-    local FISH_SWORD_KEYS = { "Z", "X" }
-    local FISH_MELEE_KEY_INTERVAL = 3 / (#FISH_MELEE_KEYS * 2) -- 6 lần bấm / khoảng 3 giây
-    local FISH_SWORD_KEY_INTERVAL = 1 / (#FISH_SWORD_KEYS * 2) -- 4 lần bấm / khoảng 1 giây
-    local FISH_KEY_HOLD = 0.05
-
-    local function fishSpamStillActive()
-        return Runtime.alive
-            and _G.SHOULDSPAMSKILLS == true
-            and fishTrialSwordState.active == true
-    end
-
-    local function tapFishSkillKey(keyName, interval)
-        if not fishSpamStillActive() then return false end
-        VirtualInputManager:SendKeyEvent(true, keyName, false, game)
-        task.wait(FISH_KEY_HOLD)
-        VirtualInputManager:SendKeyEvent(false, keyName, false, game)
-
-        local remain = math.max(0, interval - FISH_KEY_HOLD)
-        if remain > 0 then task.wait(remain) end
-        return fishSpamStillActive()
-    end
-
-    local function findFishMeleeTool(char)
-        if char then
-            for _, tool in ipairs(char:GetChildren()) do
-                if tool:IsA("Tool") and tool.ToolTip == "Melee" then
-                    return tool
-                end
-            end
-        end
-        local bp = LP:FindFirstChild("Backpack")
-        if bp then
-            for _, tool in ipairs(bp:GetChildren()) do
-                if tool:IsA("Tool") and tool.ToolTip == "Melee" then
-                    return tool
-                end
-            end
-        end
-        return nil
-    end
-
-    local function equipFishPhaseTool(char, tool)
-        if not (char and tool and tool.Parent) then return false end
-        if tool.Parent == char then return true end
-        local hum = char:FindFirstChildOfClass("Humanoid")
-        if not (hum and hum.Health > 0) then return false end
-        pcall(function() hum:EquipTool(tool) end)
-        task.wait(0.05)
-        return tool.Parent == char
-    end
-
-    local function spamFishPhase(keys, interval)
-        for _ = 1, 2 do
-            for _, keyName in ipairs(keys) do
-                if not tapFishSkillKey(keyName, interval) then
-                    return false
-                end
-            end
-        end
-        return fishSpamStillActive()
-    end
-
-    local function runFishTrialSkillSequence()
-        local char = LP.Character
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if not (char and hum and hum.Health > 0) then return end
-
-        -- Pha 1: Melee Z/X/C hai lượt trong khoảng 3 giây.
-        local melee = findFishMeleeTool(char)
-        if melee and equipFishPhaseTool(char, melee) then
-            if not spamFishPhase(FISH_MELEE_KEYS, FISH_MELEE_KEY_INTERVAL) then return end
-        end
-
-        if not fishSpamStillActive() then return end
-
-        -- Pha 2: đúng Tushita/Yama đã chọn, Z/X hai lượt trong khoảng 1 giây.
-        char = LP.Character
-        local sword = char and getFishTrialSwordForSpam(char) or nil
-        if sword and equipFishPhaseTool(char, sword) then
-            spamFishPhase(FISH_SWORD_KEYS, FISH_SWORD_KEY_INTERVAL)
-        end
-    end
-
     function CombatActions.startSpamSkills()
         task.spawn(function()
             while Runtime.alive do
                 task.wait()
                 if _G.SHOULDSPAMSKILLS then
                     pcall(function()
-                        -- Fish Trial dùng chu kỳ riêng, không đi qua vòng cooldown/vũ khí chung.
-                        if fishTrialSwordState.active then
-                            runFishTrialSkillSequence()
-                            return
-                        end
-
                         local char = LP.Character
                         local skillsUI = LP.PlayerGui:FindFirstChild("Main")
                         skillsUI = skillsUI and skillsUI:FindFirstChild("Skills")
                         if not (char and skillsUI) then return end
-
                         local weapon = getallweapon()
                         for _, v in pairs(weapon) do
                             if not skillsUI:FindFirstChild(v.Name) then EquipTool(v.Name) end
                         end
-
                         for _, v in pairs(weapon) do
                             if v.Parent ~= char then EquipTool(v.Name) end
                             local ui_ = skillsUI:FindFirstChild(v.Name)
@@ -3219,22 +2052,18 @@ do
             elseif #OthersEnemies > 0 then
                 self:Attack(Part1 or Part2, OthersEnemies)
             else
-                return false -- [§XXIII-14] không có enemy → idle (loop tự backoff, KHÔNG spin task.wait(0))
+                task.wait(0)
             end
-            return true -- có enemy trong tầm → đã đánh
         end
         function FastAttack:BladeHits()
             local Equipped = IsAlive(Player.Character) and Player.Character:FindFirstChildOfClass("Tool")
-            if Equipped and Equipped.ToolTip ~= "Gun" then return self:AttackNearest() end
-            return false -- không có vũ khí phù hợp → idle
+            if Equipped and Equipped.ToolTip ~= "Gun" then self:AttackNearest() else task.wait(0) end
         end
         _ENV.rz_FastAttack = FastAttack
         task.spawn(function()
-            -- [§XXIII-14] KHÔNG global task.wait(0) khi idle. Có đánh → nhịp ClickDelay (nhanh); idle → backoff 0.15s.
             while Runtime.alive do
-                local attacked = false
-                if Settings.AutoClick then pcall(function() attacked = FastAttack:BladeHits() end) end
-                if attacked then task.wait(Settings.ClickDelay) else task.wait(0.15) end
+                task.wait(Settings.ClickDelay)
+                if Settings.AutoClick then pcall(function() FastAttack:BladeHits() end) end
             end
         end)
     end
@@ -3242,118 +2071,17 @@ do
     -- haki loop nền (File A 2390-2395)
     function CombatActions.startHakiLoop()
         task.spawn(function()
-            -- [§XXIII-15] Haki KHÔNG chạy mỗi frame (task.wait() ~ mỗi frame → tốn CPU). Throttle 1s/lần.
             while Runtime.alive do
-                task.wait(1)
+                task.wait()
                 pcall(function() Movement.haki() end)
             end
         end)
     end
-
-    -- [FINAL §J2-J6] attackBossAttempt — helper CHUNG cho MỌI boss (Human/Ghoul/Cake Prince/Dough King).
-    --   Mỗi call chạy MỘT attempt hữu hạn (options.maxSeconds, mặc định 12s), KHÔNG retry vô hạn, KHÔNG block 60s.
-    --   FastAttack là chính; HP watchdog: HP không giảm trong 2–3s → bật M1 fallback (§J3), tắt sau khi FastAttack
-    --   gây damage ổn định >=3 lần. M1 chỉ khi <=M1_RANGE (doM1). Movement chỉ khi lệch >5 studs & qua 0.25s (§J5).
-    --   Boss chết CHỈ khi HP replicate <= 0 (§J6). Model missing → target_missing (KHÔNG coi là chết).
-    -- Return: ok(bool), reason(string):
-    --   true,"boss_dead" | false,"boss_still_alive" | false,"target_missing"
-    --   false,"local_player_dead" | false,"phase_changed" | false,"cancelled"
-    function CombatActions.attackBossAttempt(target, options)
-        options = options or {}
-        local maxSeconds = options.maxSeconds or 12
-        local phaseCheck = options.phaseCheck        -- fn() -> true nếu phase còn hợp lệ
-        local M1_RANGE_LOCAL = 11
-        if not target or not target.Parent then return false, "target_missing" end
-        local bossHum = target:FindFirstChildOfClass("Humanoid") or target:FindFirstChild("Humanoid")
-        local bhrp = target:FindFirstChild("HumanoidRootPart") or (target.PrimaryPart)
-        if not (bossHum and bhrp) then return false, "target_missing" end
-
-        CombatActions.initV3Combat()
-        local t0 = tick()
-        local lastHp = bossHum.Health
-        local lastHpCheck = tick()
-        local lastDamageT = tick()
-        local m1FallbackActive = false
-        local fastAttackDamageStreak = 0
-        local lastMoveT, lastMovePos = 0, nil
-        local lastEquip = 0
-
-        while Runtime.alive do
-            -- huỷ theo điều kiện ngoài
-            if phaseCheck and not phaseCheck() then return false, "phase_changed" end
-            -- local player chết?
-            local myChar = LP.Character
-            local myHum = myChar and myChar:FindFirstChildOfClass("Humanoid")
-            local myHrp = myChar and myChar:FindFirstChild("HumanoidRootPart")
-            if not (myChar and myHum and myHrp) or myHum.Health <= 0 then
-                return false, "local_player_dead"
-            end
-            -- boss model biến mất / reparent → target_missing (KHÔNG phải chết) §J6
-            if not target.Parent or not bossHum.Parent or not bhrp.Parent then
-                return false, "target_missing"
-            end
-            -- §J6: boss chết CHỈ khi HP replicate <= 0
-            if bossHum.Health <= 0 then return true, "boss_dead" end
-            -- timeout attempt (hữu hạn) → boss_still_alive, tick sau tìm lại
-            if (tick() - t0) > maxSeconds then return false, "boss_still_alive" end
-
-            -- equip/haki throttle 1s
-            if (tick() - lastEquip) >= 1 then
-                lastEquip = tick()
-                pcall(function() Movement.equip() end)
-                pcall(function() Movement.haki() end)
-            end
-
-            -- §J3 HP watchdog: kiểm mỗi ~0.5s; HP không giảm trong 2–3s → bật M1 fallback
-            if (tick() - lastHpCheck) > 0.5 then
-                local cur = bossHum.Health
-                if (lastHp - cur) > 1 then
-                    -- FastAttack đang gây damage
-                    lastDamageT = tick()
-                    fastAttackDamageStreak = fastAttackDamageStreak + 1
-                    -- §J3: chỉ tắt M1 sau khi FastAttack damage ổn định >= 3 lần
-                    if m1FallbackActive and fastAttackDamageStreak >= 3 then
-                        m1FallbackActive = false
-                    end
-                else
-                    fastAttackDamageStreak = 0
-                    if (tick() - lastDamageT) >= 2.5 then m1FallbackActive = true end
-                end
-                lastHp = cur
-                lastHpCheck = tick()
-            end
-
-            -- §J5 MOVEMENT: chỉ di chuyển khi lệch > 5 studs & qua 0.25s
-            local dist = (bhrp.Position - myHrp.Position).Magnitude
-            if (tick() - lastMoveT) > 0.25 then
-                local moved = (not lastMovePos) or (bhrp.Position - lastMovePos).Magnitude > 4
-                if dist > 5 or moved then
-                    lastMoveT = tick()
-                    lastMovePos = bhrp.Position
-                    -- khi M1 active: đứng gần NGANG boss (không cao 25 studs) §J5
-                    local offset = m1FallbackActive and CFrame.new(0, 2, 4) or CFrame.new(0, 4, 5)
-                    pcall(function() topos(bhrp.CFrame * offset) end)
-                end
-            end
-
-            -- FastAttack (chính)
-            pcall(function() CombatActions.v3BringMob(target.Name, 3) end)
-            pcall(function() CombatActions.v3FastAttack(target.Name) end)
-
-            -- §J3/J4 M1 fallback: chỉ khi active + trong tầm
-            if m1FallbackActive and dist <= M1_RANGE_LOCAL then
-                CombatActions.doM1(target)
-            end
-
-            task.wait(0.06)
-        end
-        return false, "cancelled"
-    end
 end
 -- alias File A
-local function getplayers(...) return CombatActions.getplayers(...) end
-local function countplayers(...) return CombatActions.countplayers(...) end
-local function attackTick(t, opts) return CombatActions.attackTick(t, opts) end
+local function getplayers() return CombatActions.getplayers() end
+local function countplayers() return CombatActions.countplayers() end
+local function attackTick(t) return CombatActions.attackTick(t) end
 local function getmob1(pos) return CombatActions.getmob1(pos) end
 local function checkmob_(v) return CombatActions.checkmob_(v) end
 local function BringMob() return CombatActions.BringMob() end
@@ -3599,7 +2327,6 @@ end
 --[[ ============================================================================
  [20] TRIALACTIONS — doTrialForMyRace + runTrialPhase. (File A 982-1128)
 ============================================================================ ]]
-local TrialTimeoutWatch -- forward declaration; khởi tạo ở [27.5]
 local TrialActions = {}
 do
     local LP = LocalPlayer
@@ -3644,9 +2371,9 @@ do
         local race_trial_place = getRaceTrialPlace(myrace)
 
         if myrace == "Mink" then
-            if tick() - (RuntimeState.minkLastTrial or 0) > 3 then task.wait(2) end
-            RuntimeState.minkLastTrial = tick()
-            local sp = RuntimeState.minkStartPoint
+            if tick() - (_G.minkLastTrial or 0) > 3 then task.wait(2) end
+            _G.minkLastTrial = tick()
+            local sp = _G.minkStartPoint
             if not (sp and sp.Parent) then
                 sp = nil
                 pcall(function()
@@ -3654,7 +2381,7 @@ do
                         if obj.Name == "StartPoint" then sp = obj break end
                     end
                 end)
-                RuntimeState.minkStartPoint = sp
+                _G.minkStartPoint = sp
             end
             if sp then
                 local t0 = tick()
@@ -3675,7 +2402,7 @@ do
                 end
             end)
             if not finish then
-                local c = RuntimeState.skyFinish
+                local c = _G.skyFinish
                 if c and c.Parent then finish = c
                 else
                     pcall(function()
@@ -3683,7 +2410,7 @@ do
                             if obj.Name == "snowisland_Cylinder.081" then finish = obj break end
                         end
                     end)
-                    RuntimeState.skyFinish = finish
+                    _G.skyFinish = finish
                 end
             end
             if finish then flyTo(finish.CFrame)
@@ -3694,124 +2421,52 @@ do
             pcall(function() tp(workspace.Map.CyborgTrial.Floor.CFrame * CFrame.new(0, 500, 0)) end)
 
         elseif myrace == "Human" or myrace == "Ghoul" then
-            -- [FINAL §J2/J3] trial Human/Ghoul dùng CHUNG helper attackBossAttempt (FastAttack chính,
-            --   HP watchdog 2–3s → M1 fallback <=12 studs, đứng ngang boss, KHÔNG set Health=0 client, mỗi
-            --   attempt hữu hạn ~14s). Tick sau tự tìm target lại nếu chưa chết.
-            pcall(function() CombatActions.initV3Combat() end)
+            -- FIX (user 2026-07-10) — trial Human/Ghoul "lâu lâu không chết boss":
+            -- Trước đây CHỈ set client-side hum.Health=0. Boss trial thường do SERVER giữ network
+            -- ownership → server replicate lại HP → Health=0 bị revert → boss sống dai (đám lính nhỏ
+            -- client-owned thì vẫn chết). Sửa: BỒI damage THẬT bằng bộ remote V3 (RE/RegisterHit mã hoá)
+            -- y như loop raiding boss (dòng ~2680) — vừa chắc chắn hạ boss, vừa để acc phụ cũng đánh boss.
+            pcall(function() CombatActions.initV3Combat() end)  -- bật remote đánh thật 1 lần trước loop
             pcall(function() setscriptable(LP, "SimulationRadius", true) end)
             for _, v in pairs(workspace.Enemies:GetChildren()) do
                 local hum = v:FindFirstChild("Humanoid")
                 local hrp = v:FindFirstChild("HumanoidRootPart")
                 if hum and hrp and hum.Health > 0
                     and (not race_trial_place or getdis(hrp.CFrame, race_trial_place.CFrame) < 1500) then
-                    local ok, reason = CombatActions.attackBossAttempt(v, {
-                        maxSeconds = 14,
-                        phaseCheck = function() return templeState() ~= "ffup" end, -- vào FFA = phase đổi → dừng
-                    })
-                    DBG("[TRIAL-BOSS] " .. tostring(v.Name) .. " → " .. tostring(reason), ok and "ok" or "warn", "trial_boss")
-                    if reason == "local_player_dead" or reason == "phase_changed" then break end
+                    local mobName = v.Name
+                    local t0 = tick()
+                    repeat task.wait()
+                        equipMelee()
+                        Movement.equip(); Movement.haki()
+                        tp(hrp.CFrame * CFrame.new(0, 30, 0))
+                        pcall(function() sethiddenproperty(LP, "SimulationRadius", math.huge) end)
+                        -- set HP (dính với quái client-owned) + damage thật (dính với boss server-owned)
+                        pcall(function() hrp.CanCollide = false; hum.Health = 0 end)
+                        v3BringMob(mobName, 3)
+                        v3FastAttack(mobName)
+                    until (not v.Parent) or (not v:FindFirstChild("Humanoid")) or v.Humanoid.Health <= 0 or (tick() - t0) > 20
                 end
             end
 
         elseif myrace == "Fishman" then
-            -- [FISH TRIAL AIM] Logic target/timeout giữ nguyên; chỉ sửa cách đứng + khóa aim vào Sea Beast.
-            -- Cũ: đứng thẳng trên HRP +500 studs → nhiều skill rơi ngoài tầm/góc bắn.
-            -- Mới: đứng thấp, lùi ngang, CFrame.lookAt vào Sea Beast và cập nhật aim theo HRP đang di chuyển.
-            -- CẤU HÌNH CỨNG: không đọc getgenv()/loader.
-            -- 55 studs cao + lùi 20 studs: tránh Character/Sea Beast bị chìm hoặc nằm dưới nền Trial.
-            local FISH_HEIGHT = 55
-            local FISH_DISTANCE = 20
-            local FISH_AIM_Y_OFFSET = 5
-            local FISH_MOVE_INTERVAL = 0.25
-
-            -- CHỈ Fish Trial mới tự lấy kiếm. Ưu tiên Tushita, không có mới thử Yama.
-            -- Không tìm thấy kiếm vẫn tiếp tục Trial, không block/return.
-            local fishSwordName
-            pcall(function() fishSwordName = CombatActions.equipFishTrialSword() end)
-            if fishSwordName then
-                status("[FISH TRIAL] Đã cầm " .. tostring(fishSwordName) .. " → bay tới Sea Beast + spam Melee/Sword")
-            else
-                status("[FISH TRIAL] Không có Tushita/Yama → dùng vũ khí hiện có")
-            end
-
-            local seaBeastsFolder = workspace:FindFirstChild("SeaBeasts")
-            if not seaBeastsFolder then
-                CombatActions.endFishTrialSwordMode()
-                return
-            end
-
-            for _, v in pairs(seaBeastsFolder:GetChildren()) do
-                local ok, err = pcall(function()
-                    local health = v:FindFirstChild("Health")
-                    local targetRoot = v:FindFirstChild("HumanoidRootPart")
-                    if health and health.Value > 0 and targetRoot
-                        and (not race_trial_place or getdis(targetRoot.CFrame, race_trial_place.CFrame) < 1500) then
+            for _, v in pairs(workspace.SeaBeasts:GetChildren()) do
+                pcall(function()
+                    if v:FindFirstChild('Health') and v.Health.Value > 0 and v:FindFirstChild("HumanoidRootPart")
+                        and (not race_trial_place or getdis(v.HumanoidRootPart.CFrame, race_trial_place.CFrame) < 1500) then
                         local t0 = tick()
-                        local lastMoveAt = 0
-                        _G.SHOULDSPAMSKILLS = true
-                        CombatActions.installSkillAim()
-                        status("[FISH TRIAL] Đang bay tới + spam Melee/Sword Sea Beast")
-
-                        repeat
-                            task.wait()
-                            -- Không ép equip Sword mỗi 0.5s: việc đó cướp tay khỏi Melee giữa pha Z/X/C.
-                            -- Sword đã được kiểm/load một lần trước target; spam sequence tự equip đúng vũ khí
-                            -- ở đầu từng pha (Melee rồi Sword), nên không spam LoadItem/equip tại đây.
-                            -- Không tự mua Sharkman Karate/Fishman Karate trong Fish Trial.
-
-                            targetRoot = v:FindFirstChild("HumanoidRootPart")
-                            if targetRoot then
-                                local aimPosition = targetRoot.Position + Vector3.new(0, FISH_AIM_Y_OFFSET, 0)
-                                CombatActions.setSkillAimTarget(aimPosition)
-
-                                local myChar = LP.Character
-                                local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-                                if myRoot and (tick() - lastMoveAt) >= FISH_MOVE_INTERVAL then
-                                    lastMoveAt = tick()
-                                    -- Giữ phía đang đứng để tránh nhảy xuyên qua Sea Beast khi target quay.
-                                    local away = Vector3.new(
-                                        myRoot.Position.X - aimPosition.X,
-                                        0,
-                                        myRoot.Position.Z - aimPosition.Z
-                                    )
-                                    if away.Magnitude < 1 then
-                                        local look = targetRoot.CFrame.LookVector
-                                        away = Vector3.new(-look.X, 0, -look.Z)
-                                    end
-                                    if away.Magnitude < 0.1 then away = Vector3.new(0, 0, -1) end
-
-                                    local standPosition = aimPosition
-                                        + away.Unit * FISH_DISTANCE
-                                        + Vector3.new(0, FISH_HEIGHT, 0)
-                                    local standCFrame = CFrame.lookAt(standPosition, aimPosition)
-                                    local distanceToStand = (myRoot.Position - standPosition).Magnitude
-                                    if distanceToStand <= 6 then
-                                        -- Ở gần: đặt đúng vị trí ngay để không bị tween cũ/địa hình kéo xuống đất.
-                                        Movement.cancel()
-                                        myRoot.CFrame = standCFrame
-                                        myRoot.AssemblyLinearVelocity = Vector3.zero
-                                        myRoot.AssemblyAngularVelocity = Vector3.zero
-                                    else
-                                        -- Ở xa: tween thật sự tới Sea Beast; interval 0.25s tránh cancel tween quá dày.
-                                        Movement.topos(standCFrame)
-                                    end
-                                end
+                        repeat task.wait()
+                            local bp = LP:FindFirstChild("Backpack")
+                            if bp and not bp:FindFirstChild("Sharkman Karate") then
+                                SafeRemote.invoke(3, "BuySharkmanKarate")
                             end
-                        until (not v.Parent) or (not v:FindFirstChild("Health")) or v.Health.Value <= 0
+                            tp(v.HumanoidRootPart.CFrame * CFrame.new(0, 500, 0))
+                            _G.SHOULDSPAMSKILLS = true
+                        until (not v.Parent) or (not v:FindFirstChild('Health')) or v.Health.Value <= 0
                             or (not v:FindFirstChild("HumanoidRootPart")) or (tick() - t0) > 25
+                        _G.SHOULDSPAMSKILLS = false
                     end
                 end)
-
-                -- Cleanup bắt buộc kể cả khi target biến mất/error để không aim nhầm ngoài Fish Trial.
-                _G.SHOULDSPAMSKILLS = false
-                CombatActions.clearSkillAimTarget()
-                if not ok then
-                    Logger.warn("Fish Trial target error: " .. tostring(err), "fish_trial_target")
-                end
             end
-            _G.SHOULDSPAMSKILLS = false
-            CombatActions.clearSkillAimTarget()
-            CombatActions.endFishTrialSwordMode()
             -- Draco / khác: File A không có handler riêng → fallback bay vào trial place (status rõ)
         elseif race_trial_place then
             flyTo(race_trial_place.CFrame)
@@ -3830,21 +2485,10 @@ do
     function TrialActions.runTrialPhase(roleName, isMain)
         local race_trial_place = getRaceTrialPlace(WorldProbe.getRace())
         if race_trial_place and getdis(race_trial_place.CFrame) < 1500 then
-            -- Đây là điểm xác nhận Character đã thật sự vào khu Trial.
-            -- Ghi in_trail trước, rồi mới start timer 60s để cả lần gọi Trial đầu tiên cũng được canh timeout.
             if isMain then
                 local st = State.getMainStatus(State.myName)
                 if st ~= "in_trail" and st ~= "training" then State.setMyMainStatus("in_trail") end
-            elseif RuntimeState.inTrial ~= true then
-                State.reportStatus("in_trail")
             end
-            RuntimeState.inTrial = true
-            State.didEnterTrialThisTurn = true
-
-            if TrialTimeoutWatch and not TrialTimeoutWatch.start(isMain, State.myMainIndex) then
-                return "trial_timeout_reset"
-            end
-
             status(roleName .. " Doing trial")
             TrialActions.doTrialForMyRace()
             return "running_trial"
@@ -3889,7 +2533,7 @@ do
         end
         local ok, i, d, f = SafeRemote.invoke(3, "UpgradeRace", "Check")
         _upgradeRaw = { t = now, ok = ok, i = ok and i or nil, d = ok and d or nil, f = ok and f or nil }
-        Diagnostics.lastRaceI = _upgradeRaw.i
+        _G.lastRaceI = _upgradeRaw.i
         return _upgradeRaw
     end
 
@@ -3898,15 +2542,15 @@ do
         local char = LP.Character
         local raw = _getUpgradeRaw()
         if not (char and char:FindFirstChild("RaceTransformed")) then
-            Diagnostics.lastRaceI = raw.ok and raw.i or "?"
+            _G.lastRaceI = raw.ok and raw.i or "?"
             if raw.ok and (raw.i == 5 or raw.i == 8) then return false, "done" end
             local race = WorldProbe.getRace()
             local abcxyz = race and checkbackpack(race_abilities[race])
             if abcxyz then return true end
             return false
         end
-        if not raw.ok then Diagnostics.lastRaceI = "?"; return false end
-        Diagnostics.lastRaceI = raw.i
+        if not raw.ok then _G.lastRaceI = "?"; return false end
+        _G.lastRaceI = raw.i
         local i, d, f = raw.i, raw.d, raw.f
         if i == 5 or i == 8 then
             return false, "done"
@@ -4006,43 +2650,6 @@ do
         return Training.checkTrialable()
     end
 
-    -- [FINAL §B7/§21] confirmClassify — check V4 progress N lần LIÊN TIẾP cùng CLASSIFICATION (mặc định 3 lần,
-    --   cách 0.5s). Dùng SAU respawn (intentional reset / death / cycle cancel) để KHÔNG set thẳng training
-    --   ngay sau reset khi giá trị còn dao động. So theo CLASSIFICATION (trialable/needTrain/done/canBuyGear/
-    --   uncertain) chứ không so raw i (nhiều raw i cùng 1 classification). Trả result cuối + confirmed(bool).
-    function Training.confirmClassify(role, requiredCount, interval)
-        requiredCount = requiredCount or 3
-        interval = interval or 0.5
-        local function classOf(r)
-            if r.trialable then return "trialable"
-            elseif r.needTrain then return "training"
-            elseif r.done then return "done"
-            elseif r.canBuyGear then return "can_buy_gear"
-            else return "uncertain" end
-        end
-        local firstClass, streak, last = nil, 0, nil
-        for _ = 1, requiredCount * 3 do -- tối đa 3x số lần cần (chống kẹt vô hạn nếu cứ dao động)
-            _upgradeRaw.t = -1e9 -- ép refresh (bỏ cache TTL) để đọc mới thật
-            local r = Training.checkUpgradeForRole(role)
-            last = r
-            local c = classOf(r)
-            if c == firstClass then
-                streak = streak + 1
-            else
-                firstClass = c
-                streak = 1
-            end
-            if streak >= requiredCount and firstClass ~= "uncertain" then
-                r.confirmed = true
-                r.confirmedClass = firstClass
-                return r
-            end
-            task.wait(interval)
-        end
-        if last then last.confirmed = false; last.confirmedClass = firstClass end
-        return last or { uncertain = true, confirmed = false, reason = "confirm_failed" }
-    end
-
     -- pressV4 (File A 1598-1606)
     function Training.pressV4()
         pcall(function()
@@ -4057,15 +2664,15 @@ do
     -- trainTimeoutHop (File A 1612-1625) — CHỈ main, dùng hop ít người
     local function trainTimeoutHop(tag)
         if not State.isMain[State.myName] then return false end
-        if not RuntimeState.trainWinStart then return false end
-        if (tick() - RuntimeState.trainWinStart) < Config.TRAIN_WINDOW then return false end
-        if (RuntimeState.trainKills or 0) > 10 then
-            RuntimeState.trainWinStart = tick(); RuntimeState.trainKills = 0
+        if not _G.trainWinStart then return false end
+        if (tick() - _G.trainWinStart) < Config.TRAIN_WINDOW then return false end
+        if (_G.trainKills or 0) > 10 then
+            _G.trainWinStart = tick(); _G.trainKills = 0
             return false
         end
-        status(tag .. " ⏱ Timeout train (kill " .. tostring(RuntimeState.trainKills or 0) .. "/5' <=10) → hop server")
-        HopServer(("Timeout train kill %d/5phut <=10"):format(RuntimeState.trainKills or 0))
-        RuntimeState.trainWinStart = tick(); RuntimeState.trainKills = 0
+        status(tag .. " ⏱ Timeout train (kill " .. tostring(_G.trainKills or 0) .. "/5' <=10) → hop server")
+        HopServer(("Timeout train kill %d/5phut <=10"):format(_G.trainKills or 0))
+        _G.trainWinStart = tick(); _G.trainKills = 0
         return true
     end
     Training.trainTimeoutHop = trainTimeoutHop
@@ -4083,18 +2690,16 @@ do
         if AB == "raiding" then
             local boss = workspace.Enemies:FindFirstChild("Cake Prince") or workspace.Enemies:FindFirstChild("Dough King")
             if boss then
-                status(tag .. " Raiding for fragment (boss helper)")
-                -- [FINAL §J7] Cake Prince / Dough King dùng CHUNG helper attackBossAttempt — KHÔNG còn
-                --   đứng cao 25 studs, KHÔNG FastAttack-only, KHÔNG timeout block 60s. Mỗi attempt hữu hạn;
-                --   nếu boss chưa chết, thoát để tick sau tìm target lại (không block MainLoop).
-                local ok, reason = CombatActions.attackBossAttempt(boss, {
-                    maxSeconds = 14,
-                    phaseCheck = function()
-                        return (workspace.Enemies:FindFirstChild("Cake Prince") ~= nil)
-                            or (workspace.Enemies:FindFirstChild("Dough King") ~= nil)
-                    end,
-                })
-                DBG("[RAID] boss attempt → " .. tostring(reason), ok and "ok" or "warn", "raid_boss")
+                status(tag .. " Raiding for fragment")   -- status TRƯỚC loop
+                local rt0 = tick()
+                repeat task.wait()
+                    if (tick() - rt0) > 60 then break end   -- timeout raiding 60s → thoát, tick sau check lại
+                    local bhrp = boss:FindFirstChild("HumanoidRootPart")
+                    if bhrp then pcall(function() topos(bhrp.CFrame * CFrame.new(0, 25, 0)) end) end
+                    Movement.equip(); Movement.haki()
+                    v3BringMob(boss.Name, 3)
+                    v3FastAttack(boss.Name)
+                until not checkmob_(boss)
             end
             return
         end
@@ -4102,11 +2707,11 @@ do
         Training.pressV4()
         -- cửa sổ đếm kill (chỉ main) (File A 1626-1633)
         if State.isMain[State.myName] then
-            if not RuntimeState.trainGrindLastT or (tick() - RuntimeState.trainGrindLastT) > 5 then
-                RuntimeState.trainWinStart = tick(); RuntimeState.trainKills = 0
+            if not _G.trainGrindLastT or (tick() - _G.trainGrindLastT) > 5 then
+                _G.trainWinStart = tick(); _G.trainKills = 0
             end
-            RuntimeState.trainGrindLastT = tick()
-            if not RuntimeState.trainWinStart then RuntimeState.trainWinStart = tick() end
+            _G.trainGrindLastT = tick()
+            if not _G.trainWinStart then _G.trainWinStart = tick() end
         end
 
         if getdis(pos__) < 1500 then
@@ -4184,7 +2789,7 @@ do
                 until not checkmob_(v)
                 -- CHỈ đếm kill khi quái THẬT chết. Timeout/ghost (mobTimedOut) = đánh không ăn → KHÔNG đếm,
                 -- nếu không trainKills phồng >10 → trainTimeoutHop tưởng "năng suất" → không hop → kẹt bãi.
-                if not mobTimedOut and State.isMain[State.myName] then RuntimeState.trainKills = (RuntimeState.trainKills or 0) + 1 end
+                if not mobTimedOut and State.isMain[State.myName] then _G.trainKills = (_G.trainKills or 0) + 1 end
             end
         else
             topos(pos__)
@@ -4217,7 +2822,7 @@ do
     local START_FILE          = SYNC_DIR .. "/starttime.txt"
     AbilitySync.AT_DOOR_DIST  = AT_DOOR_DIST
 
-    RuntimeState.myFireEpoch = RuntimeState.myFireEpoch or 0
+    _G.myFireEpoch = _G.myFireEpoch or 0
 
     function AbilitySync.ensureSyncDir()
         if isfolder and not isfolder(SYNC_DIR) then pcall(function() makefolder(SYNC_DIR) end) end
@@ -4324,17 +2929,17 @@ do
         local manualCf = WorldProbe.getTrialDoorCFrame()
         if manualCf then
             local d = getdis(manualCf)
-            Diagnostics.lastDoorSrc, Diagnostics.lastDoorName, Diagnostics.lastDoorDist = "C",
+            _G.lastDoorSrc, _G.lastDoorName, _G.lastDoorDist = "C",
                 WorldProbe.normalizeRace(WorldProbe.getRace()) or "manual", d
             return d
         end
         local door = getdoor()
         if door then
             local d = getdis(door.CFrame)
-            Diagnostics.lastDoorSrc, Diagnostics.lastDoorName, Diagnostics.lastDoorDist = "R", door.Name, d
+            _G.lastDoorSrc, _G.lastDoorName, _G.lastDoorDist = "R", door.Name, d
             return d
         end
-        Diagnostics.lastDoorSrc, Diagnostics.lastDoorName, Diagnostics.lastDoorDist = "X", "none", 1e9
+        _G.lastDoorSrc, _G.lastDoorName, _G.lastDoorDist = "X", "none", 1e9
         return 1e9
     end
 
@@ -4377,7 +2982,7 @@ do
 
     -- canactive: đã qua cooldown 30s (File A 2568-2572)
     function AbilitySync.myCanActive()
-        local fe = RuntimeState.myFireEpoch or 0
+        local fe = _G.myFireEpoch or 0
         if fe <= 0 then return true end
         return serverNow() >= (fe + ABILITY_COOLDOWN)
     end
@@ -4397,7 +3002,7 @@ do
     function AbilitySync.writeMyCheck(label, cond)
         if not label then return end
         AbilitySync.ensureSyncDir()
-        local fe = RuntimeState.myFireEpoch or 0
+        local fe = _G.myFireEpoch or 0
         local fireStr = (fe > 0) and fmtHanoi(fe) or "00:00:00"
         pcall(function()
             writefile(checkFileForLabel(label),
@@ -4436,9 +3041,9 @@ do
         if not label then return end
         local dd = AbilitySync.distToMyDoor()
         local ss = AbilitySync.sameServerAsCurrentMain()
-        Diagnostics.lastDoorDist = dd; Diagnostics.lastSameSrv = ss
+        _G.lastDoorDist = dd; _G.lastSameSrv = ss
         local cond = (dd < AT_DOOR_DIST) and ss
-        RuntimeState.myDoorReady = cond and true or false
+        _G.myDoorReady = cond and true or false
         AbilitySync.writeMyCheck(label, cond)
     end
     -- maybeFire: main turn chốt starttime khi đủ ready (File A 2641-2651)
@@ -4446,30 +3051,30 @@ do
         local curName = getCurrentMainBeingUpgraded()
         if not (curName and State.myName == curName) then return end
         local now = serverNow()
-        local last = RuntimeState.myStartEpoch or 0
+        local last = _G.myStartEpoch or 0
         if (now - last) > (START_LEAD + ABILITY_FIRE_WINDOW) and AbilitySync.allReady() then
             AbilitySync.writeStart(now + START_LEAD)
-            RuntimeState.myStartEpoch = now
+            _G.myStartEpoch = now
         end
     end
     -- pressAbility: CommE ActivateAbility (File A 2688)
     function AbilitySync.pressAbility()
-        RuntimeState.myFireEpoch = serverNow()
+        _G.myFireEpoch = serverNow()
         pcall(function()
             ReplicatedStorage.Remotes.CommE:FireServer("ActivateAbility")
         end)
     end
     -- pollFire: đọc starttime, bấm trong cửa sổ hợp lệ, latch chống lặp (File A 2673-2698)
     function AbilitySync.pollFire()
-        local st = AbilitySync.readStart() or RuntimeState.syncStart
-        if st then RuntimeState.syncStart = st end
-        if st and st ~= RuntimeState.allyLastFire then
+        local st = AbilitySync.readStart() or _G.syncStart
+        if st then _G.syncStart = st end
+        if st and st ~= _G.allyLastFire then
             local age = hanoiSecOfDay(serverNow()) - st
             if age < -43200 then age = age + 86400 end
             if age >= ABILITY_FIRE_WINDOW then
-                RuntimeState.allyLastFire = st
+                _G.allyLastFire = st
             elseif age >= 0 and AbilitySync.distToMyDoor() < AT_DOOR_DIST then
-                RuntimeState.allyLastFire = st
+                _G.allyLastFire = st
                 AbilitySync.pressAbility()
             end
         end
@@ -4481,22 +3086,22 @@ do
         task.spawn(function()
             while Runtime.alive do
                 pcall(function()
-                    RuntimeState.myDoorReady = false
+                    _G.myDoorReady = false
                     local label = AbilitySync.myAbilityLabel()
                     if label then
                         local dd = AbilitySync.distToMyDoor()
                         local ss = AbilitySync.sameServerAsCurrentMain()
-                        Diagnostics.lastDoorDist = dd; Diagnostics.lastSameSrv = ss
+                        _G.lastDoorDist = dd; _G.lastSameSrv = ss
                         local cond = (dd < AT_DOOR_DIST) and ss
-                        RuntimeState.myDoorReady = cond and true or false
+                        _G.myDoorReady = cond and true or false
                         AbilitySync.writeMyCheck(label, cond)
                         local curName = getCurrentMainBeingUpgraded()
                         if curName and State.myName == curName then
                             local now = serverNow()
-                            local last = RuntimeState.myStartEpoch or 0
+                            local last = _G.myStartEpoch or 0
                             if (now - last) > (START_LEAD + ABILITY_FIRE_WINDOW) and AbilitySync.allReady() then
                                 AbilitySync.writeStart(now + START_LEAD)
-                                RuntimeState.myStartEpoch = now
+                                _G.myStartEpoch = now
                             end
                         end
                     end
@@ -4509,7 +3114,7 @@ do
             while Runtime.alive do
                 pcall(function()
                     local v = AbilitySync.readStart()
-                    if v then RuntimeState.syncStart = v end
+                    if v then _G.syncStart = v end
                 end)
                 task.wait(1)
             end
@@ -4517,17 +3122,17 @@ do
         -- press loop: ở cửa+ready → 0.1s, chưa → 0.5s (File A 2673-2698)
         task.spawn(function()
             while Runtime.alive do
-                if RuntimeState.myDoorReady == true then
+                if _G.myDoorReady == true then
                     pcall(function()
-                        local st = AbilitySync.readStart() or RuntimeState.syncStart
-                        if st then RuntimeState.syncStart = st end
-                        if st and st ~= RuntimeState.allyLastFire then
+                        local st = AbilitySync.readStart() or _G.syncStart
+                        if st then _G.syncStart = st end
+                        if st and st ~= _G.allyLastFire then
                             local age = hanoiSecOfDay(serverNow()) - st
                             if age < -43200 then age = age + 86400 end
                             if age >= ABILITY_FIRE_WINDOW then
-                                RuntimeState.allyLastFire = st
+                                _G.allyLastFire = st
                             elseif age >= 0 and AbilitySync.distToMyDoor() < AT_DOOR_DIST then
-                                RuntimeState.allyLastFire = st
+                                _G.allyLastFire = st
                                 AbilitySync.pressAbility()
                             end
                         end
@@ -4548,147 +3153,13 @@ local PostTrial = {}
 do
     local B = Config.baseUrl
 
-    -- ===== [PROD REFACTOR §22] DEATH GUARD cycle-scoped (1 connection / Character) =====
-    -- VẤN ĐỀ CŨ: mainKillThenReset() được gọi MỖI MainTick (~0.35s) trong ffup. Mỗi lần gọi:
-    --   (1) reset State.postTrialDeathDetected=false → XÓA tín hiệu chết trước khi FSM kịp xử lý;
-    --   (2) tạo hum.Died:Connect MỚI → LEAK connection, nhiều callback cùng bắn.
-    -- SỬA: 1 guard theo cycle/Character. armDeathGuard() idempotent — chỉ connect khi Character đổi,
-    --   disconnect connection cũ, KHÔNG reset flag mỗi tick. Callback từ Character CŨ bị bỏ qua.
-    local _guard = {
-        conn = nil,          -- RBXScriptConnection hiện tại
-        char = nil,          -- Character đang canh
-        cycleId = nil,       -- id cycle đang canh (đơn điệu tăng)
-        died = false,        -- ĐÃ phát hiện main chết trong cycle này
-        reason = nil,
-    }
-
-    -- Bắt đầu (hoặc tiếp tục) canh chết cho cycle hiện tại. Gọi được nhiều lần — idempotent.
-    function PostTrial.armDeathGuard(expectedCycleId)
-        local char = LocalPlayer.Character
-        local hum = char and char:FindFirstChild("Humanoid")
-        if not hum then return false end
-        -- cùng cycle + cùng Character + còn connection → không làm gì (KHÔNG tạo connection mới)
-        if _guard.conn and _guard.char == char and _guard.cycleId == expectedCycleId then
-            return true
-        end
-        -- Character/cycle đổi → disconnect cái cũ TRƯỚC (chống leak), rồi connect cái mới.
-        if _guard.conn then Safe.disconnect(_guard.conn, "posttrial_guard"); _guard.conn = nil end
-        _guard.char = char
-        _guard.cycleId = expectedCycleId
-        _guard.died = false
-        _guard.reason = nil
-        _guard._diedEmitted = false
-        local capturedChar = char
-        local capturedCycle = expectedCycleId
-        _guard.conn = hum.Died:Connect(function()
-            -- Bỏ qua callback từ Character CŨ / cycle CŨ (chống event trễ ghi đè cycle mới).
-            if _guard.char ~= capturedChar or _guard.cycleId ~= capturedCycle then return end
-            -- [§XIV] intentional reset CHỈ được bỏ qua khi ĐỦ CẢ 4 điều kiện:
-            --   (1) intentional flag = true, (2) cycle khớp (activeCycleId + intentionalResetCycleId),
-            --   (3) Character khớp (intentionalResetCharacter), (4) server result = win_confirmed.
-            --   Thiếu bất kỳ điều kiện nào (đặc biệt death TRƯỚC win_confirmed) → vẫn tính loss.
-            local intentionalOK =
-                State.intentionalPostTrialReset == true
-                and State.activeCycleId == capturedCycle
-                and State.intentionalResetCycleId == capturedCycle
-                and State.intentionalResetCharacter == capturedChar
-                and State.winConfirmed == true
-            if intentionalOK then
-                DBG("[POSTTRIAL] intentional reset death (cycle " .. tostring(capturedCycle) .. ") → bỏ qua", "ok", "posttrial_intentional")
-                return
-            end
-            _guard.died = true
-            _guard.reason = "humanoid_died"
-            State.didEnterTrialThisTurn = false
-            State.postTrialDeathDetected = true
-            -- [FINAL §9.4/B2] gửi main_died idempotent (chỉ 1 lần / cycle) qua CriticalEvents.
-            if Config.enableEventProtocol and not _guard._diedEmitted then
-                _guard._diedEmitted = true
-                CriticalEvents.emit("main_died", {
-                    cycle_id = State.trialCycleId or capturedCycle,
-                    character_id = tostring(capturedChar),
-                    phase = State.postTrialPhase or "ffa",
-                    reason = "humanoid_died",
-                    intentional = false,
-                })
-            end
-            DBG("[POSTTRIAL] MAIN died (cycle " .. tostring(capturedCycle) .. ") → mark loss", "err", "posttrial_death")
-        end)
-        return true
-    end
-
-    -- §22 helper: đánh dấu loss idempotent cho đúng cycle.
-    function PostTrial.markMainLoss(reason, expectedCycleId)
-        if expectedCycleId ~= nil and _guard.cycleId ~= nil and expectedCycleId ~= _guard.cycleId then
-            return false -- loss của cycle khác → bỏ qua
-        end
-        _guard.died = true
-        _guard.reason = reason or "loss"
-        State.postTrialDeathDetected = true
-        State.didEnterTrialThisTurn = false
-        return true
-    end
-
-    -- §22 helper: main còn sống trong cycle này? (chưa có tín hiệu chết + Humanoid.Health>0)
-    function PostTrial.isMainAlive(expectedCycleId)
-        if expectedCycleId ~= nil and _guard.cycleId ~= nil and expectedCycleId ~= _guard.cycleId then
-            return false
-        end
-        if _guard.died then return false end
-        local char = LocalPlayer.Character
-        local hum = char and char:FindFirstChild("Humanoid")
-        return hum ~= nil and hum.Health > 0
-    end
-
-    -- §22 helper: dọn cycle (disconnect guard). preserveResult=true → giữ cờ died để FSM đọc.
-    function PostTrial.clearCycle(reason, preserveResult)
-        if _guard.conn then Safe.disconnect(_guard.conn, "posttrial_guard"); _guard.conn = nil end
-        _guard.char = nil
-        _guard.cycleId = nil
-        if not preserveResult then
-            _guard.died = false
-            _guard.reason = nil
-            State.postTrialDeathDetected = false
-        end
-    end
-
-    function PostTrial.deathReason() return _guard.reason end
-
-    local function clearKillRuntime()
-        State.postTrialStartedAt = nil
-        State.postTrialCycleId = nil
-        State.postTrialHoldCFrame = nil
-        State.postTrialEliminated = {}
-        State.postTrialSeen = {}
-        State.postTrialCharacters = {}
-    end
-    PostTrial.clearKillRuntime = clearKillRuntime
-
-    local function stopPostTrialMotion()
-        Movement.cancel()
-        _G.SHOULDSPAMSKILLS = false
-        pcall(function() CombatActions.clearSkillAimTarget() end)
-        local root = Movement.getHRP()
-        if root then
-            root.AssemblyLinearVelocity = Vector3.zero
-            root.AssemblyAngularVelocity = Vector3.zero
-        end
-        return root
-    end
-
-    -- Ally auto-reset CHẮC CHẮN + CHỜ Character mới rồi mới gửi helpreset (§14/B3).
-    -- [FINAL §14] KHÔNG gửi helpreset sau task.wait(0.5) đơn giản. Phải: char cũ chết → CharacterAdded →
-    --   Humanoid mới Health>0 → không còn FFA → cycle vẫn đúng → gửi ally_respawn_confirmed + helpreset (V2).
+    -- Ally auto-reset CHẮC CHẮN: loop 5 lần Health=0 + BreakJoints (0.15s) → chết hẳn trước main.
+    -- Trước đây chỉ 1 lần Health=0 → ally có thể không chết (shield/respawn) → main tween đến đánh nhầm.
     function PostTrial.resetAllyOnce(roleName)
-        if RuntimeState.allyKillReset then return "ally_reset" end
-        RuntimeState.allyKillReset = true
-        status(roleName .. " Kill-player → AUTO RESET NGAY (ally) + chờ respawn confirm")
-        local cycleId = State.trialCycleId
-        local oldChar = LocalPlayer.Character
-        -- [FIX #1] token CŨ = characterToken TRƯỚC khi tự sát (không tostring(Character)).
-        local oldToken = (_G.KaitunCharacterToken and _G.KaitunCharacterToken()) or State.characterToken
+        if _G.allyKillReset then return "ally_reset" end
+        _G.allyKillReset = true
+        status(roleName .. " Kill-player → AUTO RESET NGAY (ally, loop 5)")
         task.spawn(function()
-            -- 1) tự sát chắc chắn (loop 5)
             for _ = 1, 5 do
                 pcall(function() LocalPlayer.Character.Humanoid.Health = 0 end)
                 pcall(function() LocalPlayer.Character:BreakJoints() end)
@@ -4697,153 +3168,14 @@ do
                 if (not h) or h.Health <= 0 then break end
                 task.wait(0.15)
             end
-            -- 2) chờ Character MỚI (khác char cũ) + Humanoid Health>0 — tối đa ~12s
-            local newChar, newHum = nil, nil
-            local t0 = tick()
-            while (tick() - t0) < 12 and Runtime.alive do
-                local c = LocalPlayer.Character
-                if c and c ~= oldChar then
-                    local h = c:FindFirstChild("Humanoid")
-                    if h and h.Health > 0 then newChar = c; newHum = h; break end
-                end
-                task.wait(0.1)
-            end
-            -- [FIX #1] token MỚI = characterToken SAU respawn. CharacterTracker đã tăng generation ở CharacterAdded
-            --   → token này KHÁC oldToken. Đọc sau khi Character mới đã sống.
-            local newToken = (_G.KaitunCharacterToken and _G.KaitunCharacterToken()) or State.characterToken
-            -- 3) V2: gửi leave-evidence (ffa_left token cũ) TRƯỚC, rồi helpreset kèm token cũ/mới (§2 token-chain).
-            local sentV2 = false
-            if Config.enableEventProtocol and CriticalEvents.enabled() and newChar and cycleId then
-                -- ffa_left mang token cũ = leave-evidence server cần trước khi ghi helpreset (§2A/2B).
-                CriticalEvents.emit("ffa_left", { cycle_id = cycleId, character_id = oldToken, character_token = oldToken })
-                local extra = {
-                    cycle_id = cycleId, source = "respawn_confirmed",
-                    old_character_id = oldToken, new_character_id = newToken,
-                    old_character_token = oldToken, new_character_token = newToken,
-                    in_ffa = false, alive = true,
-                }
-                CriticalEvents.emit("ally_respawn_confirmed", extra)
-                CriticalEvents.emit("helpreset", extra)
-                sentV2 = true
-            end
-            -- 4) fallback legacy /helpreset (khi V2 tắt / disabled / chưa có cycle) — giữ tương thích cũ
-            if not sentV2 then
-                Net.postJSON(B .. "/helpreset", { name = State.myName, cycle_id = cycleId }, "helpreset")
-            end
+            task.wait(0.5)
+            Net.postJSON(B .. "/helpreset", { name = State.myName }, "helpreset")
         end)
         return "ally_reset"
     end
 
-    -- [FINAL §B5/B6/§18/§19/§20] V2 WIN FLOW: Main gửi trial_win_candidate, GIỮ SỐNG chờ win_confirmed,
-    --   chỉ khi nhận win_confirmed (qua ACK duplicate hoặc /sync) mới intentional reset.
-    --   Trả: "win_confirmed_reset" | "win_timeout" | "posttrial_died"
-    function PostTrial.currentMainWinV2(myStt, cycleId)
-        cycleId = cycleId or State.trialCycleId
-        if not cycleId then return "no_cycle" end
-        State.activeCycleId = cycleId
-        State.winConfirmed = false
-        State.postTrialPhase = "win_candidate"
-        -- gửi win candidate (server verify → win_pending → grace → win_confirmed)
-        local evId = CriticalEvents.emit("trial_win_candidate", { cycle_id = cycleId }, {
-            onAck = function(ack)
-                if ack and ack.result == "win_confirmed" then State.winConfirmed = true end
-            end,
-        })
-        State.winCandidateEventId = evId
-        -- CHỜ win_confirmed: giữ Main sống, death guard KHÔNG disconnect. Tối đa ~12s.
-        local t0 = tick()
-        while (tick() - t0) < 12 and Runtime.alive do
-            -- death ưu tiên: nếu Main chết trong lúc chờ → loss, thoát
-            if not PostTrial.isMainAlive(cycleId) then
-                PostTrial.markMainLoss("win_wait_death", cycleId)
-                return "posttrial_died"
-            end
-            -- (a) ACK trực tiếp báo confirmed
-            if State.winConfirmed then break end
-            -- (b) /sync báo final result đúng cycle
-            if State.trialResult == "win_confirmed" and tostring(State.trialResultCycle) == tostring(cycleId) then
-                State.winConfirmed = true; break
-            end
-            if State.trialResult == "loss" and tostring(State.trialResultCycle) == tostring(cycleId) then
-                PostTrial.markMainLoss("server_loss", cycleId)
-                return "posttrial_died"
-            end
-            -- (c) hỏi nhanh /sync?result_cycle= (không chờ long-poll)
-            pcall(function()
-                local ok, res = Net.getJSONSync(endpoint("/sync", { name = State.myName, result_cycle = cycleId }))
-                if ok and res then
-                    if res.result == "win_confirmed" then State.winConfirmed = true
-                    elseif res.result == "loss" then State.trialResult = "loss"; State.trialResultCycle = cycleId end
-                end
-            end)
-            task.wait(0.4)
-        end
-        if not State.winConfirmed then
-            status("[MAIN " .. tostring(myStt) .. "] ⏱ chờ win_confirmed timeout → giữ current, retry")
-            return "win_timeout"
-        end
-        -- ĐÃ win_confirmed → intentional reset (§XIV): set ĐỦ flag + cycle + character TRƯỚC self-reset.
-        State.winConfirmed = true
-        State.intentionalPostTrialReset = true
-        State.intentionalResetCycleId = State.activeCycleId
-        State.intentionalResetCharacter = LocalPlayer.Character
-        status("[MAIN " .. tostring(myStt) .. "] ✅ win_confirmed → intentional reset")
-        pcall(function() LocalPlayer.Character.Humanoid.Health = 0 end)
-        return "win_confirmed_reset"
-    end
-
-    -- [§XVII/§XVIII] POST-RESPAWN PROCESSOR — sau intentional reset (win) / death loss / cycle abort/cancel,
-    --   PHẢI check V4 progress 3 lần liên tiếp cùng classification (Training.confirmClassify), rồi ROUTE
-    --   theo result — KHÔNG set thẳng "training". Chờ Character mới sống trước khi check (tránh đọc lúc
-    --   respawn dở). Clear intentional flag CHỈ sau khi Character mới sống + processor bắt đầu (§XIV).
-    --   Trả classification cuối: "trialable" | "training" | "done" | "can_buy_gear" | "uncertain".
-    function PostTrial.processAfterRespawn(myStt, tag)
-        tag = tag or ("[MAIN " .. tostring(myStt) .. "]")
-        -- 1) chờ Character MỚI sống (tối đa ~12s) trước khi đọc progress.
-        -- Khi đây là intentional reset, Character phải khác đúng reference đã lưu trước self-reset.
-        local oldIntentionalCharacter = State.intentionalResetCharacter
-        local readyCharacter = nil
-        local t0 = tick()
-        while (tick() - t0) < 12 and Runtime.alive do
-            local c = LocalPlayer.Character
-            local h = c and c:FindFirstChild("Humanoid")
-            local isDifferent = (oldIntentionalCharacter == nil) or (c ~= oldIntentionalCharacter)
-            if c and isDifferent and h and h.Health > 0 then
-                readyCharacter = c
-                break
-            end
-            task.wait(0.1)
-        end
-        -- Timeout/chưa có Character mới thật → fail closed: giữ guard, không check i/release/hop.
-        if not readyCharacter then
-            DBG(tag .. " post-respawn → uncertain (new live Character not confirmed)",
-                "warn", "post_respawn_character_wait")
-            return "uncertain"
-        end
-        -- 2) Đã xác nhận Character mới khác Character intentional cũ và đang sống → mới clear guard.
-        --   Đây vẫn là NƠI DUY NHẤT clear các cờ intentional-reset.
-        State.intentionalPostTrialReset = false
-        State.intentionalResetCycleId = nil
-        State.intentionalResetCharacter = nil
-        -- 3) check V4 progress 3 lần liên tiếp cùng classification
-        local r = Training.confirmClassify("main", 3, 0.5)
-        -- [FIX #3] CHỈ route theo classification khi confirmed==true. Dao động (training/trialable/training…)
-        --   → confirmClassify trả confirmed=false → PHẢI trả "uncertain", KHÔNG dùng confirmedClass để set
-        --   thẳng "training"/release current (bug cũ: dùng r.confirmedClass bất kể confirmed).
-        if not r or r.confirmed ~= true then
-            DBG(tag .. " post-respawn i-check → uncertain (confirmed=" .. tostring(r and r.confirmed) .. ")",
-                "warn", "post_respawn_iclass")
-            return "uncertain"
-        end
-        local cls = r.confirmedClass or "uncertain"
-        DBG(tag .. " post-respawn i-check → " .. tostring(cls) .. " (confirmed=true)",
-            "ok", "post_respawn_iclass")
-        return cls
-    end
-
     -- Current main: CHỜ server báo "/helpreset all_done" (tức allies đã POST xong)
     -- rồi mới tự sát. Trước đây reset ngay → main chết trước ally → ally còn trong server → tween đi lung tung.
-    -- [FINAL] LEGACY fallback — chỉ dùng khi V2 tắt/disabled. V2 dùng currentMainWinV2().
     function PostTrial.currentMainReset(myStt)
         if not State.didEnterTrialThisTurn then
             status("[MAIN " .. tostring(myStt) .. "] Chưa thắng trial → KHÔNG reset")
@@ -4873,8 +3205,7 @@ do
         return "main_reset_done"
     end
 
-    -- [FINAL §B8] otherMainReset — GIỮ để tương thích nhưng KHÔNG gọi trong flow V2.
-    --   Một lượt chỉ có Current Main + Ally1 + Ally2; Main2–5 KHÔNG vào FFA lượt hiện tại.
+    -- Main phụ delay reset (giữ nguyên: chờ allies*2 + 4 + random 0-3 giây)
     function PostTrial.otherMainReset()
         task.spawn(function()
             local delay = (#Config.allies * 2) + 4 + math.random(0, 3)
@@ -4886,222 +3217,53 @@ do
         return "other_main_reset"
     end
 
-    -- [FIX-BUG2] Main đang turn (current) kill player trong tầm rồi reset.
-    -- 4s đầu đứng im thật để ally kịp reset trước, tránh tween cũ kéo Main đi.
+    -- Main đang turn (current) kill player trong tầm rồi reset.
+    -- 4s đầu đứng im để ally kịp reset trước (PATCH 2026-07-21: grace gắn vào
+    -- Character+JobId token, không phụ thuộc server trial_cycle_id — tránh grace
+    -- bị reset/hủy khi /curmain hoặc /sync trả dữ liệu trễ/nil/đổi cycle).
     -- BỎ ĐUỔI khi player chạy xa > 1500 studs (chống tween đi lung tung ra khỏi vùng FFA).
     -- Chỉ reset khi đã thắng trial (didEnterTrialThisTurn).
-    -- [FIX-BUG2] + DEATH GUARD: phát hiện MAIN chết trong kill phase → mark loss, KHÔNG reset
     function PostTrial.mainKillThenReset(myStt, currentmain)
-        -- Cycle canon: ưu tiên server cycle; legacy dùng đúng mốc đã vào Trial, không dùng timestamp grace làm cycle.
-        local cycleId = State.trialCycleId
-        if cycleId == nil then
-            cycleId = "legacy:" .. tostring(State.trialStartedCycleId or State.trialStartedAt or game.JobId)
+        -- Grace token: Character instance + JobId gắn khi lần đầu vào kill phase.
+        -- Nếu Character respawn (instance khác) hoặc server hop → token mới → grace reset.
+        -- Server cycle snapshot (từ /curmain, /sync) KHÔNG được động vào token này.
+        local char = LocalPlayer.Character
+        local curToken = tostring(char) .. "|" .. tostring(game.JobId)
+        if _G.mainKillToken ~= curToken then
+            _G.mainKillToken = curToken
+            _G.mainKillStart = tick()
         end
-
-        -- Chỉ khởi tạo grace/guard khi cycle thực sự đổi. Không tái sử dụng timestamp của lượt trước.
-        if State.postTrialCycleId ~= cycleId or not State.postTrialStartedAt then
-            PostTrial.clearCycle("new_kill_cycle", false)
-            clearKillRuntime()
-            State.postTrialCycleId = cycleId
-            State.postTrialStartedAt = tick()
-            State.postTrialEliminated = {}
-            State.postTrialSeen = {}
-            State.postTrialCharacters = {}
-            local root = stopPostTrialMotion()
-            State.postTrialHoldCFrame = root and root.CFrame or nil
-        end
-
-        PostTrial.armDeathGuard(cycleId)
-        State.activeCycleId = cycleId
-        State.postTrialPhase = "kill_phase"
-
-        -- Đứng im THẬT đủ 4 giây: hủy tween, xóa velocity, giữ đúng CFrame đã chốt đầu cycle.
-        if (tick() - State.postTrialStartedAt) < 4 then
-            local root = stopPostTrialMotion()
-            if root then
-                State.postTrialHoldCFrame = State.postTrialHoldCFrame or root.CFrame
-                root.CFrame = State.postTrialHoldCFrame
-            end
-            -- Seed participant Character ngay trong grace; ai chết/respawn trước lúc Main bắt đầu đánh vẫn bị loại đúng.
-            getplayers(State.postTrialEliminated, State.postTrialSeen, State.postTrialCharacters, { includeAllies = true, includeAllPlayers = true })
-            status("[MAIN " .. tostring(myStt) .. "] Kill phase → đứng im đủ 4s cho ally reset trước...")
-            if not PostTrial.isMainAlive(cycleId) then
-                PostTrial.markMainLoss("grace_death", cycleId)
-                PostTrial.clearCycle("grace_death", true)
-                clearKillRuntime()
-                DBG("[POSTTRIAL] Died in grace period → abort", "err", "posttrial_grace_death")
-                State.setMyMainStatus("waiting")
-                return "posttrial_died"
-            end
+        local graceDeadline = _G.mainKillStart + 4
+        if tick() < graceDeadline then
+            _G.SHOULDSPAMSKILLS = false
+            status("[MAIN " .. tostring(myStt) .. "] Kill phase → grace " .. string.format("%.1f", graceDeadline - tick()) .. "s (cho ally reset trước)...")
             return "posttrial_wait_ally"
         end
-        State.postTrialHoldCFrame = nil
-
-        -- Kill động: giết một người → đánh dấu bị loại → QUÉT LẠI toàn vùng FFA → tìm người tiếp theo.
-        -- Không chờ Character của người đã chết respawn và không đánh lại UserId đã bị loại.
+        -- Sau 3s: chủ động đi kill player theo tọa độ
         status("[MAIN " .. tostring(myStt) .. "] Kill Players After Trial")
-        local eliminated = State.postTrialEliminated
-        local seen = State.postTrialSeen
-        local participantCharacters = State.postTrialCharacters
-        local emptyConfirm = 0
-        local confirmedEmpty = false
-        local lastTargetStatusUserId = nil
-        local lastNoTargetStatusAt = 0
-        -- PvP skill phải có target aim riêng; hook đã scoped bởi SHOULDSPAMSKILLS.
-        pcall(function() CombatActions.installSkillAim() end)
-
-        while Runtime.alive and templeState() == "ffup" do
-            if not PostTrial.isMainAlive(cycleId) then
-                PostTrial.markMainLoss("kill_loop_death", cycleId)
-                DBG("[POSTTRIAL] MAIN died during kill loop → abort", "err", "posttrial_kill_death")
-                break
-            end
-            if State.trialCycleId ~= nil and State.trialCycleId ~= cycleId then
-                DBG("[POSTTRIAL] Server cycle changed during kill → abort old cycle", "warn", "posttrial_cycle_changed")
-                stopPostTrialMotion()
-                PostTrial.clearCycle("server_cycle_changed", false)
-                clearKillRuntime()
-                return "posttrial_running"
-            end
-
-            local targets, unknown = getplayers(eliminated, seen, participantCharacters, { includeAllies = true, includeAllPlayers = true })
-            local target = targets[1]
-
-            if target then
-                emptyConfirm = 0
-                local targetPlayer = target.player
-                local targetCharacter = target.character
-                local targetHumanoid = targetCharacter and targetCharacter:FindFirstChildOfClass("Humanoid")
-                local targetRoot = targetCharacter and targetCharacter:FindFirstChild("HumanoidRootPart")
-
-                if targetHumanoid and targetRoot and targetHumanoid.Health > 0 then
-                    local userId = targetPlayer.UserId
-                    if lastTargetStatusUserId ~= userId then
-                        lastTargetStatusUserId = userId
-                        status("[MAIN " .. tostring(myStt) .. "] Đang đánh " .. tostring(targetPlayer.Name))
-                    end
-                    repeat
-                        task.wait()
-
-                        if not PostTrial.isMainAlive(cycleId) then
-                            PostTrial.markMainLoss("kill_loop_death", cycleId)
-                            break
-                        end
-                        if templeState() ~= "ffup" or State.postTrialDeathDetected then break end
-
-                        -- Character đổi = người cũ đã chết/respawn; trong Trial họ đã bị loại, không đuổi Character mới.
-                        if targetPlayer.Character ~= targetCharacter then
-                            eliminated[userId] = true
-                            break
-                        end
-
-                        targetHumanoid = targetCharacter:FindFirstChildOfClass("Humanoid")
-                        targetRoot = targetCharacter:FindFirstChild("HumanoidRootPart")
-                        if not targetHumanoid or not targetRoot or targetHumanoid.Health <= 0 then
-                            eliminated[userId] = true
-                            break
-                        end
-
-                        local observed = CombatActions.observeCharacterInFFA(targetPlayer)
-                        if observed == false then break end -- chắc chắn đã ra ngoài FFA
-
-                        local tooFar = getdis(targetRoot.CFrame) > 1500
-                        if tooFar then break end
-                        -- Dùng cách attack Player từ kkv4: bay sát offset ngẫu nhiên + equip/haki
-                        -- + spam skill + M1. Bản này thêm throttle tween để không đứng im vì cancel liên tục.
-                        CombatActions.attackPlayerKKV4Tick(targetCharacter)
-                    until false
-                else
-                    -- Đã được scan sống nhưng Character biến mất trước lúc đánh = đã chết/đổi Character → bị loại.
-                    eliminated[targetPlayer.UserId] = true
-                    task.wait(0.1)
-                end
-            else
-                lastTargetStatusUserId = nil
-                pcall(function() CombatActions.clearSkillAimTarget() end)
-                if unknown > 0 then
-                    -- Có participant đã thấy nhưng Character đang replicate: chưa được phép báo thắng.
-                    emptyConfirm = 0
-                    if (tick() - lastNoTargetStatusAt) >= 1 then
-                        lastNoTargetStatusAt = tick()
-                        status("[MAIN " .. tostring(myStt) .. "] Chờ target FFA replicate...")
-                    end
-                else
-                    emptyConfirm = emptyConfirm + 1
-                    if emptyConfirm >= 3 then
-                        confirmedEmpty = true
-                        status("[MAIN " .. tostring(myStt) .. "] Không còn target hợp lệ trong FFA")
-                        break
-                    end
-                end
-                task.wait(0.2)
+        for plr in pairs(getplayers()) do
+            if plr then
+                repeat
+                    task.wait()
+                    attackTick(plr)
+                    local hrp = plr:FindFirstChild("HumanoidRootPart")
+                    local tooFar = hrp and getdis(hrp.CFrame) > 1500
+                until not plr or not plr.Parent or not plr:FindFirstChild("Humanoid")
+                    or not plr:FindFirstChild("HumanoidRootPart") or plr.Humanoid.Health <= 0
+                    or templeState() ~= "ffup" or tooFar
             end
         end
-        stopPostTrialMotion()
-
-        -- Main chết luôn ưu tiên hơn mọi kết quả thắng.
-        if State.postTrialDeathDetected or not PostTrial.isMainAlive(cycleId) then
-            PostTrial.markMainLoss("posttrial_death", cycleId)
-            PostTrial.clearCycle("loss", true)
-            clearKillRuntime()
-            DBG("[POSTTRIAL] Loss marked → KHÔNG reset, KHÔNG training", "err", "posttrial_loss")
-            State.setMyMainStatus("waiting")
-            return "posttrial_died"
-        end
-
-        -- FFA/cycle đổi giữa lúc quét: không tự suy ra thắng.
-        if templeState() ~= "ffup" or not confirmedEmpty then
-            return "posttrial_running"
-        end
-
-        -- §21: kiểm lần cuối ngay trước win candidate.
-        if not PostTrial.isMainAlive(cycleId) then
-            PostTrial.markMainLoss("win_check_death", cycleId)
-            PostTrial.clearCycle("win_check_death", true)
-            clearKillRuntime()
-            DBG("[POSTTRIAL] MAIN dead at win check → mark loss", "err", "posttrial_win_check_death")
-            State.setMyMainStatus("waiting")
-            return "posttrial_died"
-        end
-
-        local isCurrentMain = State.isMain[State.myName] and State.myName == currentmain
-        local isOtherMain   = State.isMain[State.myName] and State.myName ~= currentmain
-        if isCurrentMain then
-            -- V2: server xác nhận đủ điều kiện rồi mới intentional reset.
-            if Config.enableEventProtocol and CriticalEvents.enabled() and State.trialCycleId then
-                local r = PostTrial.currentMainWinV2(myStt, State.trialCycleId)
-                if r == "win_confirmed_reset" then
-                    PostTrial.clearCycle("win", false)
-                    clearKillRuntime()
-                    local cls = PostTrial.processAfterRespawn(myStt)
-                    if cls == "training" then
-                        State.setMyMainStatus("training")
-                    elseif cls == "done" then
-                        State.setMyMainStatus("done")
-                    else
-                        State.setMyMainStatus("waiting")
-                    end
-                    return "main_reset_done"
-                elseif r == "posttrial_died" then
-                    PostTrial.clearCycle("loss", true)
-                    clearKillRuntime()
-                    State.setMyMainStatus("waiting")
-                    return "posttrial_died"
-                else
-                    return "posttrial_running"
-                end
-            end
-            PostTrial.clearCycle("win", false)
-            clearKillRuntime()
-            DBG("[POSTTRIAL] Win confirmed (legacy) → reset", "ok", "posttrial_win")
-            return PostTrial.currentMainReset(myStt)
-        elseif isOtherMain then
-            PostTrial.clearCycle("win_other", false)
-            clearKillRuntime()
-            if not (Config.enableEventProtocol and CriticalEvents.enabled()) then
+        _G.SHOULDSPAMSKILLS = false
+        if countplayers() <= 0 then
+            local isCurrentMain = State.isMain[State.myName] and State.myName == currentmain
+            local isOtherMain   = State.isMain[State.myName] and State.myName ~= currentmain
+            if isCurrentMain then
+                _G.mainKillStart = nil
+                return PostTrial.currentMainReset(myStt)
+            elseif isOtherMain then
+                _G.mainKillStart = nil
                 return PostTrial.otherMainReset()
             end
-            return "posttrial_running"
         end
         return "posttrial_running"
     end
@@ -5262,12 +3424,12 @@ local TempleDoorGate = {}
 do
     local FILE = Config.myName .. "_kaitunv4.json"
     function TempleDoorGate.ready()
-        if RuntimeState.templeDoorOK then return true end
+        if _G.templeDoorOK then return true end
         local fdata = FileStore.readJson(FILE, {})
-        if fdata.templedoor == true then RuntimeState.templeDoorOK = true; return true end
+        if fdata.templedoor == true then _G.templeDoorOK = true; return true end
         local ok, res = SafeRemote.invoke(3, "CheckTempleDoor")
         if ok and res then
-            RuntimeState.templeDoorOK = true
+            _G.templeDoorOK = true
             FileStore.writeJson(FILE, { templedoor = true })
             return true
         end
@@ -5395,9 +3557,164 @@ startGameReadyGate = function()
                 break
             end
         until (tick() - t0) > 45
-        RuntimeState.gameReady = true
+        _G.gameReady = true
         Logger.ok(("[BOOT] game ready (%.1fs elapsed)"):format(tick() - t0), "boot_ok")
     end)
+end
+
+--[[ ============================================================================
+ [27b2] MAINRACE REROLL — getgenv().MainRace → tự reroll race đúng loại.
+   Mapping cố định:
+     Angel  → Ally1 Human,  Ally2 Rabbit
+     Rabbit → Ally1 Human,  Ally2 Angel
+     Ghoul  → Ally1 Angel,  Ally2 Rabbit
+     Human  → Ally1 Angel,  Ally2 Rabbit
+     Cyborg → Ally1 Angel,  Ally2 Rabbit
+     Shark  → Ally1 Angel,  Ally2 Rabbit
+   Role xác định theo thứ tự Config: MainAccount[1] = main, Allies[1] = ally1, Allies[2] = ally2.
+   Check ở giây 0, 5, 15 sau khi game ready. Gameplay bị chặn trong khi reroll;
+   network/UI/heartbeat/team recovery tiếp tục bình thường.
+============================================================================ ]]
+local MainRaceReroll = {}
+do
+    -- mapping race → { ally1, ally2 }
+    local ALLY_MAP = {
+        Angel  = { "Human",  "Rabbit" },
+        Rabbit = { "Human",  "Angel"  },
+        Ghoul  = { "Angel",  "Rabbit" },
+        Human  = { "Angel",  "Rabbit" },
+        Cyborg = { "Angel",  "Rabbit" },
+        Shark  = { "Angel",  "Rabbit" },
+    }
+
+    -- Resolve role của account này dựa theo thứ tự Config
+    local function resolveMyRole()
+        local me = Config.myName
+        if Config.mains[1] == me then return "main" end
+        if Config.allies[1] == me then return "ally1" end
+        if Config.allies[2] == me then return "ally2" end
+        return nil
+    end
+
+    -- Lấy race hiện tại (pcall an toàn)
+    local function getCurrentRace()
+        local ok, v = pcall(function()
+            return LocalPlayer.Data.Race.Value
+        end)
+        return ok and v or nil
+    end
+
+    -- Reroll race về target (chuỗi race name).
+    -- Standard: BlackbeardReward Reroll 1 → 2.
+    -- Ghoul: Ectoplasm → Change → 4.
+    -- Cyborg: CyborgTrainer → Buy.
+    local function doReroll(targetRace)
+        Logger.info("[MAINRACE] reroll → " .. tostring(targetRace), "mainrace_reroll")
+        local R = ReplicatedStorage.Remotes.CommF_
+        if targetRace == "Ghoul" then
+            pcall(function() SafeRemote.invoke(3, "UpgradeRace", "Ectoplasm") end)
+            task.wait(0.3)
+            pcall(function() SafeRemote.invoke(3, "UpgradeRace", "Change") end)
+            task.wait(0.3)
+            pcall(function() SafeRemote.invoke(3, "UpgradeRace", "Buy", 4) end)
+        elseif targetRace == "Cyborg" then
+            pcall(function() SafeRemote.invoke(3, "CyborgTrainer") end)
+            task.wait(0.3)
+            pcall(function() SafeRemote.invoke(3, "CyborgTrainer", "Buy") end)
+        else
+            pcall(function() R:InvokeServer("BlackbeardReward", "Reroll", "1") end)
+            task.wait(0.3)
+            pcall(function() R:InvokeServer("BlackbeardReward", "Reroll", "2") end)
+        end
+    end
+
+    -- Kiểm tra + reroll nếu cần. Trả true nếu race đúng (hoặc không cần reroll).
+    local function checkAndReroll(targetRace)
+        local cur = getCurrentRace()
+        if not cur then return false end          -- chưa load data
+        if cur == targetRace then return true end  -- đã đúng
+        Logger.warn("[MAINRACE] race hiện tại=" .. cur .. " cần=" .. targetRace .. " → reroll", "mainrace_wrong")
+        status("[MAINRACE] Đang reroll race " .. cur .. " → " .. targetRace .. "...")
+        doReroll(targetRace)
+        task.wait(1)
+        local after = getCurrentRace()
+        local ok = (after == targetRace)
+        if ok then
+            Logger.ok("[MAINRACE] reroll thành công: " .. tostring(after), "mainrace_ok")
+            status("[MAINRACE] Race đúng: " .. tostring(after))
+        else
+            Logger.warn("[MAINRACE] reroll xong nhưng race=" .. tostring(after) .. " (chưa đúng)", "mainrace_fail")
+        end
+        return ok
+    end
+
+    -- Xác định race target của account này
+    local function resolveTargetRace()
+        local rawTarget = getgenv().MainRace
+        if not rawTarget or rawTarget == "" or rawTarget == "off" or rawTarget == "nil" then
+            return nil -- disabled
+        end
+        local mainRace = tostring(rawTarget)
+        local entry = ALLY_MAP[mainRace]
+        if not entry then
+            Logger.warn("[MAINRACE] MainRace=" .. mainRace .. " không hợp lệ (Angel/Shark/Human/Ghoul/Cyborg/Rabbit)", "mainrace_invalid")
+            return nil
+        end
+        local role = resolveMyRole()
+        if role == "main"  then return mainRace   end
+        if role == "ally1" then return entry[1]   end
+        if role == "ally2" then return entry[2]   end
+        return nil -- role không xác định → bỏ qua
+    end
+
+    -- Biến chặn gameplay trong khi reroll
+    MainRaceReroll._blocking = false
+
+    function MainRaceReroll.isBlocking()
+        return MainRaceReroll._blocking == true
+    end
+
+    -- Chạy check ở 0s, 5s, 15s sau khi game ready. Chặn gameplay cho tới khi race đúng
+    -- hoặc check cuối cùng (giây 15) fail → nhả guard để không kẹt vĩnh viễn.
+    function MainRaceReroll.start()
+        local target = resolveTargetRace()
+        if not target then return end -- disabled hoặc role không xác định
+
+        task.spawn(function()
+            -- Chờ game ready
+            local t0 = tick()
+            repeat task.wait(0.2) until _G.gameReady or (tick() - t0) > 60
+
+            local checks = { 0, 5, 15 }
+            local startT = tick()
+            local resolved = false
+
+            MainRaceReroll._blocking = true
+            Logger.info("[MAINRACE] bắt đầu check race, target=" .. target, "mainrace_start")
+
+            for idx, delay in ipairs(checks) do
+                local waitFor = delay - (tick() - startT)
+                if waitFor > 0 then task.wait(waitFor) end
+                if not Runtime.alive then break end
+
+                Logger.info("[MAINRACE] check #" .. idx .. " (+" .. delay .. "s)", "mainrace_check")
+                local ok = checkAndReroll(target)
+                if ok then
+                    resolved = true
+                    break
+                end
+            end
+
+            -- Nhả guard dù thành công hay không (check cuối = fail-safe)
+            MainRaceReroll._blocking = false
+            if resolved then
+                Logger.ok("[MAINRACE] race resolved → gameplay unblocked", "mainrace_done")
+            else
+                Logger.warn("[MAINRACE] check cuối fail → nhả gameplay guard (tránh kẹt)", "mainrace_guard_release")
+                status("[MAINRACE] Không reroll được sau 15s → tiếp tục")
+            end
+        end)
+    end
 end
 
 --[[ ============================================================================
@@ -5420,7 +3737,7 @@ do
         end
         return false
     end
-    RuntimeState.isScoutAlly = isScoutAlly
+    _G.isScoutAlly = isScoutAlly
 
     -- Ally1 (LEADER) = ally đầu tiên online do server chốt (ally_leader từ /curmain).
     -- Fallback: nếu server chưa cấp → dùng ally đầu trong Config online. Ally1 là AUTHORITY:
@@ -5436,7 +3753,7 @@ do
         end
         return false
     end
-    RuntimeState.isAllyLeader = isAllyLeader
+    _G.isAllyLeader = isAllyLeader
 
     local _lastGetSeverApi = 0     -- chống spam /getseverapi
     local _getSeverApiCooldown = 5  -- giây: Ally1 detect hết FM + xin server mới mỗi 5s (yêu cầu user)
@@ -5446,13 +3763,13 @@ do
     -- HOOK: AllyFullMoonWatch (1 authority phá lock) gọi khi đã /fmlost → clear target chết để nhịp
     -- allyLeaderTick sau thấy target=nil → tự /getseverapi xin server mới. Đây là cầu nối để leaderTick
     -- KHÔNG tự quyết rời (chống hop sớm) mà vẫn xin được server mới sau khi Watch xác nhận hết FM.
-    RuntimeState.__leaderOnFmLost = function()
+    _G.__leaderOnFmLost = function()
         _leaderTarget = nil
         _allyFmConfirmedAt = 0
     end
     -- HOOK: AllyFullMoonWatch gọi sau khi getseverapi trả jobid mới → set _leaderTarget ngay,
     -- không phải chờ nhịp leaderTick gọi leaderRequestServer (tránh kẹt "waiting current main").
-    RuntimeState.__leaderSetTarget = function(jobid)
+    _G.__leaderSetTarget = function(jobid)
         _leaderTarget = jobid and jobid ~= "" and jobid or nil
     end
 
@@ -5534,7 +3851,7 @@ do
             if (tick() - _lastAllyHoldHop) >= (State.joinSpamInterval or 5) then
                 _lastAllyHoldHop = tick()
                 status("[ALLY1] Hop vào server full moon: " .. tostring(target))
-                RuntimeState.allyHopArmedT = tick()
+                _G.allyHopArmedT = tick()
                 TeleportManager.hopToJob(target, "[ALLY1-JOIN-FULLMOON]")
             end
             return true
@@ -5617,7 +3934,7 @@ do
             if (tick() - _lastAllyHoldHop) >= (State.joinSpamInterval or 5) then
                 _lastAllyHoldHop = tick()
                 status("[ALLY2] Join server full moon Ally1 đã chốt: " .. tostring(target))
-                RuntimeState.allyHopArmedT = tick()
+                _G.allyHopArmedT = tick()
                 TeleportManager.hopToJob(target, "[ALLY2-JOIN-FULLMOON]")
             end
             return true
@@ -5668,12 +3985,12 @@ do
 
         -- training → hop server ít người (1 lần) rồi THẢ xuống training gốc; done → thả gốc (changefolder)
         -- FIX #4 (user 2026-07-02): CHỈ hop training server sau khi ĐÃ thực sự in_trail lượt này
-        -- (RuntimeState.didTrialInFM). Nếu chuyển "training" mà CHƯA in_trail (vd cần train i=1/3) → KHÔNG hop,
+        -- (_G.didTrialInFM). Nếu chuyển "training" mà CHƯA in_trail (vd cần train i=1/3) → KHÔNG hop,
         -- train TẠI CHỖ. Tránh "Trial done → hop" khống lúc vừa vào server + cắt loop i=3 hop-ra-join-lại.
         if myStatus == "training" then
-            if fmJob and game.JobId == fmJob and RuntimeState.didTrialInFM and not RuntimeState.trainingHopped then
-                RuntimeState.trainingHopped = true
-                RuntimeState.didTrialInFM = false
+            if fmJob and game.JobId == fmJob and _G.didTrialInFM and not _G.trainingHopped then
+                _G.trainingHopped = true
+                _G.didTrialInFM = false
                 State.didEnterTrialThisTurn = false -- BS-5: rời fullmoon để training → reset
                 status("[TRAINING] In_trial xong → hop low-player training server")
                 TeleportManager.hopTrainingServer("[AFTER-TRIAL-TRAINING]")
@@ -5682,7 +3999,7 @@ do
             return false
         end
         if myStatus == "done" then return false end
-        RuntimeState.trainingHopped = false
+        _G.trainingHopped = false
 
         -- FIX #3 (user 2026-07-02): TRƯỚC khi join full moon phải check còn cần training không.
         -- Đã xác nhận cần train 3 lần (ctx.trainConfirmed) → KHÔNG join/ready FM, thả xuống StateMachine
@@ -5711,9 +4028,9 @@ do
                 if not ctx.trialConfirmed then return false end
                 -- FIX GameFull (user 2026-07-02): vừa hop gặp server ĐẦY → backoff, ngừng spam + tụt "waiting"
                 -- (không kẹt "moon"/current). Hết backoff mới thử join lại (chờ có người rời server FM).
-                if RuntimeState.fmJoinBackoffUntil and tick() < RuntimeState.fmJoinBackoffUntil then
+                if _G.fmJoinBackoffUntil and tick() < _G.fmJoinBackoffUntil then
                     if myStatus ~= "waiting" then State.setMyMainStatus("waiting") end
-                    status("[MAIN1] Server FM đầy → chờ slot (" .. tostring(math.ceil(RuntimeState.fmJoinBackoffUntil - tick())) .. "s)")
+                    status("[MAIN1] Server FM đầy → chờ slot (" .. tostring(math.ceil(_G.fmJoinBackoffUntil - tick())) .. "s)")
                     return true
                 end
                 if (tick() - _lastMainJoinSpam) >= (State.joinSpamInterval or 5) then
@@ -5769,9 +4086,9 @@ do
             end
             -- FIX GameFull (user 2026-07-02): vừa hop gặp server ĐẦY → backoff, ngừng spam + tụt "waiting"
             -- (không kẹt "moon"). Con này rơi về rank waiting → KHÔNG lọt lên current. Hết backoff mới thử lại.
-            if RuntimeState.fmJoinBackoffUntil and tick() < RuntimeState.fmJoinBackoffUntil then
+            if _G.fmJoinBackoffUntil and tick() < _G.fmJoinBackoffUntil then
                 if myStatus ~= "waiting" then State.setMyMainStatus("waiting") end
-                status("[MAIN " .. tostring(ctx.myStt) .. "] Server FM đầy → chờ slot (" .. tostring(math.ceil(RuntimeState.fmJoinBackoffUntil - tick())) .. "s)")
+                status("[MAIN " .. tostring(ctx.myStt) .. "] Server FM đầy → chờ slot (" .. tostring(math.ceil(_G.fmJoinBackoffUntil - tick())) .. "s)")
                 return true
             end
             -- SPEC MỚI (user 2026-07-02): gate mở → Main2-6 spam join = status "moon"
@@ -5832,7 +4149,7 @@ do
         if not Runtime.alive or Runtime.teleporting then return end
         -- chỉ Ally1 (LEADER) mới phá lock: nó là authority giữ FM. Ally2 canh nhưng KHÔNG /fmlost
         -- (tránh phá lock sai khi Ally1 vẫn đang giữ). Ally2 chờ server đổi fullmoonJobid.
-        if not (RuntimeState.isAllyLeader and RuntimeState.isAllyLeader()) then return end
+        if not (_G.isAllyLeader and _G.isAllyLeader()) then return end
         local fmJob = State.fullmoonJobid
         -- chưa chốt FM hoặc mình chưa đứng đúng server FM → không phải việc của watch này (allyTick lo join)
         if not fmJob or game.JobId ~= fmJob then
@@ -5888,7 +4205,7 @@ do
             Logger.info("[ALLY-WATCH] HẾT full moon @ " .. tostring(fmJob) .. " → POST /fmlost + xin server mới", "ally_watch_lost")
             status("[ALLY-WATCH] FullMoon ended → phá lock + xin server mới...")
             -- 1) Clear state local NGAY để allyLeaderTick không còn thấy target cũ → không kẹt "waiting current main"
-            if RuntimeState.__leaderOnFmLost then pcall(RuntimeState.__leaderOnFmLost) end
+            if _G.__leaderOnFmLost then pcall(_G.__leaderOnFmLost) end
             -- Xóa fullmoonJobid local ngay (không đợi /curmain poll) → nhịp tiếp allyLeaderTick thấy nil → tự getseverapi
             State.fullmoonJobid = nil
             State.serverCurJobid = nil
@@ -5907,7 +4224,7 @@ do
                     local good, res = pcall(function() return HttpService:JSONDecode(bodyRes) end)
                     if good and res and res.ok and res.jobid and res.jobid ~= "" then
                         -- Set _leaderTarget qua hook nếu ScoutNavigator expose nó
-                        if RuntimeState.__leaderSetTarget then pcall(RuntimeState.__leaderSetTarget, res.jobid) end
+                        if _G.__leaderSetTarget then pcall(_G.__leaderSetTarget, res.jobid) end
                         Logger.info("[ALLY-WATCH] server cấp jobid mới=" .. tostring(res.jobid), "ally_watch_newsev")
                     else
                         Logger.info("[ALLY-WATCH] không có server mới (getseverapi nil)", "ally_watch_newsev_nil")
@@ -5918,141 +4235,6 @@ do
     end
 end
 _G.AllyFullMoonWatch = AllyFullMoonWatch
-
---[[ ============================================================================
- [27.5] TRIAL TIMEOUT WATCHDOG — CLIENT ONLY, đúng 60 giây kể từ lúc VÀO TRIAL.
-  - Chỉ start khi _inTrialNow == true và status đã chuyển sang in_trail.
-  - Không phụ thuộc server/cycle/event protocol.
-  - Nếu Trial chưa hoàn thành sau 60s: hủy movement/skill và reset Character.
-  - Chạy task riêng nên vẫn hoạt động nếu doTrialForMyRace() đang block.
-============================================================================ ]]
-TrialTimeoutWatch = {
-    generation = 0,
-    active = false,
-    characterToken = nil,
-    timedOutCharacterToken = nil,
-    startedAt = 0,
-}
-
-do
-    local function currentToken()
-        return tostring(State.characterToken or LocalPlayer.Character or "no-character")
-    end
-
-    local function cleanupTrialMotion()
-        Movement.cancel()
-        _G.SHOULDSPAMSKILLS = false
-        pcall(function() CombatActions.clearSkillAimTarget() end)
-        pcall(function() CombatActions.endFishTrialSwordMode() end)
-    end
-
-    local function clearActiveWatch(myGeneration)
-        if myGeneration and TrialTimeoutWatch.generation ~= myGeneration then return end
-        TrialTimeoutWatch.active = false
-        TrialTimeoutWatch.characterToken = nil
-        TrialTimeoutWatch.startedAt = 0
-        State.trialStartedAt = 0
-        State.trialStartedCycleId = nil
-    end
-
-    function TrialTimeoutWatch.stopNormal()
-        TrialTimeoutWatch.generation = TrialTimeoutWatch.generation + 1
-        clearActiveWatch()
-        -- timedOutCharacterToken chỉ được vô hiệu tự nhiên khi Character mới sinh token mới.
-    end
-
-    function TrialTimeoutWatch.start(isMain, myStt)
-        local char = LocalPlayer.Character
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if not (char and hum and hum.Health > 0) then return false end
-
-        local token = currentToken()
-
-        -- Cùng Character đã timeout thì không được tự bật lại in_trail trước khi reset xong.
-        if TrialTimeoutWatch.timedOutCharacterToken == token then
-            cleanupTrialMotion()
-            RuntimeState.inTrial = false
-            State.didEnterTrialThisTurn = false
-            if isMain then State.setMyMainStatus("waiting") else State.reportStatus("ally") end
-            pcall(function() if hum.Health > 0 then hum.Health = 0 end end)
-            return false
-        end
-
-        -- Đang đếm đúng Character này rồi: không restart timer ở mỗi tick.
-        if TrialTimeoutWatch.active
-            and TrialTimeoutWatch.characterToken == token
-            and TrialTimeoutWatch.startedAt > 0 then
-            return true
-        end
-
-        -- Hủy watch cũ (nếu có) rồi bắt đầu đúng một lần tại thời điểm đã vào Trial.
-        TrialTimeoutWatch.generation = TrialTimeoutWatch.generation + 1
-        local myGeneration = TrialTimeoutWatch.generation
-        TrialTimeoutWatch.active = true
-        TrialTimeoutWatch.characterToken = token
-        TrialTimeoutWatch.startedAt = tick()
-        State.trialStartedAt = TrialTimeoutWatch.startedAt
-        State.trialStartedCycleId = token
-
-        task.spawn(function()
-            while Runtime.alive and TrialTimeoutWatch.generation == myGeneration do
-                task.wait(0.1)
-
-                -- Character đổi hoặc chết: Trial cũ đã kết thúc, dừng timer.
-                if LocalPlayer.Character ~= char or currentToken() ~= token then
-                    clearActiveWatch(myGeneration)
-                    return
-                end
-
-                hum = char:FindFirstChildOfClass("Humanoid")
-                if not (hum and hum.Health > 0) then
-                    clearActiveWatch(myGeneration)
-                    return
-                end
-
-                -- Forcefield mở = Trial đã hoàn thành, không reset.
-                if templeState() == "ffup" then
-                    clearActiveWatch(myGeneration)
-                    return
-                end
-
-                -- Main loop đã xác nhận rời Trial bình thường.
-                if RuntimeState.inTrial ~= true then
-                    clearActiveWatch(myGeneration)
-                    return
-                end
-
-                if (tick() - TrialTimeoutWatch.startedAt) >= 60 then
-                    TrialTimeoutWatch.timedOutCharacterToken = token
-                    State.trialTimeoutCycleId = token
-                    TrialTimeoutWatch.active = false
-                    RuntimeState.inTrial = false
-                    State.didEnterTrialThisTurn = false
-                    cleanupTrialMotion()
-
-                    status((isMain and "[MAIN " .. tostring(myStt) .. "]" or "[ALLY]")
-                        .. " ⏱ Trial quá 60s chưa xong → tự reset")
-
-                    if isMain then
-                        State.setMyMainStatus("waiting")
-                        RuntimeState.myTurnStart = nil
-                    else
-                        State.reportStatus("ally")
-                    end
-
-                    -- Reset thật; CharacterAdded sẽ tạo token mới và cho phép retry sạch.
-                    pcall(function()
-                        local liveHum = char:FindFirstChildOfClass("Humanoid")
-                        if liveHum and liveHum.Health > 0 then liveHum.Health = 0 end
-                    end)
-                    return
-                end
-            end
-        end)
-
-        return true
-    end
-end
 
 --[[ ============================================================================
  [28] STATEMACHINE — flow chính y chang File A main loop (1689-2030).
@@ -6087,7 +4269,7 @@ do
         _G.ShouldSendData = false
 
         -- ===== CHECKING GATE (user 2026-07-02): giai đoạn ĐẦU sau khi load team xong chỉ CHECK phase =====
-        -- Mốc RuntimeState.teamReadyAt = lần đầu thấy LocalPlayer.Team (sau ChooseTeam). Trong CHECK_WINDOW: KHÔNG
+        -- Mốc _G.teamReadyAt = lần đầu thấy LocalPlayer.Team (sau ChooseTeam). Trong CHECK_WINDOW: KHÔNG
         -- join/trial/train, chỉ để 3-strike đọc remote xác định phase; xong window tự chạy tiếp status thật.
         --
         -- FIX checking-vĩnh-viễn (user 2026-07-02):
@@ -6098,30 +4280,30 @@ do
         --      mất team nếu nil liên tục > TEAM_GRACE. Team về lại KHÔNG restart window (đã latch theo JobId).
         --  (3) Đổi JobId (hop server) → reset latch + streak + trainCheckLastT để check lại từ đầu, sạch state.
         local TEAM_GRACE = 3
-        if RuntimeState.checkJobId ~= game.JobId then
-            RuntimeState.checkJobId = game.JobId
-            RuntimeState.teamReadyAt = nil
-            RuntimeState.checkDoneForJob = nil
-            RuntimeState.teamLostAt = nil
-            RuntimeState.trainNeedStreak = 0; RuntimeState.trialableStreak = 0; RuntimeState.trainCheckLastT = nil
-            RuntimeState.uncertainStreak = 0
+        if _G.checkJobId ~= game.JobId then
+            _G.checkJobId = game.JobId
+            _G.teamReadyAt = nil
+            _G.checkDoneForJob = nil
+            _G.teamLostAt = nil
+            _G.trainNeedStreak = 0; _G.trialableStreak = 0; _G.trainCheckLastT = nil
+            _G.uncertainStreak = 0
         end
         if LocalPlayer.Team then
-            RuntimeState.teamLostAt = nil
-            if not RuntimeState.teamReadyAt then RuntimeState.teamReadyAt = tick() end
+            _G.teamLostAt = nil
+            if not _G.teamReadyAt then _G.teamReadyAt = tick() end
         else
-            if not RuntimeState.teamLostAt then RuntimeState.teamLostAt = tick() end
-            if (tick() - RuntimeState.teamLostAt) > TEAM_GRACE then RuntimeState.teamReadyAt = nil end
+            if not _G.teamLostAt then _G.teamLostAt = tick() end
+            if (tick() - _G.teamLostAt) > TEAM_GRACE then _G.teamReadyAt = nil end
         end
         -- FIX checking (user 2026-07-02): 3-strike cần 3×1.5s = 4.5s remote reads; CHECK_WINDOW=5s quá sát
         -- → con nào remote trả chậm/uncertain 1 lần là KHÔNG đủ 3 strike trong 5s → ra window với streak sai
         -- (con lỗi con không). Nâng 8s cho đủ biên 3 lần đọc ổn định.
         local CHECK_WINDOW = 8
-        local inCheckWindow = (not RuntimeState.checkDoneForJob) and RuntimeState.teamReadyAt ~= nil
-            and (tick() - RuntimeState.teamReadyAt) < CHECK_WINDOW
+        local inCheckWindow = (not _G.checkDoneForJob) and _G.teamReadyAt ~= nil
+            and (tick() - _G.teamReadyAt) < CHECK_WINDOW
         -- window đã trôi hết cho server này → latch lại, không bao giờ vào lại cho tới khi đổi JobId
-        if (not RuntimeState.checkDoneForJob) and RuntimeState.teamReadyAt ~= nil and (tick() - RuntimeState.teamReadyAt) >= CHECK_WINDOW then
-            RuntimeState.checkDoneForJob = game.JobId
+        if (not _G.checkDoneForJob) and _G.teamReadyAt ~= nil and (tick() - _G.teamReadyAt) >= CHECK_WINDOW then
+            _G.checkDoneForJob = game.JobId
         end
 
         local ab, AB = cachedTrialable()
@@ -6139,41 +4321,41 @@ do
         -- training khi chưa kịp check. ready vẫn chạy check này song song (priority ready vẫn cao
         -- nhất — chỉ 3-strike train mới được ghi đè ready). Reset streak ngay khi trialable/done/gear.
         if isMain then
-            if not RuntimeState.trainCheckLastT or (tick() - RuntimeState.trainCheckLastT) >= 1.5 then
-                RuntimeState.trainCheckLastT = tick()
+            if not _G.trainCheckLastT or (tick() - _G.trainCheckLastT) >= 1.5 then
+                _G.trainCheckLastT = tick()
                 local upg = Training.checkUpgradeForRole("main")
                 if upg and not upg.uncertain then
-                    RuntimeState.uncertainStreak = 0
+                    _G.uncertainStreak = 0
                     if upg.needTrain then
-                        RuntimeState.trainNeedStreak = (RuntimeState.trainNeedStreak or 0) + 1
-                        RuntimeState.trialableStreak = 0
+                        _G.trainNeedStreak = (_G.trainNeedStreak or 0) + 1
+                        _G.trialableStreak = 0
                     elseif upg.trialable or upg.done or upg.canBuyGear then
-                        RuntimeState.trainNeedStreak = 0
-                        RuntimeState.trialableStreak = (RuntimeState.trialableStreak or 0) + 1
+                        _G.trainNeedStreak = 0
+                        _G.trialableStreak = (_G.trialableStreak or 0) + 1
                     end
                 else
                     -- uncertain GIỜ CHỈ còn là remote THẬT SỰ fail/timeout (raw.ok==false). Case [i=?]
                     -- "acc chưa trial lần nào" đã được checkUpgradeForRole phân loại thành trialable ở nguồn
                     -- (không rơi vào đây nữa). Nếu remote fail liên tục N lần → nghiêng TRIALABLE để thoát
                     -- limbo (nhất quán: khi không chắc thì cho trial, không đẩy train).
-                    RuntimeState.uncertainStreak = (RuntimeState.uncertainStreak or 0) + 1
-                    if RuntimeState.uncertainStreak >= 5 then
-                        RuntimeState.trainNeedStreak = 0
-                        RuntimeState.trialableStreak = (RuntimeState.trialableStreak or 0) + 1
+                    _G.uncertainStreak = (_G.uncertainStreak or 0) + 1
+                    if _G.uncertainStreak >= 5 then
+                        _G.trainNeedStreak = 0
+                        _G.trialableStreak = (_G.trialableStreak or 0) + 1
                     end
                 end
             end
         else
-            RuntimeState.trainNeedStreak = 0
-            RuntimeState.trialableStreak = 0
-            RuntimeState.uncertainStreak = 0
+            _G.trainNeedStreak = 0
+            _G.trialableStreak = 0
+            _G.uncertainStreak = 0
         end
-        local trainConfirmed = isMain and (RuntimeState.trainNeedStreak or 0) >= 3
+        local trainConfirmed = isMain and (_G.trainNeedStreak or 0) >= 3
         -- FIX (user 2026-07-02): CHỈ open gate + join full moon SAU khi xác nhận TRIALABLE 3 lần liên tiếp
         -- (đọc remote thật, không cần training). Trước khi xác nhận → KHÔNG join, train tại chỗ.
         -- Chặn bug: main1 trial xong hop training server → vào lại _G reset → tưởng waiting → spam join full
         -- moon NGAY khi chưa kịp check training. Giờ phải "trial được 3 lần" mới join.
-        local trialConfirmed = isMain and (RuntimeState.trialableStreak or 0) >= 3
+        local trialConfirmed = isMain and (_G.trialableStreak or 0) >= 3
 
         -- CHECKING GATE (main): trong 5s đầu sau load team → 3-strike ở trên ĐÃ chạy (đọc remote xác định
         -- phase), nhưng CHƯA hành động (join/trial/train). Báo status "checking" để dashboard thấy đang dò.
@@ -6181,7 +4363,7 @@ do
         if isMain and inCheckWindow then
             -- chỉ POST khi status server chưa phải "checking" (tránh spam ~20 POST/lần vào server suốt 8s)
             if AB ~= "done" and State.getMainStatus(me) ~= "checking" then State.reportStatus("checking") end
-            status("[MAIN " .. tostring(myStt) .. "] Checking phase (" .. string.format("%.1f", tick() - RuntimeState.teamReadyAt) .. "/" .. tostring(CHECK_WINDOW) .. "s)...")
+            status("[MAIN " .. tostring(myStt) .. "] Checking phase (" .. string.format("%.1f", tick() - _G.teamReadyAt) .. "/" .. tostring(CHECK_WINDOW) .. "s)...")
             return
         end
 
@@ -6198,49 +4380,36 @@ do
         if isMain then
             if AB == "done" then
                 if myStatus ~= "done" then State.setMyMainStatus("done"); myStatus = "done"; State.didEnterTrialThisTurn = false end
-                -- [§XIX] DONE: ghi "<PlayerName>.txt" = "Completed-<Race>" (UTF-8, ghi đè an toàn).
-                --   KHÔNG ChangeToFolder / Disconnect / Shutdown. ĐÃ XÓA HẲN caller ChangeFolder (§XIX/§XXIII-9).
-                if not RuntimeState.changeFileWritten then
+                -- getgenv().change: ghi file "Completed-<race>" rồi gọi ChangeToFolder (id1,id2,true,id3)
+                if getgenv().change and not _G.changeFileWritten then
                     local _okw, _race = pcall(function()
                         return LocalPlayer.Data.Race.Value
                     end)
                     local raceName = _okw and tostring(_race) or "Unknown"
-                    -- [§XIX] chuẩn hoá Race qua normalizeRace (Rabbit→Mink, Angel→Skypiea, Shark→Fishman…)
-                    pcall(function()
-                        local n = WorldProbe.normalizeRace(raceName)
-                        if n and n ~= "" then raceName = n end
-                    end)
                     local _okw2 = pcall(function()
                         writefile(LocalPlayer.Name .. ".txt", "Completed-" .. raceName)
                     end)
                     if _okw2 then
-                        RuntimeState.changeFileWritten = true
-                        status("[MAIN " .. tostring(myStt) .. "] DONE → ghi " .. LocalPlayer.Name .. ".txt = Completed-" .. raceName)
+                        _G.changeFileWritten = true
+                        task.spawn(function()
+                            if type(Hooks.ChangeFolderAfterCompleted) == "function" then
+                                Hooks.ChangeFolderAfterCompleted("Completed-" .. raceName)
+                            end
+                        end)
                     end
                 end
             else
                 if myStatus == "done" then State.setMyMainStatus("waiting"); myStatus = "waiting" end
-                RuntimeState.changeFileWritten = false
-                -- [§XVIII/§XXIII-7] Nhánh set-thẳng-training theo didEnterTrialThisTurn CHỈ còn là LEGACY
-                --   (V2 tắt/disabled). Khi V2 active, việc chuyển training/done sau trial do PostTrial.
-                --   processAfterRespawn() (check V4 3 lần) quyết định — KHÔNG set thẳng "training" ở đây nữa.
-                local _v2Active = Config.enableEventProtocol and CriticalEvents.enabled()
-                if (not _v2Active) and (myStatus == "in_trail" or myStatus == "moon") and not ab and State.didEnterTrialThisTurn then
-                    -- [FIX-BUG2] Death guard: nếu MAIN chết trong post-trial → KHÔNG chuyển training
-                    if State.postTrialDeathDetected then
-                        DBG("[MAIN] Died in post-trial → KHÔNG training, stay waiting", "err", "main_died_no_training")
-                        State.setMyMainStatus("waiting"); myStatus = "waiting"
-                        State.didEnterTrialThisTurn = false
-                        State.postTrialDeathDetected = false  -- Reset cho lượt sau
+                _G.changeFileWritten = false
+                -- CLEAN JOIN: CHỈ chuyển training khi THẬT SỰ đã vào trial lượt này (chống "chưa trial đã done/training")
+                if (myStatus == "in_trail" or myStatus == "moon") and not ab and State.didEnterTrialThisTurn then
+                    local inOwnFFA = (myStatus == "in_trail") and (templeState() == "ffup")
+                        and (getdis(CFrame.new(TEMPLE_ENTRY_POS)) < 2000)
+                    if not inOwnFFA then
+                        status("[MAIN " .. myStt .. "] Trial completed, switching to training!")
+                        State.setMyMainStatus("training"); myStatus = "training"; State.didEnterTrialThisTurn = false
                     else
-                        local inOwnFFA = (myStatus == "in_trail") and (templeState() == "ffup")
-                            and (getdis(CFrame.new(TEMPLE_ENTRY_POS)) < 2000)
-                        if not inOwnFFA then
-                            status("[MAIN " .. myStt .. "] (legacy) Trial completed, switching to training!")
-                            State.setMyMainStatus("training"); myStatus = "training"; State.didEnterTrialThisTurn = false
-                        else
-                            status("[MAIN " .. myStt .. "] Trial done → ở lại kill player (FFA)")
-                        end
+                        status("[MAIN " .. myStt .. "] Trial done → ở lại kill player (FFA)")
                     end
                 end
             end
@@ -6248,9 +4417,6 @@ do
                 local in_temple = getdis(CFrame.new(TEMPLE_ENTRY_POS)) < 3000
                 if not in_temple then
                     status("[MAIN " .. myStt .. "] Died in trial, retrying...")
-                    State.trialStartedAt = 0
-                    State.trialStartedCycleId = nil
-                    State.trialTimeoutCycleId = nil
                     State.setMyMainStatus("waiting"); myStatus = "waiting"
                 end
             end
@@ -6259,16 +4425,16 @@ do
         -- ===== VIỆC 1: MAIN STT1 quá 5' chưa xong lượt → tụt cuối (File A 1746-1768) =====
         if isMain then
             if currentmain == me and myStatus ~= "training" and myStatus ~= "done" then
-                if not RuntimeState.myTurnStart then RuntimeState.myTurnStart = tick() end
-                if (tick() - RuntimeState.myTurnStart) > Config.MAIN_TURN_TIMEOUT then
+                if not _G.myTurnStart then _G.myTurnStart = tick() end
+                if (tick() - _G.myTurnStart) > Config.MAIN_TURN_TIMEOUT then
                     status("[MAIN " .. myStt .. "] ⏱ Quá 5 phút chưa xong lượt → tụt cuối (waiting)")
                     State.setMyMainStatus("waiting"); myStatus = "waiting"
-                    RuntimeState.inTrial = false
-                    RuntimeState.myTurnStart = nil
+                    _G.inTrial = false
+                    _G.myTurnStart = nil
                     return
                 end
             else
-                RuntimeState.myTurnStart = nil
+                _G.myTurnStart = nil
             end
         end
 
@@ -6276,34 +4442,22 @@ do
         local _tplace = getRaceTrialPlace(WorldProbe.getRace())
         local _inTrialNow = (_tplace and ab and getdis(_tplace.CFrame) < 1500 and templeState() ~= "ffup") and true or false
         if _inTrialNow then
-            local trialCycleKey = State.trialCycleId
-                or ("legacy:" .. tostring(game.JobId) .. ":" .. tostring(RuntimeState.myTurnStart or State.characterToken or "trial"))
-
-            -- Chỉ sau khi đã xác nhận VÀO TRIAL và ghi status in_trail mới bắt đầu đếm 60 giây.
             if isMain then
                 if myStatus ~= "in_trail" then State.setMyMainStatus("in_trail"); myStatus = "in_trail" end
-            elseif not RuntimeState.inTrial then
+            elseif not _G.inTrial then
                 State.reportStatus("in_trail")
             end
-            RuntimeState.inTrial = true
-            State.didEnterTrialThisTurn = true
-
-            -- Client-only watchdog: không restart mỗi tick, không cần server hỗ trợ.
-            if not TrialTimeoutWatch.start(isMain, myStt) then
-                return
-            end
-            pcall(function() if TrialEvents then TrialEvents.trialEntered() end end)
-            if isMain and State.fullmoonJobid and game.JobId == State.fullmoonJobid then RuntimeState.didTrialInFM = true end
+            _G.inTrial = true
+            State.didEnterTrialThisTurn = true -- CLEAN JOIN: đã vào trial thật lượt này
+            -- FIX #4: đánh dấu ĐÃ in_trail khi đang ở đúng server full moon → cho phép hop training SAU trial
+            if isMain and State.fullmoonJobid and game.JobId == State.fullmoonJobid then _G.didTrialInFM = true end
+            if State.trialStartedAt == 0 then State.trialStartedAt = tick() end
             StateMachine.transition(S.IN_TRIAL, "in trial zone")
             status((isMain and "[MAIN " .. tostring(myStt) .. "]" or "[ALLY]") .. " 🔥 IN-TRIAL → đang làm trial")
             doTrialForMyRace()
             return
         else
-            if RuntimeState.inTrial then
-                -- Rời Trial bình thường (vào FFA hoặc ra ngoài): dừng watchdog/timer 60s của lần Trial này.
-                TrialTimeoutWatch.stopNormal()
-                State.trialStartedAt = 0
-                State.trialStartedCycleId = nil
+            if _G.inTrial then
                 if not isMain then
                     State.reportStatus("ally")
                 else
@@ -6313,22 +4467,16 @@ do
                     local inOwnFFA = (templeState() == "ffup")
                         and (getdis(CFrame.new(TEMPLE_ENTRY_POS)) < 2000)
                     if not inOwnFFA then
-                        -- [§XVII/§XVIII] KHÔNG set training/done từ MỘT lần check trialable(). Khi V2 active,
-                        --   PostTrial.processAfterRespawn() (check 3 lần) mới được quyết định. Nhánh 1-lần-check
-                        --   này CHỈ còn cho LEGACY (V2 tắt/disabled).
-                        local _v2Active = Config.enableEventProtocol and CriticalEvents.enabled()
-                        if not _v2Active then
-                            local fresh_ab, fresh_AB = trialable()
-                            if not fresh_ab then
-                                if fresh_AB == "done" then State.setMyMainStatus("done")
-                                else State.setMyMainStatus("training") end
-                                State.didEnterTrialThisTurn = false -- BS-5: rời trial + chuyển done/training → reset
-                            end
+                        local fresh_ab, fresh_AB = trialable()
+                        if not fresh_ab then
+                            if fresh_AB == "done" then State.setMyMainStatus("done")
+                            else State.setMyMainStatus("training") end
+                            State.didEnterTrialThisTurn = false -- BS-5: rời trial + chuyển done/training → reset
                         end
                     end
                 end
             end
-            RuntimeState.inTrial = false
+            _G.inTrial = false
         end
 
         -- ===== CLEAN JOIN: LỚP ĐIỀU HƯỚNG (chỉ teleport). true=dừng; false=thả xuống trial/training gốc =====
@@ -6354,8 +4502,15 @@ do
         if isMain and myStatus == "done" then
             StateMachine.transition(S.DONE, "full gear")
             status("[MAIN " .. myStt .. "] ✅ DONE YOUR RACE - FULL GEAR (Gear2/3/4)!")
-            -- [§XIX] Done: KHÔNG ChangeToFolder / Disconnect / Shutdown. File Completed đã ghi ở nhánh AB=="done".
-            --   ĐÃ XÓA HẲN caller ChangeFolder (§XIX/§XXIII-9).
+            -- safety net: nếu nhánh AB=="done" chưa gọi (vd race detect chậm), vẫn ép đổi folder.
+            -- _G.ChangeFolderAfterCompleted tự guard bằng _ChangeFolderLock + cooldown → không spam.
+            if getgenv().change and not _G.changeFileWritten then
+                task.spawn(function()
+                    if type(Hooks.ChangeFolderAfterCompleted) == "function" then
+                        Hooks.ChangeFolderAfterCompleted("myStatus=done")
+                    end
+                end)
+            end
 
         elseif isMain and myStatus == "training" then
             StateMachine.transition(S.TRAINING, "training")
@@ -6384,8 +4539,6 @@ do
                 if ts == "loading" then
                     status("[MAIN " .. myStt .. "] Đang vào Temple of Time...")
                 elseif ts == "ffup" then
-                    -- [FINAL §9.2/A6] Main vào FFA thật → emit ffa_entered (1 lần/cycle) + bật presence loop.
-                    pcall(function() if TrialEvents then TrialEvents.ffaEntered() end end)
                     -- Dùng state chi tiết hơn trong post-trial FSM
                     if State.didEnterTrialThisTurn then
                         local killResult = PostTrial.mainKillThenReset(myStt, currentmain)
@@ -6414,7 +4567,7 @@ do
 
         elseif isMain then
             -- MAIN CHƯA TỚI LƯỢT: còn train được → train song song; sẵn sàng → waiting (+ stt2-4 bám fullmoon)
-            RuntimeState.allyKillReset = false
+            _G.allyKillReset = false
             -- FIX checking-kẹt (user 2026-07-02): sau khi ra khỏi CHECK_WINDOW với streak<3 (con lỗi remote),
             -- status BÁO SERVER vẫn là "checking" cũ (reportStatus("checking") set trong window) mà nhánh này
             -- KHÔNG có path nào xoá khi myStatus=="checking" → dashboard kẹt "checking" vĩnh viễn dù acc đang
@@ -6473,18 +4626,16 @@ do
                 if ts == "loading" then
                     status(roleName .. " Đang vào Temple of Time...")
                 elseif ts == "ffup" then
-                    -- [FINAL §9.2/A6] Ally vào FFA thật → emit ffa_entered (1 lần/cycle) trước khi reset.
-                    pcall(function() if TrialEvents then TrialEvents.ffaEntered() end end)
                     StateMachine.transition(S.POST_TRIAL, "ally ffup")
                     PostTrial.resetAllyOnce(roleName)
                 else
-                    RuntimeState.allyKillReset = false
+                    _G.allyKillReset = false
                     StateMachine.transition(S.GOING_DOOR, "ally to door")
                     runTrialPhase(roleName, false)
                     AbilitySync.reportAtDoor()
                 end
             else
-                RuntimeState.allyKillReset = false
+                _G.allyKillReset = false
                 StateMachine.transition(S.WAITING_MAIN, "ally wait main")
                 status(roleName .. " Waiting for current main: " .. tostring(currentmain))
             end
@@ -6502,10 +4653,10 @@ do
         task.spawn(function()
             local checktempledoor = TempleDoorGate.ready()
             while Runtime.alive do
-                RuntimeState.loopTick = (RuntimeState.loopTick or 0) + 1
-                RuntimeState.loopLastT = tick()
-                if not RuntimeState.firstLoopHit then
-                    RuntimeState.firstLoopHit = true
+                _G.loopTick = (_G.loopTick or 0) + 1
+                _G.loopLastT = tick()
+                if not _G.firstLoopHit then
+                    _G.firstLoopHit = true
                     status("Vòng chính đã chạy — đang đồng bộ…")
                 end
                 if not checktempledoor then checktempledoor = TempleDoorGate.ready() end
@@ -6580,7 +4731,7 @@ function UIManager.start()
     task.spawn(function()
         while Runtime.alive do
             pcall(function()
-                Diagnostics.fullStatus = (Diagnostics.statusnow or "…")
+                _G.fullStatus = (_G.statusnow or "…")
                     .. " | role=" .. tostring(State.myRole)
                     .. " | fsm=" .. tostring(StateMachine.state)
                     .. " | cur=" .. tostring(getCurrentMainBeingUpgraded())
@@ -6815,9 +4966,9 @@ function UIManager.start()
         ToggleCard(mainPage, 3, "Reset After Trial", Config.resetAfterTrial, function(v)
             getgenv().Config["ResetAfterTrial"] = v; Config.resetAfterTrial = v
         end)
-        TextboxCard(mainPage, 4, "Nhập Job ID...", function(text) RuntimeState.jobidinput = text end)
+        TextboxCard(mainPage, 4, "Nhập Job ID...", function(text) _G.jobidinput = text end)
         ButtonCard(mainPage, 5, "Join Job Id", function()
-            ReplicatedStorage:WaitForChild("__ServerBrowser", 10):InvokeServer("teleport", RuntimeState.jobidinput)
+            ReplicatedStorage:WaitForChild("__ServerBrowser", 10):InvokeServer("teleport", _G.jobidinput)
         end)
         ButtonCard(mainPage, 6, "Change Race (2500F)", function()
             local R = ReplicatedStorage.Remotes.CommF_
@@ -6888,14 +5039,14 @@ function UIManager.start()
             while Runtime.alive do
                 task.wait(0.2)
                 pcall(function()
-                    if Diagnostics.statusnow then StatusValue.Text = Diagnostics.statusnow .. "\nPlaceId: " .. tostring(game.PlaceId) end
+                    if _G.statusnow then StatusValue.Text = _G.statusnow .. "\nPlaceId: " .. tostring(game.PlaceId) end
                 end)
             end
         end)
         task.spawn(function()
             while Runtime.alive do
                 task.wait(1)
-                pcall(function() if Diagnostics.netDiag then NetDiag:SetDesc(Diagnostics.netDiag) end end)
+                pcall(function() if _G.netDiag then NetDiag:SetDesc(_G.netDiag) end end)
                 pcall(function()
                     PlaceCard:SetDesc(("PlaceId: %s | Job: %s"):format(tostring(game.PlaceId), tostring(game.JobId):sub(1, 18)))
                 end)
@@ -6910,8 +5061,8 @@ function UIManager.start()
                     local me = State.isMain[State.myName] and ("MAIN" .. tostring(State.myMainIndex)) or "ALLY"
                     SyncDbg:SetDesc(("me=%s cur=%s st=%s ss=%s i=%s d=%s%s"):format(
                         me, tostring(cur):sub(1, 12), tostring(c and c.status or "?"),
-                        Diagnostics.lastSameSrv and "same" or "diff", tostring(Diagnostics.lastRaceI),
-                        tostring(Diagnostics.lastDoorDist and math.floor(Diagnostics.lastDoorDist) or "?"), tostring(Diagnostics.lastDoorSrc or "?")))
+                        _G.lastSameSrv and "same" or "diff", tostring(_G.lastRaceI),
+                        tostring(_G.lastDoorDist and math.floor(_G.lastDoorDist) or "?"), tostring(_G.lastDoorSrc or "?")))
                 end)
             end
         end)
@@ -6929,15 +5080,15 @@ function UIManager.start()
             while Runtime.alive do
                 task.wait(0.4)
                 pcall(function()
-                    local alive = RuntimeState.loopLastT and (tick() - RuntimeState.loopLastT) < 2
-                    setLoop(alive == true, "Loop: " .. (alive and ("alive #" .. tostring(RuntimeState.loopTick or 0)) or "STALL!"))
-                    local g, p = Diagnostics.netGetOk, Diagnostics.netPostOk
+                    local alive = _G.loopLastT and (tick() - _G.loopLastT) < 2
+                    setLoop(alive == true, "Loop: " .. (alive and ("alive #" .. tostring(_G.loopTick or 0)) or "STALL!"))
+                    local g, p = _G.netGetOk, _G.netPostOk
                     setNet(g and p == true, "Net: GET " .. (g and "OK" or "FAIL")
                         .. " | POST " .. (p == nil and "N/A" or (p and "OK" or "FAIL")))
-                    setSrv(Diagnostics.lastSameSrv == true, "Server: " .. (Diagnostics.lastSameSrv and "SAME" or "DIFF"))
-                    local atDoor = Diagnostics.lastDoorDist and Diagnostics.lastDoorDist < 150
-                    setDoor(atDoor == true, "Door: d=" .. tostring(Diagnostics.lastDoorDist and math.floor(Diagnostics.lastDoorDist) or "?")
-                        .. tostring(Diagnostics.lastDoorSrc or "?"))
+                    setSrv(_G.lastSameSrv == true, "Server: " .. (_G.lastSameSrv and "SAME" or "DIFF"))
+                    local atDoor = _G.lastDoorDist and _G.lastDoorDist < 150
+                    setDoor(atDoor == true, "Door: d=" .. tostring(_G.lastDoorDist and math.floor(_G.lastDoorDist) or "?")
+                        .. tostring(_G.lastDoorSrc or "?"))
                     local cur = getCurrentMainBeingUpgraded()
                     local c = cur and State.statusCache[cur]
                     setMain(c ~= nil, "Main1: " .. tostring(cur):sub(1, 12) .. " = " .. tostring(c and c.status or "?"))
@@ -6949,7 +5100,7 @@ function UIManager.start()
                 task.wait(0.4)
                 pcall(function()
                     local present = {}
-                    for _, e in ipairs(Diagnostics.dbgLog) do
+                    for _, e in ipairs(_G.dbgLog) do
                         present[e.seq] = true
                         if not logLabels[e.seq] then
                             local lb = Instance.new("TextLabel")
@@ -6974,7 +5125,7 @@ function UIManager.start()
         end)
     end)
     if not okUI then
-        Logger.warn("UIManager: build GUI fail → chạy text-only (Diagnostics.fullStatus / Diagnostics.dbgLog).", "ui_fail")
+        Logger.warn("UIManager: build GUI fail → chạy text-only (_G.fullStatus / _G.dbgLog).", "ui_fail")
     end
 end
 
@@ -6987,16 +5138,11 @@ if not Runtime._started then
 
     -- Helper: start module an toàn — 1 module lỗi KHÔNG được kéo sập cả startup (root cause "không load").
     local function safeStart(label, fn)
-        if Runtime.startedModules[label] then return true end
-        local ok, err = Safe.call("boot_" .. label, fn)
-        if ok then
-            Runtime.startedModules[label] = true
-            return true
-        end
-        if Net and Net.log then
+        local ok, err = pcall(fn)
+        if not ok then
             pcall(function() Net.log("ERR", "startup '" .. label .. "' lỗi: " .. tostring(err)) end)
+            pcall(function() Logger.warn("[BOOT] '" .. label .. "' fail: " .. tostring(err), "boot_fail_" .. label) end)
         end
-        return false
     end
 
     -- ========== ƯU TIÊN 1: THỨ NGƯỜI DÙNG THẤY — chạy TRƯỚC, KHÔNG phụ thuộc network ==========
@@ -7024,6 +5170,7 @@ if not Runtime._started then
     safeStart("fast_attack", CombatActions.startFastAttack)
     safeStart("v3_combat_watch", CombatActions.startV3CombatWatch)  -- V3 attack/gom quái (chỉ dùng khi training)
     safeStart("haki", CombatActions.startHakiLoop)
+    safeStart("mainrace", MainRaceReroll.start)            -- reroll race đúng loại theo getgenv().MainRace
     safeStart("ally_train_gate", AllyTrainingGate.start)
     safeStart("ally_fm_watch", AllyFullMoonWatch.start)  -- loop nền Ally1/Ally2 canh hết full moon
     safeStart("ally_gear_loop", AllyGearLoop.start)      -- loop nền gear5 unspend cho ally (8s/lần)
