@@ -55,7 +55,16 @@ local ControllerUI = {
     StatusLabel = nil,
     CurrentRaceLabel = nil,
     FragmentLabel = nil,
+    PlayerV3Label = nil,
     RaceLabels = {},
+}
+
+local PlayerV3Loop = {
+    status = "Waiting 30s",
+    runCount = 0,
+    lastRunAt = 0,
+    nextRunAt = 0,
+    stopped = false,
 }
 
 getgenv().__BANANA_RACE_V3_CONTROLLER_STOP = function()
@@ -564,7 +573,7 @@ local function CreateControllerUI()
     frame.Name = "Main"
     frame.AnchorPoint = Vector2.new(1, 0.5)
     frame.Position = UDim2.new(1, -20, 0.5, 0)
-    frame.Size = UDim2.fromOffset(310, 330)
+    frame.Size = UDim2.fromOffset(310, 354)
     frame.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
     frame.BackgroundTransparency = 0.08
     frame.BorderSizePixel = 0
@@ -653,15 +662,27 @@ local function CreateControllerUI()
     fragmentLabel.TextXAlignment = Enum.TextXAlignment.Left
     fragmentLabel.Parent = content
 
+    local playerV3Label = Instance.new("TextLabel")
+    playerV3Label.Name = "PlayerV3"
+    playerV3Label.Position = UDim2.fromOffset(0, 72)
+    playerV3Label.Size = UDim2.new(1, 0, 0, 22)
+    playerV3Label.BackgroundTransparency = 1
+    playerV3Label.Font = Enum.Font.GothamSemibold
+    playerV3Label.Text = "PlayerV3: ..."
+    playerV3Label.TextSize = 14
+    playerV3Label.TextColor3 = Color3.fromRGB(150, 210, 255)
+    playerV3Label.TextXAlignment = Enum.TextXAlignment.Left
+    playerV3Label.Parent = content
+
     local divider = Instance.new("Frame")
-    divider.Position = UDim2.fromOffset(0, 76)
+    divider.Position = UDim2.fromOffset(0, 100)
     divider.Size = UDim2.new(1, 0, 0, 1)
     divider.BackgroundColor3 = Color3.fromRGB(75, 75, 85)
     divider.BorderSizePixel = 0
     divider.Parent = content
 
     local raceHeader = Instance.new("TextLabel")
-    raceHeader.Position = UDim2.fromOffset(0, 84)
+    raceHeader.Position = UDim2.fromOffset(0, 108)
     raceHeader.Size = UDim2.new(1, 0, 0, 22)
     raceHeader.BackgroundTransparency = 1
     raceHeader.Font = Enum.Font.GothamBold
@@ -677,7 +698,7 @@ local function CreateControllerUI()
         local label = Instance.new("TextLabel")
         label.Name = raceName
         label.Position =
-            UDim2.fromOffset(0, 108 + (index - 1) * 25)
+            UDim2.fromOffset(0, 132 + (index - 1) * 25)
         label.Size = UDim2.new(1, 0, 0, 23)
         label.BackgroundColor3 = Color3.fromRGB(28, 28, 34)
         label.BackgroundTransparency = 0.25
@@ -702,7 +723,7 @@ local function CreateControllerUI()
 
     local statusLabel = Instance.new("TextLabel")
     statusLabel.Name = "Status"
-    statusLabel.Position = UDim2.fromOffset(0, 262)
+    statusLabel.Position = UDim2.fromOffset(0, 286)
     statusLabel.Size = UDim2.new(1, 0, 0, 55)
     statusLabel.BackgroundColor3 = Color3.fromRGB(28, 28, 34)
     statusLabel.BackgroundTransparency = 0.2
@@ -733,7 +754,7 @@ local function CreateControllerUI()
         frame.Size =
             minimized
             and UDim2.fromOffset(310, 46)
-            or UDim2.fromOffset(310, 330)
+            or UDim2.fromOffset(310, 354)
         minimize.Text = minimized and "+" or "—"
     end)
 
@@ -742,6 +763,7 @@ local function CreateControllerUI()
     ControllerUI.StatusLabel = statusLabel
     ControllerUI.CurrentRaceLabel = currentRaceLabel
     ControllerUI.FragmentLabel = fragmentLabel
+    ControllerUI.PlayerV3Label = playerV3Label
     ControllerUI.RaceLabels = raceLabels
 end
 
@@ -764,6 +786,34 @@ local function UpdateControllerUI()
     if ControllerUI.FragmentLabel then
         ControllerUI.FragmentLabel.Text =
             "Fragments: " .. tostring(fragments)
+    end
+
+    if ControllerUI.PlayerV3Label then
+        local text = "PlayerV3: " .. tostring(PlayerV3Loop.status)
+
+        if not PlayerV3Loop.stopped
+            and PlayerV3Loop.nextRunAt > 0
+        then
+            local remain =
+                math.max(0, math.floor(PlayerV3Loop.nextRunAt - tick()))
+
+            text = text
+                .. string.format(
+                    " | next %d:%02d",
+                    math.floor(remain / 60),
+                    remain % 60
+                )
+        end
+
+        if PlayerV3Loop.runCount > 0 then
+            text = text .. " | ran " .. tostring(PlayerV3Loop.runCount)
+        end
+
+        ControllerUI.PlayerV3Label.Text = text
+        ControllerUI.PlayerV3Label.TextColor3 =
+            PlayerV3Loop.stopped
+            and Color3.fromRGB(170, 170, 180)
+            or Color3.fromRGB(150, 210, 255)
     end
 
     for _, raceName in ipairs(RACE_ORDER) do
@@ -1151,6 +1201,100 @@ end
 
 pcall(function()
     ScanV3Titles(true)
+end)
+
+-- ============================================================
+-- [ HUMAN V2 PLAYER SCRIPT LOOP ]
+--
+-- Race Human + đã V2 (Data.Race.Evolved) + chưa có title Full Power
+-- => execute playerv3.lua.
+-- Lần đầu 30 giây sau khi script khởi động, sau đó mỗi 5 phút.
+-- Lượt nào không thỏa điều kiện thì bỏ qua nhưng vẫn poll tiếp,
+-- cho tới khi Human đạt V3 thì dừng hẳn.
+-- ============================================================
+
+local PLAYER_V3_URL =
+    "https://raw.githubusercontent.com/longvu26092007-eng/hellobeo/refs/heads/main/playerv3.lua"
+local PLAYER_V3_FIRST_DELAY = 30
+local PLAYER_V3_INTERVAL = 300
+
+local function IsRaceEvolved()
+    local raceValue =
+        LocalPlayer.Data
+        and LocalPlayer.Data:FindFirstChild("Race")
+
+    return raceValue ~= nil
+        and raceValue:FindFirstChild("Evolved") ~= nil
+end
+
+local function SetPlayerV3Status(text)
+    PlayerV3Loop.status = tostring(text)
+    warn("[PlayerV3 Loop] " .. PlayerV3Loop.status)
+
+    getgenv().BananaPlayerV3LoopDebug = {
+        url = PLAYER_V3_URL,
+        status = PlayerV3Loop.status,
+        runCount = PlayerV3Loop.runCount,
+        lastRunAt = PlayerV3Loop.lastRunAt,
+        nextRunAt = PlayerV3Loop.nextRunAt,
+        stopped = PlayerV3Loop.stopped,
+    }
+end
+
+local function ExecutePlayerV3()
+    local ok, err = pcall(function()
+        loadstring(game:HttpGet(PLAYER_V3_URL))()
+    end)
+
+    PlayerV3Loop.lastRunAt = tick()
+
+    if ok then
+        PlayerV3Loop.runCount = PlayerV3Loop.runCount + 1
+        SetPlayerV3Status(
+            "Executed #" .. tostring(PlayerV3Loop.runCount)
+        )
+    else
+        SetPlayerV3Status("Execute error: " .. tostring(err))
+    end
+end
+
+task.spawn(function()
+    PlayerV3Loop.nextRunAt = tick() + PLAYER_V3_FIRST_DELAY
+    SetPlayerV3Status("Armed, first check in 30s")
+
+    while controllerRunning do
+        while controllerRunning and tick() < PlayerV3Loop.nextRunAt do
+            task.wait(1)
+        end
+
+        if not controllerRunning then
+            break
+        end
+
+        PlayerV3Loop.nextRunAt = tick() + PLAYER_V3_INTERVAL
+
+        local currentRace = GetCurrentRace()
+
+        if currentRace ~= "Human" then
+            SetPlayerV3Status(
+                "Skip: current race is " .. tostring(currentRace)
+            )
+        elseif (titleCache.map or {})["Human"] == true then
+            PlayerV3Loop.stopped = true
+            SetPlayerV3Status("Stopped: Human V3 completed")
+            break
+        elseif not IsRaceEvolved() then
+            SetPlayerV3Status("Skip: Human is still V1")
+        else
+            SetPlayerV3Status("Human V2 detected, executing")
+            ExecutePlayerV3()
+        end
+    end
+
+    if not PlayerV3Loop.stopped then
+        PlayerV3Loop.stopped = true
+        SetPlayerV3Status("Stopped: controller ended")
+    end
 end)
 
 -- ============================================================
