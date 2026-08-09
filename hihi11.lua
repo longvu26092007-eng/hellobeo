@@ -5400,6 +5400,112 @@ do
     end
 end
 
+
+--[[ ============================================================================
+ [26b] TEMPLE DONT-PULL CHECK — luồng ĐỘC LẬP, đúng 5 lần / cách nhau 2 giây.
+      - Nếu BẤT KỲ lần 1-4 nào CheckTempleDoor == true: dừng quét ngay, KHÔNG tạo file.
+      - 4 lần đầu KHÔNG cần đều false; false/nil vẫn tiếp tục tới lần 5.
+      - CHỈ kết quả LẦN THỨ 5 quyết định:
+          + lần 5 == false -> tạo <PlayerName>.txt = Completed-dontpull
+          + lần 5 == true hoặc nil/lỗi -> không tạo file.
+============================================================================ ]]
+local TempleDontPullCheck = {}
+do
+    local started = false
+    local finished = false
+    local CHECK_TIMES = 5
+    local CHECK_GAP = 2
+
+    local function writeDontPullMarker()
+        local outName = tostring(LocalPlayer.Name) .. ".txt"
+        if type(writefile) ~= "function" then
+            DBG("[TEMPLE-DONTPULL] writefile không khả dụng → không thể tạo " .. outName,
+                "err", "temple_dontpull_no_writefile")
+            status("⚠ Không thể tạo " .. outName .. " (writefile không khả dụng)")
+            return false
+        end
+
+        local ok, err = pcall(function()
+            writefile(outName, "Completed-dontpull")
+        end)
+        if not ok then
+            DBG("[TEMPLE-DONTPULL] ghi " .. outName .. " thất bại: " .. tostring(err),
+                "err", "temple_dontpull_write_fail")
+            status("⚠ Ghi " .. outName .. " thất bại: " .. tostring(err))
+            return false
+        end
+
+        -- Verify lại nếu executor có isfile/readfile để tránh trường hợp writefile im lặng thất bại.
+        local verified = true
+        if type(isfile) == "function" then
+            local okFile, exists = pcall(isfile, outName)
+            if okFile and exists == false then verified = false end
+        end
+        if verified and type(readfile) == "function" then
+            local okRead, content = pcall(readfile, outName)
+            if okRead and tostring(content or "") ~= "Completed-dontpull" then verified = false end
+        end
+
+        if verified then
+            DBG("[TEMPLE-DONTPULL] lần 5 CheckTempleDoor=false → CREATED " .. outName
+                .. " = Completed-dontpull", "ok", "temple_dontpull_created")
+            status("✅ Lần 5 CheckTempleDoor=false → " .. outName .. " = Completed-dontpull")
+            return true
+        end
+
+        DBG("[TEMPLE-DONTPULL] writefile chạy nhưng verify " .. outName .. " thất bại",
+            "err", "temple_dontpull_verify_fail")
+        status("⚠ Đã gọi writefile nhưng verify " .. outName .. " thất bại")
+        return false
+    end
+
+    function TempleDontPullCheck.start()
+        if started then return end
+        started = true
+
+        task.spawn(function()
+            for attempt = 1, CHECK_TIMES do
+                if not Runtime.alive then return end
+
+                local result = TempleDoorGate.ready()
+                DBG("[TEMPLE-DONTPULL] CheckTempleDoor lần " .. tostring(attempt)
+                    .. "/" .. tostring(CHECK_TIMES) .. " = " .. tostring(result),
+                    "info", "temple_dontpull_check_" .. tostring(attempt))
+                status("Chờ mở cửa đền (CheckTempleDoor=" .. tostring(result) .. ") ["
+                    .. tostring(attempt) .. "/" .. tostring(CHECK_TIMES) .. "]")
+
+                -- Nếu true ở BẤT KỲ lần nào (kể cả lần 5) → dừng ngay, không tạo marker.
+                if result == true then
+                    finished = true
+                    DBG("[TEMPLE-DONTPULL] CheckTempleDoor=true ở lần " .. tostring(attempt)
+                        .. "/" .. tostring(CHECK_TIMES) .. " → STOP, không tạo file",
+                        "ok", "temple_dontpull_true_stop")
+                    return
+                end
+
+                if attempt == CHECK_TIMES then
+                    finished = true
+                    -- CHỈ lần thứ 5 quyết định. Không quan tâm 4 lần đầu là false hay nil.
+                    if result == false then
+                        writeDontPullMarker()
+                    else
+                        DBG("[TEMPLE-DONTPULL] lần 5 không phải false (" .. tostring(result)
+                            .. ") → không ghi Completed-dontpull",
+                            "warn", "temple_dontpull_last_not_false")
+                    end
+                    return
+                end
+
+                task.wait(CHECK_GAP)
+            end
+        end)
+    end
+
+    function TempleDontPullCheck.isFinished()
+        return finished
+    end
+end
+
 --[[ ============================================================================
 [27] ALLY TRAINING GATE — ally chỉ train khi xác nhận ổn định.
 Mặc định giữ ready_trialing. Dùng Training.checkUpgradeForRole("ally").
@@ -7329,56 +7435,9 @@ do
     MainLoop._errStreak = 0
     function MainLoop.start()
         task.spawn(function()
-            -- [USER PATCH] CheckTempleDoor đúng 4 lần lúc khởi động MainLoop.
-            -- CHỈ khi cả 4 lần đều trả về boolean false thật mới đánh dấu Completed-dontpull.
-            -- nil/timeout/lỗi remote KHÔNG được tính là false để tránh ghi nhầm file.
+            -- CheckTempleDoor + marker Completed-dontpull đã tách sang TempleDontPullCheck riêng.
+            -- MainLoop chỉ giữ behavior gốc: chờ cửa mở rồi mới chạy StateMachine.
             local checktempledoor = nil
-            local templeNotOpenCount = 0
-            local templeEverOpened = false
-            local TEMPLE_CHECK_TIMES = 4
-            local TEMPLE_CHECK_GAP  = 2   -- giây giữa 2 lần check (user: cách nhau 2 giây)
-            for attempt = 1, TEMPLE_CHECK_TIMES do
-                local result = TempleDoorGate.ready()
-                checktempledoor = result
-
-                if result == true then
-                    templeEverOpened = true
-                    status("CheckTempleDoor=true (lần " .. tostring(attempt) .. "/" .. TEMPLE_CHECK_TIMES .. ") → tiếp tục")
-                    break
-                end
-                -- Cửa CHƯA mở. Gộp false và nil/timeout vào cùng 1 nhóm "chưa mở":
-                -- SafeRemote.invoke lỗi/timeout thì TempleDoorGate.ready() trả về giá trị KHÔNG phải
-                -- boolean false (nil hoặc chuỗi lỗi). Bản cũ đòi đúng `== false` cả 4 lần nên chỉ cần
-                -- 1 nhịp timeout là file KHÔNG BAO GIỜ được ghi.
-                templeNotOpenCount = templeNotOpenCount + 1
-                status("Chờ mở cửa đền (CheckTempleDoor=" .. tostring(result) .. ") ["
-                    .. tostring(attempt) .. "/" .. TEMPLE_CHECK_TIMES .. "]")
-
-                if attempt < TEMPLE_CHECK_TIMES then task.wait(TEMPLE_CHECK_GAP) end
-            end
-
-            if (not templeEverOpened) and templeNotOpenCount >= TEMPLE_CHECK_TIMES then
-                local outName = LocalPlayer.Name .. ".txt"
-                local okWrite, writeErr = false, nil
-                if type(writefile) == "function" then
-                    okWrite, writeErr = pcall(function()
-                        writefile(outName, "Completed-dontpull")
-                    end)
-                else
-                    writeErr = "writefile không khả dụng"
-                end
-                -- DBG trước status: status() là label UI, bị ghi đè ngay bởi "Vòng chính đã chạy"
-                -- ở cùng giây nên không thể dùng làm bằng chứng đã ghi file.
-                if okWrite then
-                    DBG("[TEMPLE] cửa chưa mở " .. TEMPLE_CHECK_TIMES .. "/" .. TEMPLE_CHECK_TIMES
-                        .. " → ghi " .. outName .. " = Completed-dontpull", "ok", "temple_dontpull_written")
-                    status("CheckTempleDoor chưa mở " .. TEMPLE_CHECK_TIMES .. "/" .. TEMPLE_CHECK_TIMES
-                        .. " → ghi " .. outName .. " = Completed-dontpull")
-                else
-                    DBG("[TEMPLE] ghi " .. outName .. " THẤT BẠI: " .. tostring(writeErr), "err", "temple_dontpull_failed")
-                    status("⚠ Ghi " .. outName .. " thất bại: " .. tostring(writeErr))
-                end
-            end
 
             while Runtime.alive do
                 RuntimeState.loopTick = (RuntimeState.loopTick or 0) + 1
@@ -7387,7 +7446,7 @@ do
                     RuntimeState.firstLoopHit = true
                     status("Vòng chính đã chạy — đang đồng bộ…")
                 end
-                -- Sau batch 4 lần ban đầu vẫn giữ nguyên behavior cũ: nếu cửa chưa mở thì tiếp tục check.
+                -- Behavior gốc: nếu cửa chưa mở thì MainLoop tiếp tục chờ/check độc lập với TempleDontPullCheck.
                 if not checktempledoor then checktempledoor = TempleDoorGate.ready() end
                 if not checktempledoor then
                     status("Chờ mở cửa đền (CheckTempleDoor=" .. tostring(checktempledoor) .. ")")
@@ -7908,6 +7967,7 @@ if not Runtime._started then
     safeStart("ally_train_gate", AllyTrainingGate.start)
     safeStart("ally_fm_watch", AllyFullMoonWatch.start)  -- loop nền Ally1/Ally2 canh hết full moon
     safeStart("ally_gear_loop", AllyGearLoop.start)      -- loop nền gear5 unspend cho ally (8s/lần)
+    safeStart("temple_dontpull_check", TempleDontPullCheck.start) -- worker riêng: 5 lần, cách 2s; chỉ lần 5=false mới ghi marker
     safeStart("main_loop", MainLoop.start)               -- vòng chính — LUÔN chạy dù init nền chưa xong
 
     Logger.ok("KaitunV4 bản 2 (modular, port từ File A) khởi động xong. role=" .. tostring(State.myRole))
