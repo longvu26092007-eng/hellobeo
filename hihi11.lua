@@ -7333,38 +7333,50 @@ do
             -- CHỈ khi cả 4 lần đều trả về boolean false thật mới đánh dấu Completed-dontpull.
             -- nil/timeout/lỗi remote KHÔNG được tính là false để tránh ghi nhầm file.
             local checktempledoor = nil
-            local templeFalseCount = 0
-            local templeAllFourFalse = true
-            for attempt = 1, 4 do
+            local templeNotOpenCount = 0
+            local templeEverOpened = false
+            local TEMPLE_CHECK_TIMES = 4
+            local TEMPLE_CHECK_GAP  = 2   -- giây giữa 2 lần check (user: cách nhau 2 giây)
+            for attempt = 1, TEMPLE_CHECK_TIMES do
                 local result = TempleDoorGate.ready()
                 checktempledoor = result
 
                 if result == true then
-                    templeAllFourFalse = false
-                    status("CheckTempleDoor=true (lần " .. tostring(attempt) .. "/4) → tiếp tục")
+                    templeEverOpened = true
+                    status("CheckTempleDoor=true (lần " .. tostring(attempt) .. "/" .. TEMPLE_CHECK_TIMES .. ") → tiếp tục")
                     break
-                elseif result == false then
-                    templeFalseCount = templeFalseCount + 1
-                    status("Chờ mở cửa đền (CheckTempleDoor=false) [" .. tostring(attempt) .. "/4]")
-                else
-                    -- Không có kết quả chắc chắn (nil/timeout) → không được kết luận dontpull.
-                    templeAllFourFalse = false
-                    status("CheckTempleDoor chưa có kết quả chắc chắn [" .. tostring(attempt) .. "/4]")
                 end
+                -- Cửa CHƯA mở. Gộp false và nil/timeout vào cùng 1 nhóm "chưa mở":
+                -- SafeRemote.invoke lỗi/timeout thì TempleDoorGate.ready() trả về giá trị KHÔNG phải
+                -- boolean false (nil hoặc chuỗi lỗi). Bản cũ đòi đúng `== false` cả 4 lần nên chỉ cần
+                -- 1 nhịp timeout là file KHÔNG BAO GIỜ được ghi.
+                templeNotOpenCount = templeNotOpenCount + 1
+                status("Chờ mở cửa đền (CheckTempleDoor=" .. tostring(result) .. ") ["
+                    .. tostring(attempt) .. "/" .. TEMPLE_CHECK_TIMES .. "]")
 
-                if attempt < 4 then task.wait(1) end
+                if attempt < TEMPLE_CHECK_TIMES then task.wait(TEMPLE_CHECK_GAP) end
             end
 
-            if templeAllFourFalse and templeFalseCount == 4 and checktempledoor == false then
+            if (not templeEverOpened) and templeNotOpenCount >= TEMPLE_CHECK_TIMES then
                 local outName = LocalPlayer.Name .. ".txt"
-                local okWrite = pcall(function()
-                    writefile(outName, "Completed-dontpull")
-                end)
-                if okWrite then
-                    status("CheckTempleDoor=false 4/4 → ghi " .. outName .. " = Completed-dontpull")
-                    DBG("[TEMPLE] false 4/4 → " .. outName .. " = Completed-dontpull", "ok", "temple_dontpull_written")
+                local okWrite, writeErr = false, nil
+                if type(writefile) == "function" then
+                    okWrite, writeErr = pcall(function()
+                        writefile(outName, "Completed-dontpull")
+                    end)
                 else
-                    status("⚠ CheckTempleDoor=false 4/4 nhưng ghi " .. outName .. " thất bại")
+                    writeErr = "writefile không khả dụng"
+                end
+                -- DBG trước status: status() là label UI, bị ghi đè ngay bởi "Vòng chính đã chạy"
+                -- ở cùng giây nên không thể dùng làm bằng chứng đã ghi file.
+                if okWrite then
+                    DBG("[TEMPLE] cửa chưa mở " .. TEMPLE_CHECK_TIMES .. "/" .. TEMPLE_CHECK_TIMES
+                        .. " → ghi " .. outName .. " = Completed-dontpull", "ok", "temple_dontpull_written")
+                    status("CheckTempleDoor chưa mở " .. TEMPLE_CHECK_TIMES .. "/" .. TEMPLE_CHECK_TIMES
+                        .. " → ghi " .. outName .. " = Completed-dontpull")
+                else
+                    DBG("[TEMPLE] ghi " .. outName .. " THẤT BẠI: " .. tostring(writeErr), "err", "temple_dontpull_failed")
+                    status("⚠ Ghi " .. outName .. " thất bại: " .. tostring(writeErr))
                 end
             end
 
