@@ -6318,6 +6318,10 @@ do
     local _joinMoonReported = false -- tránh POST liên tục khi đang hop
     local _leaderTarget = nil       -- jobid Ally1 tự xin từ /getseverapi (trước khi server chốt)
     local _lastLockMoon = 0         -- chống spam /lockmoon
+    -- FORWARD-DECLARE: __allyTrainExit (định nghĩa bên dưới) gọi leaderRequestServer, mà hàm đó
+    -- lại khai báo SAU nó. Không forward-declare thì closure bắt GLOBAL nil → crash "attempt to
+    -- call a nil value" đúng lúc ally train xong.
+    local leaderRequestServer
     -- HOOK: AllyFullMoonWatch (1 authority phá lock) gọi khi đã /fmlost → clear target chết để nhịp
     -- allyLeaderTick sau thấy target=nil → tự /getseverapi xin server mới. Đây là cầu nối để leaderTick
     -- KHÔNG tự quyết rời (chống hop sớm) mà vẫn xin được server mới sau khi Watch xác nhận hết FM.
@@ -6331,8 +6335,70 @@ do
         _leaderTarget = jobid and jobid ~= "" and jobid or nil
     end
 
+    --[[ ===== ALLY TRAIN MODE (user 2026-08-10) =====
+      YÊU CẦU USER: Ally1/Ally2 khi CẦN TRAIN thì phải train TRƯỚC, không quan tâm gì khác.
+      Ally1 (đang giữ lock) → PHÁ LOCK NGAY: POST /fmlost + clear state local rồi đi train.
+      Ally2 (không giữ lock) → tự đi train, KHÔNG /fmlost (không phá lock của Ally1).
+      Khi train xong (gate về ready_trial) → allyTrainExit() → Ally1 tự /getseverapi xin server mới.
+
+      Cờ này là AUTHORITY duy nhất: khi bật, allyTick() nhả quyền điều hướng (return false) để
+      StateMachine chạy nhánh ally-train. Nhờ vậy ally KHÔNG cần đang-ở-FM mới train được
+      (trước đây allyTick return true ở mọi nhánh join → không bao giờ chạm nhánh train). ]]
+    local _allyTrainMode = false
+    local _allyTrainSince = 0
+    local _lastFmLostForTrain = 0
+
+    RuntimeState.__allyTrainModeActive = function() return _allyTrainMode end
+
+    -- Vào train mode. Ally1 giữ lock → phá lock (/fmlost) trước khi train.
+    RuntimeState.__allyTrainEnter = function()
+        if _allyTrainMode then return end
+        _allyTrainMode = true
+        _allyTrainSince = tick()
+        local fmJob = State.fullmoonJobid
+        local holdingLock = State.fullmoonLocked == true
+            and fmJob and fmJob ~= "" and game.JobId == fmJob
+        -- clear target local NGAY (đồng bộ) → nhịp sau không hop lại FM khi đang train
+        _leaderTarget = nil
+        _allyFmConfirmedAt = 0
+        _joinMoonReported = false
+        if holdingLock and isAllyLeader() then
+            -- Ally1 ĐANG GIỮ LOCK → phải nhả để cả đàn không chờ vô ích.
+            if (tick() - _lastFmLostForTrain) >= 5 then
+                _lastFmLostForTrain = tick()
+                Logger.info("[ALLY-TRAIN] cần train khi đang GIỮ locked FM @ " .. tostring(fmJob)
+                    .. " → POST /fmlost phá lock rồi đi train", "ally_train_fmlost")
+                task.spawn(function()
+                    pcall(function()
+                        Net.postJSON(endpoint("/fmlost", { name = Config.myName }),
+                            { jobid = fmJob, reason = "ally_need_train" }, "fmlost")
+                    end)
+                end)
+            end
+            -- clear local ngay, không đợi /curmain poll
+            State.fullmoonJobid = nil
+            State.serverCurJobid = nil
+        else
+            Logger.info("[ALLY-TRAIN] cần train (không giữ lock) → đi train, KHÔNG /fmlost",
+                "ally_train_nolock")
+        end
+    end
+
+    -- Ra khỏi train mode (gate đã về ready_trial/done) → quay lại nhiệm vụ FM.
+    RuntimeState.__allyTrainExit = function()
+        if not _allyTrainMode then return end
+        _allyTrainMode = false
+        Logger.info("[ALLY-TRAIN] train xong sau " .. tostring(math.floor(tick() - _allyTrainSince))
+            .. "s → quay lại nhiệm vụ FullMoon", "ally_train_exit")
+        _allyTrainSince = 0
+        -- Ally1: xin server FM mới ngay (Ally2 sẽ tự follow khi Ally1 chốt).
+        if isAllyLeader() then leaderRequestServer("[after-train]") end
+    end
+
     -- Ally1 xin server full moon mới (server lọc đúng placeid của Ally1) → set _leaderTarget để hop.
-    local function leaderRequestServer(reasonTag)
+    -- LƯU Ý: gán vào biến đã forward-declare ở trên (KHÔNG dùng `local function` — sẽ tạo local
+    -- MỚI che biến cũ, khiến __allyTrainExit vẫn thấy nil).
+    function leaderRequestServer(reasonTag)
         -- HARD LOCK: đang giữ locked fullmoon job → KHÔNG xin server mới
         if State.myRole == "ally"
             and State.fullmoonLocked == true
@@ -6526,6 +6592,14 @@ do
     end
 
     local function allyTick()
+        --[[ ALLY TRAIN MODE (user 2026-08-10): CẦN TRAIN thì train TRƯỚC, không quan tâm gì khác.
+             Trả false = NHẢ quyền điều hướng → StateMachine chạy nhánh ally-train ở dưới.
+             ĐẶT TRƯỚC isScoutAlly() để ally 3+ (standby) cũng train được khi cần.
+             Không hop, không join FM, không reportStatus("moon") — nhánh train tự set "training". ]]
+        if _allyTrainMode then
+            status("[ALLY] TRAIN MODE — train trước, tạm bỏ nhiệm vụ FullMoon")
+            return false
+        end
         if not isScoutAlly() then
             State.reportStatus("moon")
             status("[ALLY] Scout standby (không phải Ally1/Ally2)")
@@ -7266,6 +7340,61 @@ do
             RuntimeState.inTrial = false
         end
 
+        --[[ ===== ALLY TRAIN PRE-GATE (user 2026-08-10) — PHẢI ĐỨNG TRƯỚC ScoutNavigator =====
+             LÝ DO: ScoutNavigator.tick() return true ở MỌI nhánh join/hop/chờ FM và bị
+             `if handled then return end` cắt tick. Nếu gate train nằm SAU đó thì ally đang ở
+             NGOÀI FM không bao giờ chạm gate → không bao giờ biết mình cần train (chỉ ally
+             đã đứng trong FM mới train được — sai với rule "cần train thì train trước").
+             Train có quyền ưu tiên CAO HƠN ScoutNavigator/FullMoon.
+
+             CHỈ EVALUATE 1 LẦN / TICK: AllyTrainingGate.tick() tăng confirmCount mỗi lần gọi
+             (độc lập cache _upgradeRaw TTL 1.5s — cache chỉ chặn remote, không chặn đếm), nên
+             gọi 2 lần/tick sẽ confirm training nhanh gấp đôi thiết kế 3 nhịp. Kết quả lưu vào
+             3 biến dưới, nhánh ally ở cuối DÙNG LẠI, KHÔNG gọi gate lần hai. ]]
+        local allyGateState, allyGateReason, allyGateI
+        if not isMain then
+            allyGateState, allyGateReason, allyGateI = AllyTrainingGate.tick("[ALLY]")
+            if allyGateState == "training" then
+                -- Ally1 đang giữ locked FM → helper tự POST /fmlost + clear lock local (idempotent).
+                -- Ally2 không giữ lock → chỉ đi train, KHÔNG /fmlost.
+                if RuntimeState.__allyTrainEnter then pcall(RuntimeState.__allyTrainEnter) end
+                RuntimeState.allyKillReset = false
+                State.reportStatus("training")
+                StateMachine.transition(S.TRAINING, "ally train")
+                status("[ALLY] Training confirmed (i=" .. tostring(allyGateI) .. ")")
+                Training.handleTraining("[ALLY]", nil, function() State.reportStatus("training") end)
+                return
+            end
+            -- gate đã về ready_trialing/done → nếu trước đó đang train thì thoát train mode
+            -- (Ally1 tự /getseverapi xin FM mới; Ally2 follow khi Ally1 chốt).
+            --
+            -- FIX EDGE CASE (user 2026-08-10): CHỈ exit khi có PROOF THẬT.
+            -- AllyTrainingGate trả "ready_trialing" cho CẢ nhánh unknown/check_failed (dòng 5592-5598)
+            -- khi remote UpgradeRace("Check") timeout. Nếu exit theo đó thì chỉ 1 nhịp remote lag
+            -- giữa lúc đang train là Ally1 tưởng train xong → /getseverapi → hop lại FM → vòng sau
+            -- gate lại báo training → /fmlost → lặp vô hạn (flap phá lock).
+            -- Proof hợp lệ: ready_trial (i=0/8), done/ally_done (i=5), fresh_never_trialed,
+            -- can_buy_gear (i=2/4/7 — đã qua giai đoạn cần train).
+            if RuntimeState.__allyTrainModeActive and RuntimeState.__allyTrainModeActive() then
+                local r = tostring(allyGateReason or "")
+                local proofDone = (r == "ready_trial") or (r == "done") or (r == "ally_done")
+                    or (r == "fresh_never_trialed") or (r == "can_buy_gear")
+                if proofDone then
+                    if RuntimeState.__allyTrainExit then pcall(RuntimeState.__allyTrainExit) end
+                else
+                    -- check_failed / unknown_i_* → KHÔNG kết luận, GIỮ train mode, train tiếp.
+                    Logger.info("[ALLY-TRAIN] giữ train mode: gate reason=" .. r
+                        .. " (không phải proof hết train)", "ally_train_hold_noproof")
+                    RuntimeState.allyKillReset = false
+                    State.reportStatus("training")
+                    StateMachine.transition(S.TRAINING, "ally train hold (no proof)")
+                    status("[ALLY] Train tiếp — chưa có kết quả check chắc chắn (" .. r .. ")")
+                    Training.handleTraining("[ALLY]", nil, function() State.reportStatus("training") end)
+                    return
+                end
+            end
+        end
+
         -- ===== CLEAN JOIN: LỚP ĐIỀU HƯỚNG (chỉ teleport). true=dừng; false=thả xuống trial/training gốc =====
         if Config.scout then
             local handled = ScoutNavigator.tick({ isMain = isMain, myStatus = myStatus, currentmain = currentmain, myStt = myStt, trainConfirmed = trainConfirmed, trialConfirmed = trialConfirmed })
@@ -7379,11 +7508,13 @@ do
         else
             -- ===== NHÁNH ALLY (File A 1910-2029) =====
             local roleName = "[ALLY]"
-            -- Dùng AllyTrainingGate: chỉ train khi confirmed
-            local _, gateReason = AllyTrainingGate.tick(roleName)
-            -- BS-3: scout ally GIỮ full moon → KHÔNG train. Nhánh ally-train cũ (gateState=="training"
-            -- and not Config.scout) đã XÓA HẲN vì Config.scout luôn = true → code chết vĩnh viễn.
-            status(roleName .. " Ready for trialing — " .. tostring(gateReason))
+            -- ALLY TRAIN PRE-GATE (user 2026-08-10): gate ĐÃ được evaluate MỘT LẦN ở đầu
+            -- StateMachine.tick, TRƯỚC ScoutNavigator (xem block "ALLY TRAIN PRE-GATE").
+            -- TUYỆT ĐỐI KHÔNG gọi AllyTrainingGate.tick() lần thứ hai ở đây: gate tăng
+            -- confirmCount MỖI lần gọi (dòng ~5570) và cache _upgradeRaw (TTL 1.5s) chỉ chặn
+            -- remote call chứ KHÔNG chặn việc đếm → gọi 2 lần/tick sẽ confirm training nhanh
+            -- gấp đôi thiết kế 3 nhịp. Ở đây chỉ DÙNG LẠI kết quả đã có.
+            status(roleName .. " Ready for trialing — " .. tostring(allyGateReason))
             -- BS-3: scout ally giữ status "ally" do ScoutNavigator set (KHÔNG ghi đè)
 
             status(roleName .. " Đang dò main đang tới lượt…")
