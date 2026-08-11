@@ -3905,15 +3905,37 @@ do
 
     -- ===== CACHE LÕI CHO UpgradeRace("Check") =====
     -- Gọi remote 1 lần, chia sẻ cho mọi consumer trong 1 tick.
-    -- TTL 1.5s. Raw data: { ok, i, d, f }.
-    local _upgradeRaw = { t = -1e9, ok = false, i = nil, d = nil, f = nil }
+    -- FIX DONE/REROLL (2026-08-11): cache PHẢI gắn với race hiện tại.
+    -- Nếu vừa reroll Angel(done) -> Rabbit, tuyệt đối không được tái dùng i=5/8 của Angel
+    -- trong TTL 1.5s rồi hiểu nhầm Rabbit cũng done.
+    -- Raw data: { t, race, ok, i, d, f }.
+    local _upgradeRaw = { t = -1e9, race = nil, ok = false, i = nil, d = nil, f = nil }
+    local function _upgradeRaceCacheKey()
+        local key = nil
+        pcall(function()
+            local data = LocalPlayer and LocalPlayer:FindFirstChild("Data")
+            local raceObj = data and data:FindFirstChild("Race")
+            local rawRace = raceObj and raceObj.Value
+            key = WorldProbe.normalizeRace(rawRace) or tostring(rawRace or "")
+        end)
+        return key
+    end
+
     local function _getUpgradeRaw()
         local now = tick()
-        if (now - _upgradeRaw.t) < 1.5 then
+        local raceKey = _upgradeRaceCacheKey()
+        if (now - _upgradeRaw.t) < 1.5 and _upgradeRaw.race == raceKey then
             return _upgradeRaw
         end
         local ok, i, d, f = SafeRemote.invoke(3, "UpgradeRace", "Check")
-        _upgradeRaw = { t = now, ok = ok, i = ok and i or nil, d = ok and d or nil, f = ok and f or nil }
+        _upgradeRaw = {
+            t = now,
+            race = raceKey,
+            ok = ok,
+            i = ok and i or nil,
+            d = ok and d or nil,
+            f = ok and f or nil,
+        }
         Diagnostics.lastRaceI = _upgradeRaw.i
         return _upgradeRaw
     end
@@ -6114,6 +6136,15 @@ do
         return currentCanonical, currentRaw
     end
 
+    -- HARD GUARD cho DONE marker: nếu có MainRace target thì chỉ race ĐÚNG target
+    -- mới được phép coi AB="done" là completion của lượt này.
+    function MainRaceReroll.isCurrentTarget()
+        local target = MainRaceReroll._target
+        if not target then return true end -- MainRace tắt/nil -> giữ behavior cũ
+        local matched = isCurrentRaceTarget(target)
+        return matched == true
+    end
+
     function MainRaceReroll.getStatusText()
         local currentCanonical, currentRaw =
             MainRaceReroll.getCurrentRace()
@@ -6149,6 +6180,14 @@ do
 
         MainRaceReroll._target = target
         MainRaceReroll._role = role
+
+        -- FIX DONE/REROLL (2026-08-11): lock NGAY LẬP TỨC, trước task.spawn.
+        -- Trước đây _blocking chỉ bật sau khi gameReady/team/race sẵn sàng, tạo một cửa sổ
+        -- nơi StateMachine có thể thấy AB="done" của race tạm và ghi PlayerName.txt sai.
+        MainRaceReroll._blocking = true
+        MainRaceReroll._resolved = false
+        MainRaceReroll._startedAt = tick()
+        MainRaceReroll._attempt = 0
 
         task.spawn(function()
             -- Chờ game/data/team sẵn sàng.
@@ -6223,6 +6262,9 @@ do
                 -- Mọi Main đều giữ status checking trong lúc chưa đúng race.
                 -- State.reportStatus dùng được cả khi /init chưa kịp set myMainIndex.
                 if role == "main" then
+                    -- Race tạm KHÔNG BAO GIỜ được giữ latch marker DONE. Nếu trước đó có một nhịp
+                    -- sai đã set changeFileWritten thì reset ngay để target thật sau này vẫn ghi được.
+                    RuntimeState.changeFileWritten = false
                     State.reportStatus("checking")
                 end
 
@@ -7205,6 +7247,23 @@ do
 
         -- ===== chuẩn hoá status main (File A 1702-1742) =====
         if isMain then
+            -- FIX DONE/REROLL (2026-08-11): AB="done" chỉ hợp lệ khi race hiện tại đúng MainRace target.
+            -- Ví dụ MainRace=Rabbit nhưng reroll tạm ra Angel đã V4 xong: UpgradeRace Check có thể trả i=5/8.
+            -- Trường hợp đó PHẢI tiếp tục reroll, KHÔNG status done, KHÔNG ghi PlayerName.txt.
+            local _mainRaceTarget = MainRaceReroll.getTarget()
+            local _doneMatchesTarget = (_mainRaceTarget == nil) or MainRaceReroll.isCurrentTarget()
+
+            if AB == "done" and _mainRaceTarget ~= nil and not _doneMatchesTarget then
+                RuntimeState.changeFileWritten = false
+                if myStatus ~= "checking" then
+                    State.reportStatus("checking")
+                    myStatus = "checking"
+                end
+                State.didEnterTrialThisTurn = false
+                status("[MAIN " .. tostring(myStt) .. "] Race tạm báo DONE nhưng KHÔNG phải MainRace target → bỏ qua marker, tiếp tục reroll")
+                return
+            end
+
             if AB == "done" then
                 if myStatus ~= "done" then State.setMyMainStatus("done"); myStatus = "done"; State.didEnterTrialThisTurn = false end
                 -- [§XIX] DONE: ghi "<PlayerName>.txt" = "Completed-<Race>" (UTF-8, ghi đè an toàn).
