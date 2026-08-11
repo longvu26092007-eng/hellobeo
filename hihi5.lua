@@ -6393,10 +6393,10 @@ do
         return CANONICAL_TO_DISPLAY[canonical] or canonical
     end
 
-    -- Race thường (Human/Rabbit/Shark/Angel) reroll bằng 2500 Fragments.
+    -- Race thường (Human/Rabbit/Shark/Angel) reroll bằng 3000 Fragments.
     -- MainRaceReroll chỉ mượn FragmentTyrant làm worker kiếm F; tuyệt đối không nhả blocking
     -- và không chạy gameplay khác trong lúc thiếu F.
-    local REROLL_FRAGMENT_COST = 2500
+    local REROLL_FRAGMENT_COST = 3000
 
     local function getCurrentFragments()
         local value = 0
@@ -6500,7 +6500,7 @@ do
             return true, "already_match"
         end
 
-        -- Guard cuối ngay trước remote: race thường bắt buộc phải có đủ 2500F.
+        -- Guard cuối ngay trước remote: race thường bắt buộc phải có đủ 3000F.
         -- Nếu Fragment vừa bị tiêu/đổi giữa hai nhịp thì KHÔNG spam BlackbeardReward;
         -- vòng MainRace phía ngoài sẽ chuyển sang Auto Tyrant để bù lại.
         if needsFragmentReroll(targetCanonical) then
@@ -6829,13 +6829,13 @@ do
     -- Trả false khi đang thiếu F: giữ MainRace blocking và giao movement/combat cho FragmentTyrant.
     local function ensureMainRaceRerollFragments(targetCanonical, role)
         if not needsFragmentReroll(targetCanonical) then
-            stopMainRaceFragmentFarm("special race does not use 2500F reroll")
+            stopMainRaceFragmentFarm("special race does not use 3000F reroll")
             return true
         end
 
         local frags = getCurrentFragments()
         if frags >= REROLL_FRAGMENT_COST then
-            stopMainRaceFragmentFarm("enough 2500F for race reroll")
+            stopMainRaceFragmentFarm("enough 3000F for race reroll")
             return true
         end
 
@@ -7026,8 +7026,8 @@ do
                     return
                 end
 
-                -- Race thường cần 2500F cho MỖI lần reroll. Nếu thiếu thì KHÔNG tăng attempt,
-                -- KHÔNG gọi remote; giữ blocking và farm Tyrant tới đúng 2500F rồi mới quay lại reroll.
+                -- Race thường cần 3000F cho MỖI lần reroll. Nếu thiếu thì KHÔNG tăng attempt,
+                -- KHÔNG gọi remote; giữ blocking và farm Tyrant tới đúng 3000F rồi mới quay lại reroll.
                 if not ensureMainRaceRerollFragments(target, role) then
                     task.wait(0.5)
                     continue
@@ -8843,7 +8843,7 @@ function UIManager.start()
         ButtonCard(mainPage, 5, "Join Job Id", function()
             ReplicatedStorage:WaitForChild("__ServerBrowser", 10):InvokeServer("teleport", RuntimeState.jobidinput)
         end)
-        ButtonCard(mainPage, 6, "Change Race (2500F)", function()
+        ButtonCard(mainPage, 6, "Change Race (3000F)", function()
             local R = ReplicatedStorage.Remotes.CommF_
             R:InvokeServer("BlackbeardReward", "Reroll", "1")
             R:InvokeServer("BlackbeardReward", "Reroll", "2")
