@@ -6393,6 +6393,25 @@ do
         return CANONICAL_TO_DISPLAY[canonical] or canonical
     end
 
+    -- Race thường (Human/Rabbit/Shark/Angel) reroll bằng 2500 Fragments.
+    -- MainRaceReroll chỉ mượn FragmentTyrant làm worker kiếm F; tuyệt đối không nhả blocking
+    -- và không chạy gameplay khác trong lúc thiếu F.
+    local REROLL_FRAGMENT_COST = 2500
+
+    local function getCurrentFragments()
+        local value = 0
+        pcall(function()
+            local data = LocalPlayer:FindFirstChild("Data")
+            local fragments = data and data:FindFirstChild("Fragments")
+            value = tonumber(fragments and fragments.Value) or 0
+        end)
+        return value
+    end
+
+    local function needsFragmentReroll(targetCanonical)
+        return targetCanonical ~= "Ghoul" and targetCanonical ~= "Cyborg"
+    end
+
     -- Mapping dùng canonical names để so sánh chính xác với Data.Race.Value.
     local ALLY_MAP = {
         Skypiea = { "Human",   "Mink"     }, -- MainRace Angel
@@ -6479,6 +6498,16 @@ do
                 "mainrace_skip_remote"
             )
             return true, "already_match"
+        end
+
+        -- Guard cuối ngay trước remote: race thường bắt buộc phải có đủ 2500F.
+        -- Nếu Fragment vừa bị tiêu/đổi giữa hai nhịp thì KHÔNG spam BlackbeardReward;
+        -- vòng MainRace phía ngoài sẽ chuyển sang Auto Tyrant để bù lại.
+        if needsFragmentReroll(targetCanonical) then
+            local frags = getCurrentFragments()
+            if frags < REROLL_FRAGMENT_COST then
+                return false, "need_reroll_fragments"
+            end
         end
 
         Logger.info(
@@ -6783,6 +6812,52 @@ do
     MainRaceReroll._startedAt = 0
     MainRaceReroll._attempt = 0
     MainRaceReroll._matchedAt = 0 -- mốc race target vừa ổn định; dùng chặn DONE stale ngay sau reroll
+    MainRaceReroll._fragmentFunding = false
+    MainRaceReroll._fragmentRequired = 0
+
+    local function stopMainRaceFragmentFarm(reason)
+        if MainRaceReroll._fragmentFunding then
+            if FragmentTyrant.isActive() then
+                FragmentTyrant.stop(reason or "MainRace fragment farm stop")
+            end
+            MainRaceReroll._fragmentFunding = false
+            MainRaceReroll._fragmentRequired = 0
+        end
+    end
+
+    -- Trả true khi đã đủ tiền cho MỘT lần reroll race thường.
+    -- Trả false khi đang thiếu F: giữ MainRace blocking và giao movement/combat cho FragmentTyrant.
+    local function ensureMainRaceRerollFragments(targetCanonical, role)
+        if not needsFragmentReroll(targetCanonical) then
+            stopMainRaceFragmentFarm("special race does not use 2500F reroll")
+            return true
+        end
+
+        local frags = getCurrentFragments()
+        if frags >= REROLL_FRAGMENT_COST then
+            stopMainRaceFragmentFarm("enough 2500F for race reroll")
+            return true
+        end
+
+        MainRaceReroll._fragmentFunding = true
+        MainRaceReroll._fragmentRequired = REROLL_FRAGMENT_COST
+        if role == "main" then
+            State.reportStatus("checking")
+        end
+
+        status(
+            "[MAINRACE]["
+                .. tostring(role)
+                .. "] Thiếu Fragment reroll | F="
+                .. tostring(frags)
+                .. "/"
+                .. tostring(REROLL_FRAGMENT_COST)
+                .. " → AUTO TYRANT"
+        )
+
+        FragmentTyrant.start(REROLL_FRAGMENT_COST)
+        return false
+    end
 
     -- Khoảng nghỉ giữa hai lần reroll.
     -- checkAndReroll đã chờ kết quả đổi race; khoảng này chỉ chống gọi remote dồn.
@@ -6825,7 +6900,7 @@ do
         local currentCanonical, currentRaw =
             MainRaceReroll.getCurrentRace()
 
-        return "[MAINRACE]["
+        local text = "[MAINRACE]["
             .. tostring(MainRaceReroll._role or "?")
             .. "] Checking race | current="
             .. displayRace(currentRaw or currentCanonical)
@@ -6833,6 +6908,16 @@ do
             .. displayRace(MainRaceReroll._target)
             .. " | attempt="
             .. tostring(MainRaceReroll._attempt or 0)
+
+        if MainRaceReroll._fragmentFunding then
+            text = text
+                .. " | FARM F="
+                .. tostring(getCurrentFragments())
+                .. "/"
+                .. tostring(MainRaceReroll._fragmentRequired or REROLL_FRAGMENT_COST)
+        end
+
+        return text
     end
 
     -- Worker chạy cho tới khi race của CHÍNH account trùng target.
@@ -6863,6 +6948,8 @@ do
         MainRaceReroll._blocking = true
         MainRaceReroll._resolved = false
         MainRaceReroll._matchedAt = 0
+        MainRaceReroll._fragmentFunding = false
+        MainRaceReroll._fragmentRequired = 0
         RuntimeState.mainDoneValidatedRace = nil
         if Training.invalidateUpgradeRaw then pcall(Training.invalidateUpgradeRaw, "mainrace_start") end
 
@@ -6909,6 +6996,8 @@ do
                 -- Race của chính account đã đúng:
                 -- dừng ngay và tuyệt đối không gọi thêm reroll.
                 if matched then
+                    -- Nếu race vừa đạt trong lúc đang kiếm F (vd manual reroll), dừng Tyrant sạch trước.
+                    stopMainRaceFragmentFarm("MainRace target matched")
                     -- Target vừa đạt: huỷ MỌI UpgradeRace cache của race trước và ghi mốc settle.
                     if Training.invalidateUpgradeRaw then pcall(Training.invalidateUpgradeRaw, "mainrace_target_match") end
                     MainRaceReroll._matchedAt = tick()
@@ -6935,6 +7024,13 @@ do
                             .. " → dừng reroll"
                     )
                     return
+                end
+
+                -- Race thường cần 2500F cho MỖI lần reroll. Nếu thiếu thì KHÔNG tăng attempt,
+                -- KHÔNG gọi remote; giữ blocking và farm Tyrant tới đúng 2500F rồi mới quay lại reroll.
+                if not ensureMainRaceRerollFragments(target, role) then
+                    task.wait(0.5)
+                    continue
                 end
 
                 MainRaceReroll._attempt =
@@ -6964,6 +7060,7 @@ do
                 -- Kiểm tra ngay sau lần gọi, không chờ sang chu kỳ kế nếu đã đúng.
                 local nowMatched = isCurrentRaceTarget(target)
                 if nowMatched then
+                    stopMainRaceFragmentFarm("MainRace target reached after reroll")
                     if Training.invalidateUpgradeRaw then pcall(Training.invalidateUpgradeRaw, "mainrace_target_reached") end
                     MainRaceReroll._matchedAt = tick()
                     RuntimeState.mainDoneValidatedRace = nil
@@ -6992,7 +7089,9 @@ do
                 task.wait(MAINRACE_RETRY_INTERVAL)
             end
 
-            -- Runtime tắt thì chỉ nhả lock nội bộ; không đánh dấu resolved giả.
+            -- Runtime tắt thì dừng worker Fragment của MainRace rồi mới nhả lock nội bộ;
+            -- không đánh dấu resolved giả.
+            stopMainRaceFragmentFarm("Runtime stopped during MainRace")
             MainRaceReroll._blocking = false
         end)
     end
