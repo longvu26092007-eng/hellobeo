@@ -6528,29 +6528,43 @@ do
         end
 
         if targetCanonical == "Ghoul" then
-            -- Giữ nguyên chuỗi remote Ghoul của bản gốc.
-            pcall(function()
-                SafeRemote.invoke(3, "UpgradeRace", "Ectoplasm")
-            end)
-            task.wait(0.3)
+            -- Ghoul là race đặc biệt: KHÔNG đi qua UpgradeRace và KHÔNG dùng Fragment reroll.
+            -- Chuỗi đúng theo logic Ghoul đã dùng ổn định trong các bản trước:
+            --   Ectoplasm -> BuyCheck -> 4
+            --   Ectoplasm -> Change   -> 4
+            -- BuyCheck chỉ xác nhận quyền sở hữu; Change mới là lệnh đổi race.
+            local ghoulCheckOk, ghoulCheckResult =
+                SafeRemote.invoke(3, "Ectoplasm", "BuyCheck", 4)
 
-            -- Check lại: nếu remote trước đã đổi đúng thì dừng, không gọi tiếp.
+            task.wait(0.5)
+
+            -- Guard lại Data.Race trước Change để coroutine cũ không đổi thừa
+            -- nếu race vừa được một flow khác đổi sang Ghoul.
             if isCurrentRaceTarget(targetCanonical) then
-                return true, "matched_after_ectoplasm"
+                return true, "matched_before_ghoul_change"
             end
 
-            pcall(function()
-                SafeRemote.invoke(3, "UpgradeRace", "Change")
-            end)
-            task.wait(0.3)
+            local ghoulChangeOk, ghoulChangeResult =
+                SafeRemote.invoke(3, "Ectoplasm", "Change", 4)
+
+            task.wait(0.8)
 
             if isCurrentRaceTarget(targetCanonical) then
-                return true, "matched_after_change"
+                return true, "matched_after_ghoul_change"
             end
 
-            pcall(function()
-                SafeRemote.invoke(3, "UpgradeRace", "Buy", 4)
-            end)
+            -- Không gọi Ectoplasm Buy ở MainRace: MainRace chỉ có nhiệm vụ đổi
+            -- về Ghoul đã sở hữu. Nếu chưa đổi được, vòng MainRace hiện tại sẽ
+            -- retry theo cooldown/attempt sẵn có, không chạm các flow khác.
+            if not ghoulCheckOk or not ghoulChangeOk then
+                Logger.warn(
+                    "[MAINRACE][Ghoul] Ectoplasm remote lỗi | BuyCheck="
+                        .. tostring(ghoulCheckResult)
+                        .. " | Change="
+                        .. tostring(ghoulChangeResult),
+                    "mainrace_ghoul_remote_error"
+                )
+            end
 
         elseif targetCanonical == "Cyborg" then
             -- Giữ nguyên chuỗi remote Cyborg của bản gốc.
