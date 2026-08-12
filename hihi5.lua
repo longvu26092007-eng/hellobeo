@@ -3357,8 +3357,24 @@ do
                 if dist > 5 or moved then
                     lastMoveT = tick()
                     lastMovePos = bhrp.Position
-                    -- khi M1 active: đứng gần NGANG boss (không cao 25 studs) §J5
-                    local offset = m1FallbackActive and CFrame.new(0, 2, 4) or CFrame.new(0, 4, 5)
+                    -- Mặc định giữ nguyên vị trí Human/Cake/Dough cũ.
+                    -- Ghoul Trial có thể truyền options.ghoulSafeHeight để đứng cao hơn một chút
+                    -- trên đầu quái, giảm bị mob chạm/đánh nhưng vẫn giữ trong tầm M1 fallback.
+                    local safeHeight = tonumber(options.ghoulSafeHeight)
+                    local offset
+                    if safeHeight and safeHeight > 0 then
+                        if m1FallbackActive then
+                            -- Khi watchdog cần M1 fallback, tạm hạ xuống trong tầm <=11 studs.
+                            -- Không giữ +20 ở nhánh này vì như vậy M1 sẽ nằm ngoài range và làm gãy fallback.
+                            offset = CFrame.new(0, math.min(9, math.max(2, safeHeight - 1)), 4)
+                        else
+                            -- Ghoul hover chính: offset cũ Y=4, tăng đúng +20 -> Y=24.
+                            offset = CFrame.new(0, safeHeight, 5)
+                        end
+                    else
+                        -- Hành vi cũ cho Human và các boss khác.
+                        offset = m1FallbackActive and CFrame.new(0, 2, 4) or CFrame.new(0, 4, 5)
+                    end
                     pcall(function() topos(bhrp.CFrame * offset) end)
                 end
             end
@@ -3733,6 +3749,10 @@ do
                     and (not race_trial_place or getdis(hrp.CFrame, race_trial_place.CFrame) < 1500) then
                     local ok, reason = CombatActions.attackBossAttempt(v, {
                         maxSeconds = 14,
+                        -- Chỉ Ghoul đứng cao hơn quái đúng +20 studs so với offset cũ.
+                        -- Hover chính cũ Y=4 -> mới Y=24. Khi M1 fallback kích hoạt sẽ hạ tạm về Y<=9 để M1 vẫn chạm.
+                        -- Human và các race/boss khác giữ nguyên hoàn toàn.
+                        ghoulSafeHeight = (myrace == "Ghoul") and 24 or nil,
                         phaseCheck = function() return templeState() ~= "ffup" end, -- vào FFA = phase đổi → dừng
                     })
                     DBG("[TRIAL-BOSS] " .. tostring(v.Name) .. " → " .. tostring(reason), ok and "ok" or "warn", "trial_boss")
